@@ -1,0 +1,18 @@
+# Virtual environment
+env/
+venv/
+*.pyc
+__pycache__/
+.DS_Store
+
+# IDE
+.idea/
+.vscode/
+*.swp
+
+# Sensitive data
+*.env
+config_private.py
+
+# OS files
+Thumbs.db
