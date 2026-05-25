@@ -26,6 +26,11 @@ class SignalProcessor:
         
         self.baseline_complete = False
         self.personal_averages = {}
+        self.artifacts_removed = {
+            'eda': 0,
+            'hr': 0,
+            'hrv': 0
+        }
         self.target_buffer_size = int(Config.BASELINE_SEC * Config.PIPELINE_RATE)
         
         current_dir = os.path.dirname(os.path.abspath(__file__))
@@ -119,9 +124,12 @@ class SignalProcessor:
             # Calculate final personal average from the cleaned data
             self.personal_averages[signal] = float(np.mean(clean_arr))
             
+            # Track artifacts removed
+            artifacts_count = len(arr) - len(clean_arr)
+            self.artifacts_removed[signal] = artifacts_count
+            
             # Diagnostic reporting
-            artifacts_removed = len(arr) - len(clean_arr)
-            print(f"  -> {signal.upper()}: Removed {artifacts_removed} artifacts. Baseline Avg = {self.personal_averages[signal]:.2f}")
+            print(f"  -> {signal.upper()}: Removed {artifacts_count} artifacts. Baseline Avg = {self.personal_averages[signal]:.2f}")
             
         self.baseline_complete = True
         
