@@ -31,6 +31,13 @@ class SignalProcessor:
             'hr': 0,
             'hrv': 0
         }
+        # Holds the 3-sigma-cleaned arrays so downstream code can compute
+        # a true noise-floor sigma against the personal baseline.
+        self.cleaned_baseline_buffers = {
+            'eda': None,
+            'hr': None,
+            'hrv': None
+        }
         self.target_buffer_size = int(Config.BASELINE_SEC * Config.PIPELINE_RATE)
         
         current_dir = os.path.dirname(os.path.abspath(__file__))
@@ -116,14 +123,18 @@ class SignalProcessor:
             mu = np.mean(arr)
             sigma = np.std(arr)
             
-            # 3-Sigma Filter logic: Keep only samples within mu ± 3*sigma
-            lower_bound = mu - (3 * sigma)
-            upper_bound = mu + (3 * sigma)
+            # Outlier filter: math-pipeline Step 3. Multiplier in Config.
+            k = Config.ARTIFACT_SIGMA_MULTIPLIER
+            lower_bound = mu - (k * sigma)
+            upper_bound = mu + (k * sigma)
             clean_arr = arr[(arr >= lower_bound) & (arr <= upper_bound)]
-            
+
+            # Persist the cleaned arrays so fusion can compute a true sigma floor
+            self.cleaned_baseline_buffers[signal] = clean_arr
+
             # Calculate final personal average from the cleaned data
             self.personal_averages[signal] = float(np.mean(clean_arr))
-            
+
             # Track artifacts removed
             artifacts_count = len(arr) - len(clean_arr)
             self.artifacts_removed[signal] = artifacts_count

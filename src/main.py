@@ -32,7 +32,10 @@ def run_pipeline():
     
     tick_duration = 1.0 / Config.PIPELINE_RATE
     thresholds_locked = False
-    
+    live_ticks = 0
+    live_tick_cap = (int(Config.LIVE_PHASE_MAX_SEC * Config.PIPELINE_RATE)
+                     if Config.LIVE_PHASE_MAX_SEC else None)
+
     try:
         while True:
             start_time = time.time()
@@ -51,54 +54,83 @@ def run_pipeline():
             # Update session phase
             session.update_phase_baseline(is_baseline_ready)
             
-            # --- PHASE 3: FUSION & OUTPUT (Only runs after 120s) ---
+            # --- PHASE 3: FUSION (Only runs after 120s) ---
             if is_baseline_ready:
                 # Lock thresholds the very first tick the baseline finishes
                 if not thresholds_locked:
-                    # For this implementation, we map a baseline sigma approximation 
-                    # based on the observed data. (Standardizing at 1.5 variance)
-                    fusion.set_thresholds(sigma_baseline=1.5)
+                    # Dynamic sigma derived from the cleaned baseline buffers
+                    sigma = fusion.calculate_baseline_sigma(
+                        proc.cleaned_baseline_buffers,
+                        proc.personal_averages
+                    )
+                    fusion.set_thresholds(sigma_baseline=sigma)
                     thresholds_locked = True
-                    
+
                     # Store baseline stats in session
                     session.set_baseline_stats(
                         proc.personal_averages,
                         proc.artifacts_removed if hasattr(proc, 'artifacts_removed') else {'eda': 0, 'hr': 0, 'hrv': 0}
                     )
                     session.set_thresholds(fusion.thresh_mild, fusion.thresh_high)
-                
+
                 # Calculate immediate stress
                 s_inst = fusion.compute_s_instant(smoothed_vector, proc.personal_averages)
-                
+
                 # Smooth the stress index and evaluate kinematic state
-                s_t, state, dashboard = fusion.evaluate_state(s_inst)
-                
+                s_t, state, dashboard, y_t = fusion.evaluate_state(s_inst)
+
                 # Record stress metrics in session
                 session.record_stress_metric(s_inst, s_t, state, dashboard)
-                
-                # Broadcast to Unity
-                out.broadcast_state(s_t, state, dashboard)
-            
-            # Log sample to output file (every tick during LIVE phase)
-            if is_baseline_ready and len(session.stress_history['s_t']) > 0:
-                s_t = session.stress_history['s_t'][-1]
-                state = session.stress_history['state'][-1]
-                dashboard_score = session.stress_history['dashboard_score'][-1]
-                s_inst = session.stress_history['s_instant'][-1]
+            else:
+                # During the 120s baseline we still need to feed the dashboard
+                # so it doesn't freeze. Send safe defaults for the stress channels
+                # and the actual smoothed signals so the raw charts come alive.
+                s_inst = 0.0
+                s_t = 0.0
+                state = "calm"
+                dashboard = 0.0
+                y_t = 25.0
+
+            # --- PHASE 4: OUTPUT (every tick, baseline or live) ---
+            # Baselines and thresholds are zero until proc finishes calibration.
+            avg_eda = proc.personal_averages.get('eda', 0.0) if proc.personal_averages else 0.0
+            avg_hr = proc.personal_averages.get('hr', 0.0) if proc.personal_averages else 0.0
+            avg_hrv = proc.personal_averages.get('hrv', 0.0) if proc.personal_averages else 0.0
+            out.broadcast_state(
+                s_t, state, dashboard, y_t,
+                smoothed_vector[0], smoothed_vector[1], smoothed_vector[2],
+                avg_eda, avg_hr, avg_hrv,
+                fusion.thresh_mild, fusion.thresh_high,
+            )
+
+            # Log sample to output file
+            if is_baseline_ready:
                 session.log_sample(smoothed_vector[0], smoothed_vector[1], smoothed_vector[2],
-                                 s_inst, s_t, state, dashboard_score)
+                                   s_inst, s_t, state, dashboard)
             else:
                 # During baseline, just log signals
                 session.log_sample(smoothed_vector[0], smoothed_vector[1], smoothed_vector[2])
                 
-            # --- PHASE 4: STRICT LATENCY ENFORCEMENT ---
+            # --- PHASE 5: SESSION END CAP ---
+            if is_baseline_ready:
+                live_ticks += 1
+                if live_tick_cap is not None and live_ticks >= live_tick_cap:
+                    print("\n==================================================")
+                    print(f"   SESSION COMPLETE ({Config.LIVE_PHASE_MAX_SEC}s LIVE cap reached)")
+                    print("==================================================")
+                    break
+
+            # --- PHASE 6: STRICT LATENCY ENFORCEMENT ---
             elapsed = time.time() - start_time
             sleep_time = tick_duration - elapsed
-            
+
             if sleep_time > 0:
                 time.sleep(sleep_time)
             # We don't print frame drops here since acquisition.py handles tracking
-                
+
+        # Reached only via session-end cap (not KeyboardInterrupt)
+        print(f"[SESSION] Output saved to: {os.path.basename(session.output_file_path)}")
+
     except KeyboardInterrupt:
         print("\n==================================================")
         print("      PIPELINE TERMINATED BY OPERATOR             ")

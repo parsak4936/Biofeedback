@@ -106,24 +106,31 @@ class SessionManager:
         filename = f"session_{self.session_timestamp}_{self.patient_info}.csv"
         self.output_file_path = os.path.join(data_dir, filename)
         
-        # Write CSV header
+        # Write CSV header — extended with session mode (per framework diagram:
+        # data logger logs "State + Session") and per-signal artifact counts.
         with open(self.output_file_path, 'w', newline='') as f:
-            f.write("timestamp,phase,patient_name,patient_id,eda,hr,hrv,s_instant,s_t,state,dashboard_score\n")
+            f.write("timestamp,phase,session_mode,patient_name,patient_id,"
+                    "eda,hr,hrv,s_instant,s_t,state,dashboard_score,"
+                    "artifacts_eda,artifacts_hr,artifacts_hrv\n")
         
         print(f"[SESSION] Output file: {filename}")
     
-    def log_sample(self, eda: float, hr: float, hrv: float, s_instant: float = None, 
+    def log_sample(self, eda: float, hr: float, hrv: float, s_instant: float = None,
                    s_t: float = None, state: str = None, dashboard_score: float = None):
         """Log a complete sample to the output CSV file."""
         timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S.%f")[:-3]
-        
+
         with open(self.output_file_path, 'a', newline='') as f:
-            f.write(f"{timestamp},{self.phase},{self.patient_name},{self.patient_id},"
+            f.write(f"{timestamp},{self.phase},{Config.SESSION_MODE},"
+                   f"{self.patient_name},{self.patient_id},"
                    f"{eda:.4f},{hr:.4f},{hrv:.4f},"
                    f"{s_instant if s_instant is not None else 0.0:.4f},"
                    f"{s_t if s_t is not None else 0.0:.4f},"
                    f"{state if state else 'unknown'},"
-                   f"{dashboard_score if dashboard_score is not None else 0.0:.2f}\n")
+                   f"{dashboard_score if dashboard_score is not None else 0.0:.2f},"
+                   f"{self.artifacts_removed.get('eda', 0)},"
+                   f"{self.artifacts_removed.get('hr', 0)},"
+                   f"{self.artifacts_removed.get('hrv', 0)}\n")
     
     def record_raw_sample(self, eda: float, hr: float, hrv: float):
         """Record a raw signal sample from acquisition."""

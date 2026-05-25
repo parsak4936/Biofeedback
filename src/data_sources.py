@@ -12,7 +12,77 @@ import time
 import os
 from abc import ABC, abstractmethod
 from pylsl import StreamInfo, StreamOutlet
+from scipy.signal import butter, filtfilt, find_peaks
 from config import Config
+
+
+def derive_hr_hrv_from_ecg(ecg_mv: np.ndarray, fs_hz: float) -> tuple:
+    """
+    Convert a 1000Hz ECG trace into per-sample HR (BPM) and RMSSD (ms) arrays.
+
+    Pipeline per the math-pipeline document, Step 0:
+      1. Bandpass 5-15 Hz (QRS energy band).
+      2. find_peaks with minimum RR refractory.
+      3. HR = 60_000 / RR_ms, held until the next beat (Zero-Order Hold).
+      4. RMSSD = sqrt(mean(diff(RR)^2)) over a rolling 10 s RR window.
+    """
+    if len(ecg_mv) < int(fs_hz):
+        # Too short to filter — return constants matching old defaults.
+        n = len(ecg_mv)
+        return (np.full(n, Config.MOCK_HR_BASE, dtype=np.float32),
+                np.full(n, Config.MOCK_HRV_BASE, dtype=np.float32),
+                np.array([], dtype=np.int64))
+
+    nyq = 0.5 * fs_hz
+    b, a = butter(2,
+                  [Config.ECG_BANDPASS_LOW_HZ / nyq, Config.ECG_BANDPASS_HIGH_HZ / nyq],
+                  btype='band')
+    ecg_filt = filtfilt(b, a, ecg_mv)
+
+    # Peak amplitude threshold: 60% of the 99th-percentile (robust to outliers).
+    height = 0.6 * np.percentile(np.abs(ecg_filt), 99)
+    distance = int(Config.ECG_MIN_RR_MS * fs_hz / 1000)
+    peaks, _ = find_peaks(ecg_filt, height=height, distance=distance)
+
+    n = len(ecg_mv)
+    hr_series = np.full(n, Config.MOCK_HR_BASE, dtype=np.float32)
+    hrv_series = np.full(n, Config.MOCK_HRV_BASE, dtype=np.float32)
+
+    if len(peaks) < 3:
+        # Not enough beats to be useful — keep defaults.
+        return hr_series, hrv_series, peaks
+
+    rr_ms = np.diff(peaks) * (1000.0 / fs_hz)
+    # Drop RR intervals far from the median — missed or extra detections inflate
+    # RMSSD wildly. Keep only RRs within 50% of the median.
+    median_rr = float(np.median(rr_ms))
+    rr_mask = np.abs(rr_ms - median_rr) <= 0.5 * median_rr
+    rr_ms_clean = rr_ms.copy()
+    rr_ms_clean[~rr_mask] = median_rr  # substitute median for bad RRs
+    hr_per_beat = 60_000.0 / rr_ms_clean
+
+    # RMSSD over a rolling 10 s window of RR intervals.
+    window_n = max(2, int(Config.RMSSD_WINDOW_SEC * 1000 / median_rr))
+
+    # Hold each beat's HR/RMSSD from that peak until the next.
+    for i in range(len(peaks) - 1):
+        start = peaks[i]
+        end = peaks[i + 1]
+        hr_series[start:end] = hr_per_beat[i]
+
+        window_lo = max(0, i + 1 - window_n)
+        window_rr = rr_ms_clean[window_lo:i + 1]
+        if len(window_rr) >= 2:
+            diffs = np.diff(window_rr)
+            hrv_series[start:end] = float(np.sqrt(np.mean(diffs ** 2)))
+
+    # Carry the final value forward to the end of the array.
+    if len(peaks) >= 1:
+        last = peaks[-1]
+        hr_series[last:] = hr_series[last - 1] if last > 0 else Config.MOCK_HR_BASE
+        hrv_series[last:] = hrv_series[last - 1] if last > 0 else Config.MOCK_HRV_BASE
+
+    return hr_series, hrv_series, peaks
 
 
 class DataSource(ABC):
@@ -56,11 +126,23 @@ class MockDataSource(DataSource):
         # Load and convert the data
         data = np.loadtxt(data_path, skiprows=3)
         self.rows, self.columns = data.shape
-        
-        # Conversion formulas from hardware specs
+
+        # Conversion formulas from PLUX hardware spec sheet:
+        #   EDA (μS) = (CH1 / 65536) * 3 / 0.132
+        #   ECG (mV) = ((CH2 / 65536) - 0.5) * 3 / 1100 * 1000
         self.eda_uS = (data[:, 2] / 65536) * 3.0 / 0.132
         self.ecg_mV = ((data[:, 3] / 65536) - 0.5) * 3.0 / 1100 * 1000
-        
+
+        # Derive HR (BPM) and HRV/RMSSD (ms) from the ECG trace once at load time.
+        # This matches the "Python Middleware" box in the framework diagram and
+        # the math-pipeline Step 0 description.
+        print("[DATA SOURCE] Deriving HR and HRV/RMSSD from ECG via R-peak detection...")
+        self.hr_series, self.hrv_series, r_peaks = derive_hr_hrv_from_ecg(
+            self.ecg_mV, fs_hz=1000.0
+        )
+        print(f"[DATA SOURCE] Detected {len(r_peaks)} R-peaks "
+              f"(~{60.0 * len(r_peaks) / (self.rows / 1000.0):.1f} BPM avg)")
+
         # Index for cycling through data
         self.current_index = 0
         
@@ -79,23 +161,23 @@ class MockDataSource(DataSource):
         print(f"[DATA SOURCE] Broadcasting on LSL '{Config.STREAM_NAME}' at 1000Hz...")
     
     def get_next_sample(self) -> tuple:
-        """Returns next EDA/HR/HRV from mock file."""
+        """Returns next EDA/HR/HRV derived from the mock OpenSignals file."""
         if self.current_index >= self.rows:
             self.current_index = 0  # Loop back to start
-        
-        fake_hr = Config.MOCK_HR_BASE
-        fake_hrv = Config.MOCK_HRV_BASE
-        
-        eda = self.eda_uS[self.current_index]
-        sample = [eda, fake_hr, fake_hrv]
-        
+
+        i = self.current_index
+        eda = float(self.eda_uS[i])
+        hr = float(self.hr_series[i])
+        hrv = float(self.hrv_series[i])
+        sample = [eda, hr, hrv]
+
         self.outlet.push_sample(sample)
         self.current_index += 1
-        
+
         # Sleep 1ms to simulate 1000Hz hardware
         time.sleep(0.001)
-        
-        return (eda, fake_hr, fake_hrv)
+
+        return (eda, hr, hrv)
     
     def cleanup(self):
         print("[DATA SOURCE] MOCK: Streaming terminated.")
