@@ -32,6 +32,22 @@ class ClinicalDashboard:
             print(f"[ERROR] Could not find stream '{Config.OUT_STREAM_NAME}'")
             print(f"Make sure main.py is running.")
             raise RuntimeError(f"LSL stream not found: {str(e)}")
+
+        # 1b. Connect to optional ECG side stream (best-effort, non-blocking).
+        # If the data source isn't publishing ECG (e.g. real PLUX mode without
+        # an upstream ECG publisher), the chart just stays empty.
+        self.ecg_inlet = None
+        try:
+            from pylsl import resolve_byprop
+            ecg_streams = resolve_byprop("name", Config.ECG_STREAM_NAME, timeout=2.0)
+            if ecg_streams:
+                self.ecg_inlet = StreamInlet(ecg_streams[0])
+                print(f"[DASHBOARD] Connected to ECG side stream "
+                      f"'{Config.ECG_STREAM_NAME}'.")
+            else:
+                print(f"[DASHBOARD] ECG side stream not present; chart will stay empty.")
+        except Exception as e:
+            print(f"[DASHBOARD] ECG side stream lookup failed ({e}); skipping.")
         
         # 2. Setup the main PyQt5 application and window
         self.app = QApplication.instance()
@@ -57,15 +73,25 @@ class ClinicalDashboard:
         self.plot_stress = self._create_stress_plot()
         charts_layout.addWidget(self.plot_stress, 2)  # 2x wider
         
-        # Right: Signal Charts (stacked)
+        # Right: Signal Charts (stacked) — fixed Y bounds prevent the
+        # "x0.001" auto-zoom artifact when smoothed signals are nearly constant.
         right_layout = QVBoxLayout()
-        self.plot_eda = self._create_signal_plot("EDA (μS)", "#00ff00")
-        self.plot_hr = self._create_signal_plot("HR (BPM)", "#ff6600")
-        self.plot_hrv = self._create_signal_plot("HRV (ms)", "#0099ff")
-        
+        self.plot_eda = self._create_signal_plot("EDA (μS)", "#00ff00",
+                                                  y_range=Config.EDA_PLOT_DEFAULT_RANGE)
+        self.plot_hr = self._create_signal_plot("HR (BPM)", "#ff6600",
+                                                 y_range=Config.HR_PLOT_DEFAULT_RANGE)
+        self.plot_hrv = self._create_signal_plot("HRV (ms)", "#0099ff",
+                                                  y_range=Config.HRV_PLOT_DEFAULT_RANGE)
+        # ECG waveform — same chart style, wider X window (drawn at native rate).
+        self.plot_ecg = self._create_signal_plot("ECG (mV)", "#ff00ff",
+                                                  y_range=(-1.5, 1.5))
+        # Track whether we've already recentered the charts around the locked baseline.
+        self._signal_ranges_centered = False
+
         right_layout.addWidget(self.plot_eda)
         right_layout.addWidget(self.plot_hr)
         right_layout.addWidget(self.plot_hrv)
+        right_layout.addWidget(self.plot_ecg)
         
         right_widget = QWidget()
         right_widget.setLayout(right_layout)
@@ -84,6 +110,10 @@ class ClinicalDashboard:
         self.eda_data = {'x': [], 'y': []}
         self.hr_data = {'x': [], 'y': []}
         self.hrv_data = {'x': [], 'y': []}
+        # ECG buffer: filled at the side-stream's native rate (200 or 1000 Hz),
+        # so it scrolls in raw-sample units, not pipeline-ticks.
+        self.ecg_buffer = []
+        self.ecg_sample_index = 0
         self.tick_counter = 0
         self.max_history = Config.DASHBOARD_MAX_HISTORY
         self.view_width = Config.DASHBOARD_VIEW_WIDTH
@@ -148,11 +178,27 @@ class ClinicalDashboard:
         plot_widget.setMouseEnabled(x=True, y=False)
         plot_widget.enableAutoRange(axis=pg.ViewBox.XAxis, enable=False)
         plot_widget.enableAutoRange(axis=pg.ViewBox.YAxis, enable=True)
+        plot_widget.setMenuEnabled(False)
+        plot_widget.hideButtons()
         plot_widget.setStyleSheet("border: 1px solid #333;")
         
-        # Threshold lines (will be updated when set)
-        self.mild_line = pg.InfiniteLine(angle=0, pen=pg.mkPen('#ffff00', style=pg.QtCore.Qt.DashLine, width=2))
-        self.high_line = pg.InfiniteLine(angle=0, pen=pg.mkPen('#ff0000', style=pg.QtCore.Qt.DashLine, width=2))
+        # Threshold lines — labels embed the numeric value directly on the line
+        # so the operator can read "MILD: 15.27" / "HIGH: 26.19" without
+        # cross-referencing another panel. Positions itself near the right edge.
+        self.mild_line = pg.InfiniteLine(
+            angle=0,
+            pen=pg.mkPen('#ffff00', style=pg.QtCore.Qt.DashLine, width=2),
+            label='MILD = {value:0.2f}',
+            labelOpts={'color': '#ffff00', 'position': 0.92,
+                       'movable': False, 'fill': (0, 0, 0, 160)},
+        )
+        self.high_line = pg.InfiniteLine(
+            angle=0,
+            pen=pg.mkPen('#ff0000', style=pg.QtCore.Qt.DashLine, width=2),
+            label='HIGH = {value:0.2f}',
+            labelOpts={'color': '#ff0000', 'position': 0.92,
+                       'movable': False, 'fill': (0, 0, 0, 160)},
+        )
         plot_widget.addItem(self.mild_line)
         plot_widget.addItem(self.high_line)
         
@@ -167,8 +213,9 @@ class ClinicalDashboard:
         
         return plot_widget
     
-    def _create_signal_plot(self, title: str, color: str):
-        """Create individual signal chart (EDA, HR, HRV)."""
+    def _create_signal_plot(self, title: str, color: str, y_range=None):
+        """Create individual signal chart (EDA, HR, HRV) with a fixed Y range
+        so flat resting data doesn't get auto-zoomed to floating-point noise."""
         plot_widget = pg.PlotWidget(
             title=title,
             labels={'left': title, 'bottom': 'Time (samples)'}
@@ -176,14 +223,22 @@ class ClinicalDashboard:
         plot_widget.showGrid(x=True, y=True)
         plot_widget.setMouseEnabled(x=True, y=False)
         plot_widget.enableAutoRange(axis=pg.ViewBox.XAxis, enable=False)
+        plot_widget.enableAutoRange(axis=pg.ViewBox.YAxis, enable=False)
+        # Hide the pyqtgraph default context menu + "A" auto-scale button so the
+        # operator can't accidentally re-enable autorange mid-session.
+        plot_widget.setMenuEnabled(False)
+        plot_widget.hideButtons()
+        if y_range is not None:
+            plot_widget.setYRange(*y_range, padding=0)
         plot_widget.setStyleSheet("border: 1px solid #333;")
-        
+
         curve = plot_widget.plot([], [], pen=pg.mkPen(color, width=1.5))
-        
-        # Store curve reference for updating
+
+        # Store curve reference + its desired Y range for re-locking each tick.
         plot_widget.curve = curve
         plot_widget.title_text = title
-        
+        plot_widget.locked_y_range = y_range
+
         return plot_widget
     
     def _create_metrics_panel(self):
@@ -217,9 +272,14 @@ class ClinicalDashboard:
         
         self.label_s_t = QLabel("S_t: -- ")
         self.label_s_t.setFont(QFont("Arial", 10))
-        
+
+        self.label_thresholds = QLabel("Thresholds: MILD = --, HIGH = --")
+        self.label_thresholds.setFont(QFont("Arial", 10))
+        self.label_thresholds.setStyleSheet("color: #cccccc;")
+
         state_layout.addWidget(self.label_state)
         state_layout.addWidget(self.label_s_t)
+        state_layout.addWidget(self.label_thresholds)
         state_group.setLayout(state_layout)
         layout.addWidget(state_group)
         
@@ -233,8 +293,19 @@ class ClinicalDashboard:
         self.label_time_stress = QLabel("Time STRESSED: 00:00")
         self.label_time_ultra = QLabel("Time ULTRA: 00:00")
 
+        # Data-quality row — these are diagnostic counters from acquisition.
+        # They stay at zero on a clean session; any nonzero value tells the
+        # operator something to investigate (electrode contact, noise, etc).
+        self.label_qa_header = QLabel("─── Data Quality ───")
+        self.label_qa_header.setStyleSheet("color: #888888;")
+        self.label_qa_invalid = QLabel("Invalid samples: 0")
+        self.label_qa_oor = QLabel("Out-of-range:    0")
+        self.label_qa_disc = QLabel("Disconnects:     0")
+
         for label in [self.label_samples, self.label_time_calm,
-                      self.label_time_stress, self.label_time_ultra]:
+                      self.label_time_stress, self.label_time_ultra,
+                      self.label_qa_header,
+                      self.label_qa_invalid, self.label_qa_oor, self.label_qa_disc]:
             label.setFont(QFont("Arial", 10))
             stats_layout.addWidget(label)
 
@@ -252,10 +323,10 @@ class ClinicalDashboard:
         """Called at 50Hz to fetch and display latest data."""
         sample, timestamp = self.inlet.pull_sample(timeout=0.0)
 
-        if not sample or len(sample) < 12:
+        if not sample or len(sample) < 18:
             return
 
-        # 12-channel layout: see UnityBridge.CHANNELS
+        # 18-channel layout: see UnityBridge.CHANNELS in output.py
         s_t = sample[0]
         state_enum = sample[1]
         dashboard_score = sample[2]
@@ -268,6 +339,14 @@ class ClinicalDashboard:
         avg_hrv = sample[9]
         thresh_mild = sample[10]
         thresh_high = sample[11]
+        # baseline_status, elapsed_baseline_sec, mode_enum (12,13,14) — Unity bound.
+        _baseline_status = sample[12]
+        _elapsed_baseline_sec = sample[13]
+        _mode_enum = sample[14]
+        # QA counters (15,16,17) — drive the data-quality panel below.
+        qa_invalid = int(sample[15])
+        qa_out_of_range = int(sample[16])
+        qa_disconnects = int(sample[17])
 
         # ============================================
         # DETERMINE STATE & COLORS
@@ -327,6 +406,35 @@ class ClinicalDashboard:
                 buf['y'].pop(0)
             plot.curve.setData(buf['x'], buf['y'])
             plot.setXRange(max(0, self.tick_counter - self.view_width), self.tick_counter)
+            # Re-lock the Y range every tick so nothing (mouse zoom, autorange
+            # button, internal pyqtgraph state changes) can collapse the axis.
+            if plot.locked_y_range is not None:
+                plot.setYRange(*plot.locked_y_range, padding=0)
+
+        # ============================================
+        # UPDATE ECG WAVEFORM (from side stream)
+        # ============================================
+        if self.ecg_inlet is not None:
+            ecg_samples, _ = self.ecg_inlet.pull_chunk(timeout=0.0)
+            if ecg_samples:
+                # Each entry is [mv]; flatten and append.
+                for s in ecg_samples:
+                    self.ecg_buffer.append(float(s[0]))
+                    self.ecg_sample_index += 1
+                # Trim to history depth
+                if len(self.ecg_buffer) > Config.ECG_PLOT_MAX_HISTORY:
+                    excess = len(self.ecg_buffer) - Config.ECG_PLOT_MAX_HISTORY
+                    self.ecg_buffer = self.ecg_buffer[excess:]
+                # X-axis = absolute sample index, so the plot scrolls smoothly.
+                start_idx = self.ecg_sample_index - len(self.ecg_buffer)
+                xs = list(range(start_idx, self.ecg_sample_index))
+                self.plot_ecg.curve.setData(xs, self.ecg_buffer)
+                self.plot_ecg.setXRange(
+                    max(0, self.ecg_sample_index - Config.ECG_PLOT_MAX_HISTORY),
+                    self.ecg_sample_index
+                )
+                if self.plot_ecg.locked_y_range is not None:
+                    self.plot_ecg.setYRange(*self.plot_ecg.locked_y_range, padding=0)
 
         # ============================================
         # UPDATE BOTTOM PANEL
@@ -341,11 +449,36 @@ class ClinicalDashboard:
             self.label_baseline_hr.setText(f"HR: {avg_hr:.2f} BPM")
             self.label_baseline_hrv.setText(f"HRV: {avg_hrv:.2f} ms")
 
-        # Threshold lines on the stress chart (drawn once they're set)
-        if thresh_mild > 0.0:
+            # Recenter the per-signal charts around the locked baseline so the
+            # Y-axis covers a clinically useful range, not floating-point noise.
+            # We update `locked_y_range` so the per-tick re-lock keeps these new
+            # bounds instead of snapping back to the pre-baseline defaults.
+            if not self._signal_ranges_centered:
+                eda_range = (max(0.0, avg_eda - Config.EDA_PLOT_HALFRANGE),
+                             avg_eda + Config.EDA_PLOT_HALFRANGE)
+                hr_range = (max(0.0, avg_hr - Config.HR_PLOT_HALFRANGE),
+                            avg_hr + Config.HR_PLOT_HALFRANGE)
+                hrv_range = (max(0.0, avg_hrv - Config.HRV_PLOT_HALFRANGE),
+                             avg_hrv + Config.HRV_PLOT_HALFRANGE)
+                self.plot_eda.locked_y_range = eda_range
+                self.plot_hr.locked_y_range = hr_range
+                self.plot_hrv.locked_y_range = hrv_range
+                self.plot_eda.setYRange(*eda_range, padding=0)
+                self.plot_hr.setYRange(*hr_range, padding=0)
+                self.plot_hrv.setYRange(*hrv_range, padding=0)
+                self._signal_ranges_centered = True
+
+        # Threshold lines on the stress chart (drawn once they're set).
+        # Per math-pipeline Step 8 these are constants once the baseline locks,
+        # so we set them on first arrival and never touch them again.
+        if thresh_mild > 0.0 and self.mild_line.value() != thresh_mild:
             self.mild_line.setValue(thresh_mild)
-        if thresh_high > 0.0:
+        if thresh_high > 0.0 and self.high_line.value() != thresh_high:
             self.high_line.setValue(thresh_high)
+        if thresh_mild > 0.0 and thresh_high > 0.0:
+            self.label_thresholds.setText(
+                f"Thresholds: MILD = {thresh_mild:.2f}, HIGH = {thresh_high:.2f}"
+            )
 
         # Session Statistics
         # Only accumulate per-state time once thresholds are locked (LIVE phase);
@@ -367,6 +500,18 @@ class ClinicalDashboard:
         self.label_time_calm.setText(f"Time CALM: {_fmt(self.ticks_calm)}")
         self.label_time_stress.setText(f"Time STRESSED: {_fmt(self.ticks_stressed)}")
         self.label_time_ultra.setText(f"Time ULTRA: {_fmt(self.ticks_ultra)}")
+
+        # Data-quality counters — nonzero values are color-flagged so the
+        # operator notices mid-session without scanning the terminal.
+        def _qa_color(n):
+            return "color: #ff6666;" if n > 0 else "color: #888888;"
+
+        self.label_qa_invalid.setText(f"Invalid samples: {qa_invalid}")
+        self.label_qa_invalid.setStyleSheet(_qa_color(qa_invalid))
+        self.label_qa_oor.setText(f"Out-of-range:    {qa_out_of_range}")
+        self.label_qa_oor.setStyleSheet(_qa_color(qa_out_of_range))
+        self.label_qa_disc.setText(f"Disconnects:     {qa_disconnects}")
+        self.label_qa_disc.setStyleSheet(_qa_color(qa_disconnects))
 
         # ============================================
         # UPDATE TOP PANEL

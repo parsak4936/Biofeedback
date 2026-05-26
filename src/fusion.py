@@ -47,11 +47,24 @@ class FusionEngine:
         """Public hook for runtime mode changes (e.g., from a Unity LSL handshake)."""
         self._apply_mode(mode_name)
 
+    # Fallback σ when baseline computation degenerates (e.g. sensor was flat
+    # for the whole 120 s). Keeps the system in a usable state instead of
+    # locking thresholds at 0 (which would label every tick "ultra_stressed").
+    SIGMA_FALLBACK = 1.5
+
     def set_thresholds(self, sigma_baseline: float):
         """
         Locks in the statistical boundaries for the session based on resting variance.
         Multipliers are configured in Config (math-pipeline Step 8).
         """
+        # Guard: degenerate baseline (σ=0 or near-zero) would make every live
+        # tick read as ultra-stressed. Fall back to a conservative default and
+        # log loudly so the operator knows the calibration was unreliable.
+        if sigma_baseline is None or sigma_baseline <= 1e-6:
+            print(f"[FUSION] WARN: σ_baseline={sigma_baseline} is degenerate. "
+                  f"Using fallback σ={self.SIGMA_FALLBACK}.")
+            sigma_baseline = self.SIGMA_FALLBACK
+
         self.thresh_mild = Config.THRESH_MILD_K * sigma_baseline
         self.thresh_high = Config.THRESH_HIGH_K * sigma_baseline
         print(f"[FUSION] Thresholds Locked -> Mild: {self.thresh_mild:.2f} | High: {self.thresh_high:.2f}")

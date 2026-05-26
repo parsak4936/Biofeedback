@@ -18,8 +18,9 @@ Legend: ✅ implemented · 🟡 partial / interpretation diff · ❌ missing
 | Step | Requirement | Status | Where |
 |------|-------------|--------|-------|
 | 0 | LSL transport, 50 Hz internal loop, ZOH | ✅ | [acquisition.py](src/acquisition.py), [streamer.py](src/streamer.py) |
-| 0 | EDA in μS, ECG in mV (PLUX hardware conversions) | ✅ | [data_sources.py:78-83](src/data_sources.py) |
-| 0 | HR derived from R-peak detection on ECG | ✅ | [data_sources.py:derive_hr_hrv_from_ecg](src/data_sources.py) |
+| 0 | EDA in μS, ECG in mV (PLUX hardware conversions) | ✅ | [data_sources.py](src/data_sources.py) |
+| 0 | OpenSignals header is parsed — sampling rate AND channel-order (ECG vs EDA position) auto-detected per file | ✅ | [data_sources.py:parse_opensignals_header](src/data_sources.py) |
+| 0 | HR derived from R-peak detection on ECG (uses file's native fs) | ✅ | [data_sources.py:derive_hr_hrv_from_ecg](src/data_sources.py) |
 | 0 | HRV/RMSSD from 10 s rolling RR window | 🟡 | We update HRV per beat with a 10 s window (≈1 Hz update). Spec wording suggests *holding* HRV constant for ~10 s between updates. Mathematically equivalent for stress fusion; functionally slightly more responsive. Acceptable engineering choice. |
 | 1 | EMA smoothing per signal | ✅ | [processing.py:_apply_ema](src/processing.py) |
 | 1 | α_HR=0.10, α_HRV=0.05, α_EDA=0.05 | ✅ | [config.py](src/config.py) |
@@ -171,6 +172,12 @@ Every dial in the system, in one place. All in [src/config.py](src/config.py) un
 |------|---------|--------|
 | `DASHBOARD_MAX_HISTORY` | `500` | Samples kept in each chart buffer |
 | `DASHBOARD_VIEW_WIDTH` | `300` | Visible window width (samples) on auto-scrolling charts |
+| `EDA_PLOT_DEFAULT_RANGE` | `(0, 25)` μS | Y bounds for the EDA chart before baseline locks |
+| `HR_PLOT_DEFAULT_RANGE` | `(40, 180)` BPM | Y bounds for the HR chart before baseline locks |
+| `HRV_PLOT_DEFAULT_RANGE` | `(0, 200)` ms | Y bounds for the HRV chart before baseline locks |
+| `EDA_PLOT_HALFRANGE` | `3.0` μS | After baseline locks, EDA chart spans `avg_eda ± halfrange` |
+| `HR_PLOT_HALFRANGE` | `25.0` BPM | After baseline locks, HR chart spans `avg_hr ± halfrange` |
+| `HRV_PLOT_HALFRANGE` | `30.0` ms | After baseline locks, HRV chart spans `avg_hrv ± halfrange` |
 | (hardcoded) RGB in `dashboard.py:152-154` | — | calm/stressed/ultra background colors. Move to Config for theming. |
 
 ### LSL output

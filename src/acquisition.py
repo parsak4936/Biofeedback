@@ -1,11 +1,24 @@
 # src/acquisition.py
 
+import collections
+import math
 import time
 from pylsl import resolve_stream, StreamInlet
 from config import Config
 import csv
 import datetime
 import os
+
+
+def _is_valid_number(x: float) -> bool:
+    """Reject NaN, +/-Inf, and obviously corrupt sentinels."""
+    return isinstance(x, (int, float)) and math.isfinite(x)
+
+
+def _within(value: float, lo: float, hi: float) -> bool:
+    return lo <= value <= hi
+
+
 class BiofeedbackAcquisition:
     """
     Manages the Lab Streaming Layer (LSL) connection and data ingestion.
@@ -16,12 +29,25 @@ class BiofeedbackAcquisition:
     def __init__(self):
         self.inlet = self._connect_to_stream()
         self.tick_counter = 0
-        self.stale_tick_counter = 0  # NEW: Tracks consecutive empty pulls
+        self.stale_tick_counter = 0  # consecutive empty pulls
         # State variables for Zero-Order Hold (ZOH)
         # These hold the most recent value if the stream has no new data on a given tick
         self.latest_eda = 0.0
         self.latest_hr = 0.0
         self.latest_hrv = 0.0
+
+        # Diagnostics counters — flow into CODE_AUDIT visibility.
+        self.invalid_sample_count = 0       # NaN / Inf
+        self.out_of_range_count = 0         # outside physiological bounds
+        self.disconnect_warnings_issued = 0  # constant-signal episodes
+
+        # Rolling buffers used to detect electrode disconnect (signal pinned).
+        window_n = int(Config.DISCONNECT_WINDOW_SEC * Config.PIPELINE_RATE)
+        self._var_buffers = {
+            'eda': collections.deque(maxlen=window_n),
+            'hr':  collections.deque(maxlen=window_n),
+            'hrv': collections.deque(maxlen=window_n),
+        }
         
         # Diagnostic tracking
         self.tick_counter = 0
@@ -56,26 +82,54 @@ class BiofeedbackAcquisition:
 
     def get_synchronized_sample(self) -> list:
         """
-        Pulls data from the LSL stream. 
-        If new data is present, updates the state and resets the stale counter. 
-        If no data is present, relies on Zero-Order Hold and increments the stale counter.
-        Throws an error if the stream goes silent beyond the configured threshold.
+        Pulls data from the LSL stream and returns the LATEST value.
+
+        Walkthrough Step 0: "at every tick, ask: what is the latest available
+        value for HR / HRV / EDA?" We drain the inlet with pull_chunk() and
+        take the most recent sample. This is critical when the hardware rate
+        (200 or 1000 Hz) exceeds the pipeline rate (50 Hz) — otherwise the
+        LSL inlet buffers samples faster than we consume them, and we'd end
+        up reading minutes of stale data behind real time.
         """
-        sample, timestamp = self.inlet.pull_sample(timeout=0.0)
-        
-        if sample:
-            # New data arrived; update our holding variables
-            self.latest_eda = sample[0]
-            self.latest_hr = sample[1]
-            self.latest_hrv = sample[2]
-            
+        # Drain everything available in the inlet (zero-block).
+        samples, timestamps = self.inlet.pull_chunk(timeout=0.0)
+
+        if samples:
+            # Use the most recent sample only
+            latest = samples[-1]
+            new_eda, new_hr, new_hrv = float(latest[0]), float(latest[1]), float(latest[2])
+
+            # ---- Sample validation ----
+            # 1. NaN / Inf rejection: skip the bad sample, hold previous value.
+            if not (_is_valid_number(new_eda) and _is_valid_number(new_hr)
+                    and _is_valid_number(new_hrv)):
+                self.invalid_sample_count += 1
+                status = "NAN_REJ  "
+            # 2. Physiological out-of-range rejection: same — hold previous.
+            elif not (_within(new_eda, Config.EDA_MIN_uS, Config.EDA_MAX_uS)
+                      and _within(new_hr, Config.HR_MIN_BPM, Config.HR_MAX_BPM)
+                      and _within(new_hrv, Config.HRV_MIN_MS, Config.HRV_MAX_MS)):
+                self.out_of_range_count += 1
+                status = "OOR_REJ  "
+            else:
+                self.latest_eda = new_eda
+                self.latest_hr = new_hr
+                self.latest_hrv = new_hrv
+                status = "NEW_DATA "
+
+            # ---- Electrode-disconnect detection ----
+            # Track variance over a rolling window; warn if a signal pins flat.
+            self._var_buffers['eda'].append(self.latest_eda)
+            self._var_buffers['hr'].append(self.latest_hr)
+            self._var_buffers['hrv'].append(self.latest_hrv)
+            self._check_disconnect()
+
             self.stale_tick_counter = 0  # Reset the deadman's switch
-            status = "NEW_DATA "
         else:
             # No new data; rely on the Zero-Order Hold
             self.stale_tick_counter += 1
             status = "HOLD_LAST"
-            
+
             # The Deadman's Switch Evaluation
             max_stale_ticks = Config.STREAM_TIMEOUT_SEC * Config.PIPELINE_RATE
             if self.stale_tick_counter > max_stale_ticks:
@@ -99,6 +153,44 @@ class BiofeedbackAcquisition:
             round(self.latest_eda, 4), round(self.latest_hr, 4), round(self.latest_hrv, 4)
         ])
         return [self.latest_eda, self.latest_hr, self.latest_hrv]
+
+    def _check_disconnect(self):
+        """
+        If any signal's variance over the last DISCONNECT_WINDOW_SEC seconds
+        falls below threshold, that electrode is almost certainly disconnected
+        or pinned to a rail. Print a one-shot warning per pin event.
+        """
+        # Only check once the buffer is full enough to be meaningful.
+        eda_buf = self._var_buffers['eda']
+        if len(eda_buf) < eda_buf.maxlen:
+            return
+
+        def _variance(buf):
+            n = len(buf)
+            if n < 2:
+                return float('inf')
+            mean = sum(buf) / n
+            return sum((x - mean) ** 2 for x in buf) / n
+
+        pinned = []
+        if _variance(self._var_buffers['eda']) < Config.DISCONNECT_VAR_THRESHOLD_EDA:
+            pinned.append('EDA')
+        if _variance(self._var_buffers['hr']) < Config.DISCONNECT_VAR_THRESHOLD_HR:
+            pinned.append('HR')
+        if _variance(self._var_buffers['hrv']) < Config.DISCONNECT_VAR_THRESHOLD_HRV:
+            pinned.append('HRV')
+
+        if pinned:
+            # Emit only when the state CHANGES (i.e., this tick is the first
+            # one that observes the disconnect) so the operator gets one alert,
+            # not 50 per second.
+            if not getattr(self, '_last_pinned', None) == pinned:
+                self.disconnect_warnings_issued += 1
+                print(f"[WARN] Possible electrode disconnect: {', '.join(pinned)} "
+                      f"signal(s) pinned for >{Config.DISCONNECT_WINDOW_SEC}s.")
+                self._last_pinned = pinned
+        else:
+            self._last_pinned = None
 
     def run_standalone_test(self):
         """

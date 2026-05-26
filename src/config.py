@@ -33,6 +33,12 @@ class Config:
     # ============================================
     OUT_STREAM_NAME = "Biofeedback_State"
     OUT_STREAM_TYPE = "Control"
+
+    # Dedicated side-stream for the raw ECG voltage trace. The dashboard
+    # subscribes best-effort: if absent (e.g. real PLUX mode without an ECG
+    # publisher), the ECG chart simply stays empty.
+    ECG_STREAM_NAME = "OpenSignals_ECG"
+    ECG_STREAM_TYPE = "ECG"
     
     # ============================================
     # MOCK DATA BASELINES (Synthetic Generation)
@@ -88,6 +94,28 @@ class Config:
     C_UP = 0.005
 
     # ============================================
+    # SAMPLE VALIDATION (physiological sanity bounds)
+    # ============================================
+    # Any sample outside these bounds is considered an artifact and is replaced
+    # by the most recent valid value. Bounds are deliberately wide so genuine
+    # stress / exertion isn't rejected — these catch electrode disconnects,
+    # ADC saturation, and obviously corrupt values, not mild abnormalities.
+    EDA_MIN_uS = 0.0
+    EDA_MAX_uS = 80.0     # severe sweating tops out ~50 μS
+    HR_MIN_BPM = 30.0     # bradycardia floor
+    HR_MAX_BPM = 220.0    # fight-or-flight ceiling for an adult
+    HRV_MIN_MS = 0.0
+    HRV_MAX_MS = 500.0    # extreme high-HRV / athlete resting
+
+    # Electrode-disconnect detection. If the variance of a signal over the last
+    # DISCONNECT_WINDOW_SEC seconds drops below DISCONNECT_VAR_THRESHOLD, log a
+    # warning. Pinned-rail electrodes look exactly like this.
+    DISCONNECT_WINDOW_SEC = 15
+    DISCONNECT_VAR_THRESHOLD_EDA = 1e-6
+    DISCONNECT_VAR_THRESHOLD_HR = 1e-4
+    DISCONNECT_VAR_THRESHOLD_HRV = 1e-4
+
+    # ============================================
     # SESSION END POLICY
     # ============================================
     # Operator can Ctrl+C at any time. If they don't, the LIVE phase auto-finishes
@@ -95,15 +123,28 @@ class Config:
     LIVE_PHASE_MAX_SEC = 300
 
     # ============================================
-    # ECG -> HR / HRV (mock data; real PLUX delivers these directly)
+    # ECG -> HR / HRV  (same pipeline for mock + real PLUX)
     # ============================================
-    # Bandpass cutoffs for QRS detection on a 1000 Hz ECG stream.
+    # Bandpass cutoffs for QRS detection. Works at any sample rate.
     ECG_BANDPASS_LOW_HZ = 5.0
     ECG_BANDPASS_HIGH_HZ = 15.0
     # Minimum spacing between R-peaks (refractory). 250 ms = max ~240 BPM.
     ECG_MIN_RR_MS = 250
     # RMSSD window — math-pipeline Step 0 says ~10 s rolling.
     RMSSD_WINDOW_SEC = 10
+
+    # ============================================
+    # REAL PLUX OPENSIGNALS LSL CONFIG
+    # ============================================
+    # OpenSignals broadcasts RAW ADC values (not pre-derived HR/HRV). We have
+    # to convert + detect peaks ourselves. These knobs tell us which LSL
+    # channel holds which sensor — defaults match the most common PLUX setup
+    # but override here if your OpenSignals configuration is different.
+    REAL_PLUX_ECG_CHANNEL = 0   # 0-based LSL channel index for ECG
+    REAL_PLUX_EDA_CHANNEL = 1   # 0-based LSL channel index for EDA
+    # Streaming R-peak detection runs on a rolling ECG buffer. 5 s is plenty
+    # for stable peak detection without consuming much memory.
+    REAL_PLUX_ECG_BUFFER_SEC = 5
 
     # ============================================
     # DASHBOARD VISUAL SETTINGS
@@ -115,7 +156,25 @@ class Config:
     # 300 ≈ 6 s of visible history at 50 Hz.
     DASHBOARD_VIEW_WIDTH = 300
 
+    # Y-axis bounds for the per-signal charts.
+    # Before baseline locks: use the *_DEFAULT_RANGE.
+    # After baseline locks:   recenter around the patient's baseline ± *_HALFRANGE.
+    # This prevents pyqtgraph from auto-zooming to floating-point noise when the
+    # signal is stable (the "90.497730–90.497738" effect on flat resting HR).
+    EDA_PLOT_DEFAULT_RANGE = (0.0, 25.0)      # μS — covers typical resting range
+    HR_PLOT_DEFAULT_RANGE = (40.0, 180.0)     # BPM — wide enough for stress excursions
+    HRV_PLOT_DEFAULT_RANGE = (0.0, 200.0)     # ms — RMSSD healthy range
+    EDA_PLOT_HALFRANGE = 3.0                  # μS around baseline once known
+    HR_PLOT_HALFRANGE = 25.0                  # BPM
+    HRV_PLOT_HALFRANGE = 30.0                 # ms
+
+    # ECG waveform chart shows the last N raw samples. At 200 Hz, 1000 samples ≈ 5 s.
+    ECG_PLOT_MAX_HISTORY = 1000
+
     # ============================================
     # MOCK DATA FILE PATH (when DATA_SOURCE='mock')
     # ============================================
-    MOCK_DATA_FILE = "data/fake_opensignals_2026-05-13_15-24-44.txt"
+    # MockDataSource auto-detects sampling rate AND channel order (ECG vs EDA)
+    # from the OpenSignals header JSON — switch files freely, no other edits.
+    MOCK_DATA_FILE = "data/opensignals_2026-05-25_14-57-56.txt"
+    # MOCK_DATA_FILE = "data/fake_opensignals_2026-05-13_15-24-44.txt"  # 1000Hz, 42s, EDA=col2/ECG=col3

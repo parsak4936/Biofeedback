@@ -96,11 +96,18 @@ def run_pipeline():
             avg_eda = proc.personal_averages.get('eda', 0.0) if proc.personal_averages else 0.0
             avg_hr = proc.personal_averages.get('hr', 0.0) if proc.personal_averages else 0.0
             avg_hrv = proc.personal_averages.get('hrv', 0.0) if proc.personal_averages else 0.0
+            elapsed_baseline_sec = session.get_session_duration_sec()
             out.broadcast_state(
                 s_t, state, dashboard, y_t,
                 smoothed_vector[0], smoothed_vector[1], smoothed_vector[2],
                 avg_eda, avg_hr, avg_hrv,
                 fusion.thresh_mild, fusion.thresh_high,
+                baseline_locked=thresholds_locked,
+                elapsed_baseline_sec=elapsed_baseline_sec,
+                mode=fusion.mode,
+                qa_invalid=acq.invalid_sample_count,
+                qa_out_of_range=acq.out_of_range_count,
+                qa_disconnects=acq.disconnect_warnings_issued,
             )
 
             # Log sample to output file
@@ -146,6 +153,16 @@ def run_pipeline():
         print("      PIPELINE TERMINATED (NO SIGNAL)              ")
         print("==================================================")
         print(f"[SESSION] Output saved to: {os.path.basename(session.output_file_path)}")
+    except Exception as e:
+        # Catch-all: any other unexpected error still flushes the partial CSV
+        # rather than leaving the recording in limbo. Re-raised so the launcher
+        # sees the failure code and the operator gets a clear traceback.
+        print("\n==================================================")
+        print(f"      UNEXPECTED ERROR: {type(e).__name__}")
+        print("==================================================")
+        print(f"  {e}")
+        print(f"[SESSION] Partial output saved to: {os.path.basename(session.output_file_path)}")
+        raise
 
 if __name__ == "__main__":
     run_pipeline()

@@ -118,16 +118,33 @@ class SignalProcessor:
         
         for signal in ['eda', 'hr', 'hrv']:
             arr = np.array(self.buffers[signal])
-            
+
             # Calculate raw mean and standard deviation
-            mu = np.mean(arr)
-            sigma = np.std(arr)
-            
-            # Outlier filter: math-pipeline Step 3. Multiplier in Config.
-            k = Config.ARTIFACT_SIGMA_MULTIPLIER
-            lower_bound = mu - (k * sigma)
-            upper_bound = mu + (k * sigma)
-            clean_arr = arr[(arr >= lower_bound) & (arr <= upper_bound)]
+            mu = float(np.mean(arr))
+            sigma = float(np.std(arr))
+
+            # Guard: if the signal is perfectly flat (σ=0, e.g. electrode pinned),
+            # the 3σ window collapses to a single point and nothing passes the
+            # filter. Fall back to the uncleaned buffer with a logged warning so
+            # downstream math doesn't blow up. This is a defensive path; the
+            # disconnect detector in acquisition.py should have caught this earlier.
+            if sigma == 0.0:
+                print(f"[PROCESSOR] WARN: {signal.upper()} baseline σ=0 "
+                      f"(signal flat at {mu:.3f}). Skipping 3σ filter for this signal.")
+                clean_arr = arr.copy()
+            else:
+                # Outlier filter: math-pipeline Step 3. Multiplier in Config.
+                k = Config.ARTIFACT_SIGMA_MULTIPLIER
+                lower_bound = mu - (k * sigma)
+                upper_bound = mu + (k * sigma)
+                clean_arr = arr[(arr >= lower_bound) & (arr <= upper_bound)]
+
+                # Guard: if the filter rejected every sample (numerical edge
+                # case), fall back to the raw buffer rather than producing NaN.
+                if len(clean_arr) == 0:
+                    print(f"[PROCESSOR] WARN: {signal.upper()} 3σ filter "
+                          f"rejected all samples; reverting to raw buffer.")
+                    clean_arr = arr.copy()
 
             # Persist the cleaned arrays so fusion can compute a true sigma floor
             self.cleaned_baseline_buffers[signal] = clean_arr
