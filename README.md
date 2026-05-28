@@ -1,422 +1,83 @@
-# Biofeedback Virtual Clinic - Complete Documentation
+# Biofeedback Acrophobia Therapy Pipeline
 
-## 📋 Quick Start for Casual Users
+A closed-loop biofeedback system for VR height-exposure therapy. Three physiological signals from a PLUX device drive the height of a virtual balloon: when the patient is stressed the balloon descends to give relief, when they calm down it rises to expose them to more height. The patient can't move it directly — only their own autonomic state can. The point is to titrate exposure to how the person is actually doing, not to what they say they feel.
 
-```powershell
+This repository is the Python side: signal acquisition, the stress-fusion math, the clinical dashboard, and session logging. The VR scene itself (Unity, Oculus Quest) is a separate piece that subscribes to the stream this code produces.
+
+## Where to find things
+
+This is the map. If someone asks you a question about the system, this table tells you which file answers it, so you don't have to dig through everything.
+
+| If you want to know... | Read |
+|---|---|
+| What a term means (R-peak, RMSSD, EDA, EMA, baseline, sigma, S_t...) | `CONCEPTS.md` |
+| How to actually run a session, day to day | `HOW_TO_RUN.md` |
+| What the system produces and what every number/column/channel means | `OUTPUTS.md` |
+| What the PLUX device gives us (the raw input side) | `SIGNALS_AND_DATA.md` |
+| How a reading becomes a stress level and a balloon height, step by step | `DATA_FLOW.md` |
+| How heart rate is calculated from the ECG | `DATA_FLOW.md` (Layer 2) and `CONCEPTS.md` (R-peak) |
+| How the stress index is calculated | `DATA_FLOW.md` (Layers 6-7) |
+| Why the thresholds are set where they are | `DATA_FLOW.md` (Layers 5, 8) and `CONCEPTS.md` (sigma_baseline) |
+| How the balloon height moves and the three modes | `DATA_FLOW.md` (Layer 8) |
+| How the code handles noise, dropouts, and bad input | `CODE_AUDIT.md` |
+| How to set up the real device in the lab | `LAB_SETUP.md` |
+
+A quick worked example of using the map: a professor asks "how did you compute heart rate variability?" You'd open `CONCEPTS.md` for the definition of RMSSD and `DATA_FLOW.md` Layer 2 for exactly how the code does it. Two files, no searching.
+
+## Running it
+
+```
 python launcher.py
 ```
 
-That's it! You'll be prompted to enter the patient name/ID, then the system starts automatically.
+It asks for a patient name and ID, then starts everything. The first 120 seconds are a baseline measurement (the patient sits still); after that the live therapy phase runs, by default for 5 minutes or until you stop it with Ctrl+C. Full detail, including running the parts separately for debugging, is in `HOW_TO_RUN.md`.
 
----
+## What you need installed
 
-## 🏗️ System Architecture
+Python 3.10 or so, and the packages in `requirements.txt` (pylsl, numpy, scipy, PyQt5, pyqtgraph, matplotlib, pandas). The repo ships with an `env/` virtual environment, so usually:
 
 ```
-┌─────────────────────────────────────────────────────────────────┐
-│                        LAUNCHER.PY                              │
-│                (Single Entry Point)                             │
-│        ├─ Asks for Patient Name/ID                             │
-│        └─ Starts all subsystems automatically                   │
-└──────────────────┬──────────────────────────────────────────────┘
-                   │
-        ┌──────────┴──────────┬──────────────┐
-        │                     │              │
-        ▼                     ▼              ▼
-   ┌─────────┐           ┌─────────┐   ┌─────────┐
-   │STREAMER │           │  MAIN   │   │DASHBOARD│
-   │(1000Hz) │──LSL──→   │(50Hz)   │──LSL─→(GUI)
-   └─────────┘           └─────────┘   └─────────┘
-        │                     │              
-        │                     │              
-    ┌───▼────────────────┐    │              
-    │ DATA SOURCES       │    │              
-    │ • Mock Data        │    │              
-    │ • Real PLUX        │    │              
-    └────────────────────┘    │
-                              │
-                    ┌─────────▼──────────┐
-                    │  Output Files      │
-                    │ (CSV with patient  │
-                    │  info + timestamp) │
-                    └────────────────────┘
+env\Scripts\activate
+pip install -r requirements.txt
 ```
 
----
+## How the pieces fit together
 
-## 📁 File Structure & What Can Be Changed
+Three programs pass data to each other over LSL (Lab Streaming Layer, a small protocol for streaming signal data). They start in order, because each subscribes to what the one before it publishes:
 
-### **🚀 ENTRY POINT**
-
-#### `launcher.py` - Main startup script
-- **Purpose:** Single entry point for all users
-- **What happens:**
-  1. Asks patient for name/ID
-  2. Starts streamer (data acquisition)
-  3. Starts main (processing pipeline)
-  4. Starts dashboard (visualization)
-- **Changeable settings:**
-  - `STREAM_TIMEOUT_SEC` - How long to wait for data before error
-  - Process startup order/timing
-
----
-
-### **⚙️ CORE CONFIGURATION**
-
-#### `src/config.py` - Central configuration hub
-- **Purpose:** All tunable parameters in ONE place
-- **Key settings to change:**
-
-| Setting | What It Does | Default | When to Change |
-|---------|-------------|---------|----------------|
-| `DATA_SOURCE` | Mock or Real PLUX | `'mock'` | See "Switching Modes" section |
-| `STREAM_NAME` | LSL stream identifier | `"OpenSignals"` | When connecting real device |
-| `STREAM_TYPE` | Device MAC or type | `"00:07:80:0F:31:9C"` | When connecting real device |
-| `STREAM_TIMEOUT_SEC` | Silence detection (seconds) | `5.0` | If device drops frequently |
-| `BASELINE_SEC` | Calibration duration | `120` | Shorter for testing |
-| `EMA_ALPHA_*` | Signal smoothing | `0.05-0.10` | Fine-tune responsiveness |
-| `PIPELINE_RATE` | Processing frequency | `50.0 Hz` | Don't change (system constraint) |
-| `MOCK_DATA_FILE` | Path to test data | `"data/fake_opensignals_..."` | When adding new test files |
-
----
-
-### **🔌 DATA ACQUISITION LAYER**
-
-#### `src/data_sources.py` - Hardware abstraction (MODULAR)
-- **Purpose:** Factory pattern for switching between mock and real hardware
-- **Classes:**
-  - `MockDataSource` - Reads from test file (for development)
-  - `RealPLUXDataSource` - Connects to real device (for production)
-  - `DataSourceFactory` - Auto-selects based on `Config.DATA_SOURCE`
-- **To add new hardware:**
-  1. Create new class inheriting from `DataSource`
-  2. Implement `get_next_sample()` method
-  3. Add option to `DataSourceFactory.create()`
-  4. Update `Config.DATA_SOURCE` to select it
-
-#### `src/streamer.py` - Universal data broadcaster
-- **Purpose:** Streams any data source to LSL at 1000Hz
-- **How it works:**
-  1. Uses `DataSourceFactory` to get current source
-  2. Broadcasts on LSL network
-  3. Main.py reads from LSL
-- **No changes needed** - works with any data source automatically
-
-#### `src/acquisition.py` - LSL consumer (50Hz sync)
-- **Purpose:** Reads LSL stream and converts to 50Hz pipeline
-- **Features:**
-  - Zero-Order Hold strategy (holds last value if no new data)
-  - Stale data detection (disconnection alert after 5 seconds)
-  - CSV logging of all received samples
-- **Changeable:**
-  - `STREAM_TIMEOUT_SEC` in config.py
-
----
-
-### **🧮 SIGNAL PROCESSING**
-
-#### `src/processing.py` - EMA smoothing + baseline calibration
-- **Purpose:** 
-  1. Smooth raw signals (exponential moving average)
-  2. Collect 120-second baseline
-  3. Remove 3-sigma artifacts
-  4. Calculate personal averages
-- **Key formulas (tunable in config.py):**
-  - `EMA_ALPHA_EDA = 0.05` (lower = slower response)
-  - `EMA_ALPHA_HR = 0.10`
-  - `EMA_ALPHA_HRV = 0.05`
-- **Output:** Smoothed signals + personal baselines for comparison
-
-#### `src/fusion.py` - Stress index calculation
-- **Purpose:** Converts 3 signals into single stress metric (S_t)
-- **Formula:** `S_t = (0.5 × EDA%) + (0.3 × HRV%) + (0.2 × HR%)`
-- **Thresholds (set after baseline):**
-  - Mild stress: S_t > 1.33 × σ_baseline (yellow)
-  - High stress: S_t > 2.28 × σ_baseline (red)
-  - Calm: S_t ≤ 1.33 × σ_baseline (green)
-- **Changeable:**
-  - Weights in `compute_s_instant()` - adjust signal importance
-  - Sigma multipliers in `set_thresholds()` - adjust sensitivity
-
-#### `src/main.py` - Main pipeline orchestrator
-- **Purpose:** Coordinates all 50Hz processing cycles
-- **Phases:**
-  1. **BASELINE (0-120s):** Collect data, remove artifacts
-  2. **LIVE (120s+):** Calculate stress, broadcast results
-- **Error handling:** Graceful shutdown if signal drops
-
----
-
-### **📊 SESSION TRACKING**
-
-#### `src/session_manager.py` - Centralized state tracking
-- **Purpose:** Tracks everything about the session:
-  - Patient info (name, ID)
-  - Phase (BASELINE vs LIVE)
-  - Signal history (for charts)
-  - Personal baselines & artifact counts
-  - Stress metrics over time
-  - Session duration
-- **Used by:**
-  - `main.py` - records all metrics
-  - `output.py` - includes patient info in files
-  - `dashboard.py` - displays session state
-
----
-
-### **📤 OUTPUT & VISUALIZATION**
-
-#### `src/output.py` - Unity/Export bridge
-- **Purpose:** Broadcasts results to external systems (Unity VR)
-- **Output format:** LSL stream with [S_t, state, score]
-- **Future:** Can be extended to save sessions, send to database, etc.
-
-#### `src/dashboard.py` - Clinical visualization (PyQt5)
-- **Purpose:** Real-time monitoring dashboard
-- **Displays:**
-  - 🟢🟡🔴 **Color-coded stress level** (green=calm, yellow=stressed, red=ultra)
-  - **Patient info panel** - Name, ID, phase, duration
-  - **Stress chart** - Scrollable history with threshold lines
-  - **Signal charts** - EDA, HR, HRV individual graphs
-  - **Metrics panel** - Baselines, statistics, current state
-- **Alarms:** Visual only (color changes) - no sound
-- **Files to edit:**
-  - Color schemes: Line ~50-55 in dashboard.py
-  - Chart update frequency: `self.timer.start(20)` = 50Hz
-
----
-
-## 🔄 Switching Between Mock & Real Signals
-
-### **Option 1: Mock Data (for testing)**
-
-**Current setting:** Already configured in `src/config.py`
-
-```python
-DATA_SOURCE = 'mock'  # Uses synthetic test file
+```
+streamer.py    reads the device (or a recorded file) and publishes the raw signals
+     |
+main.py        smooths them, calibrates a 120-second baseline, computes the stress
+     |          index and balloon height, and publishes the 18-channel output stream
+     |
+dashboard.py   draws the live charts for the operator
 ```
 
-**To use:**
-```powershell
-python launcher.py
-# System streams fake_opensignals_2026-05-13_15-24-44.txt at 1000Hz
-```
+A fourth script, `session_review.py`, is separate and offline: it replays any saved session CSV so you can look at it afterward.
 
----
+Switching between recorded data and the live device is one setting: `Config.DATA_SOURCE = 'mock'` replays a file, `'real_plux'` reads the PLUX hardware. Nothing else changes.
 
-### **Option 2: Real PLUX Device (production)**
+## Configuration
 
-#### Step 1: Install PLUX Software
-- Download OpenSignals from PLUX Sensing
-- Install on your machine
-- Connect PLUX device via Bluetooth
-- Launch OpenSignals and start LSL streaming
+Almost everything tunable is in `src/config.py`: the data source, the session difficulty mode, the smoothing factors, the fusion weights, the stress thresholds, the balloon altitude ranges, the heart-rate detection settings, the physiological sanity bounds, and the dashboard chart ranges. The design intent is that you change behavior there, not by editing the pipeline code. `CODE_AUDIT.md` has a full list of what's config-only versus what needs a code change.
 
-#### Step 2: Verify Device is Broadcasting
-- Open terminal:
-```powershell
-python -c "from pylsl import resolve_stream; print(resolve_stream('name', 'OpenSignals'))"
-```
-- Should return device info (not empty)
+## The source files
 
-#### Step 3: Update Configuration
+| File | What it does |
+|---|---|
+| `launcher.py` | Starts the three subprocesses in order |
+| `src/config.py` | Every tunable value |
+| `src/data_sources.py` | Mock and real-device adapters, ADC conversion, R-peak detection |
+| `src/acquisition.py` | Reads the stream at 50 Hz, validates samples, detects disconnects |
+| `src/processing.py` | Smoothing, the baseline buffer, 3-sigma cleaning |
+| `src/fusion.py` | Stress fusion, thresholds, the balloon kinematics |
+| `src/output.py` | The 18-channel output stream |
+| `src/session_manager.py` | The per-session CSV |
+| `src/dashboard.py` | The operator dashboard |
+| `src/main.py` | The 50 Hz loop that ties it together |
+| `src/session_review.py` | Offline replay of a saved session |
 
-**In `src/config.py`:**
+## Status
 
-```python
-# Change FROM:
-DATA_SOURCE = 'mock'
-
-# Change TO:
-DATA_SOURCE = 'real_plux'
-
-# If device has different MAC, update:
-STREAM_TYPE = "YOUR_DEVICE_MAC_HERE"  # e.g., "00:07:80:0F:31:9C"
-```
-
-#### Step 4: Run System
-```powershell
-python launcher.py
-# System automatically detects and uses real PLUX device
-```
-
-#### Troubleshooting Real Device
-
-| Issue | Solution |
-|-------|----------|
-| "Stream not found" | Ensure OpenSignals is running and streaming |
-| No data after baseline | Check Bluetooth connection / battery |
-| "Timeout after 5 seconds" | Device dropped - reconnect Bluetooth |
-| MAC address wrong | Get from OpenSignals software or device settings |
-
----
-
-## 👤 Patient Input & Output Files
-
-### **Patient Name/ID Entry**
-
-When you run `launcher.py`, you'll be prompted:
-```
-[LAUNCHER] Enter patient name or ID: Alice_Patient_001
-```
-
-This information is:
-- ✅ Displayed on dashboard
-- ✅ Saved in all output files
-- ✅ Used in CSV filenames with timestamp
-
-### **Output Files (Automatic)**
-
-Sessions automatically save to `data/` folder with:
-
-**Naming format:** `session_{DATE}_{TIME}_{PATIENT_ID}.csv`
-
-**Example:** `session_20260525_143022_Alice_Patient_001.csv`
-
-**Contents:**
-```csv
-timestamp,phase,patient_id,eda,hr,hrv,s_instant,s_t,state,dashboard_score
-2026-05-25 14:30:22.123,BASELINE,Alice_Patient_001,5.01,75.2,39.8,0.0,0.0,calm,0
-...
-2026-05-25 14:32:22.456,LIVE,Alice_Patient_001,5.45,82.1,35.2,15.3,12.8,stressed,67
-```
-
-Files can be imported to Excel, Python, or analysis software.
-
----
-
-## 🚨 Alarm System (Color-Coded)
-
-### **Visual Indicators**
-
-| Color | Meaning | Stress Level | Action |
-|-------|---------|-------------|--------|
-| 🟢 **GREEN** | Calm | S_t ≤ mild threshold | Patient relaxed |
-| 🟡 **YELLOW** | Stressed | mild < S_t ≤ high threshold | Monitor closely |
-| 🔴 **RED** | Ultra Stressed | S_t > high threshold | Intervention needed |
-
-### **Where Alarms Appear**
-
-1. **Dashboard Background** - Entire chart area changes color
-2. **Stress Chart** - Background of graph shows current state
-3. **State Indicator** - Large text showing "CALM" / "STRESSED" / "ULTRA_STRESSED"
-4. **Threshold Lines** - Yellow dashed (mild), red dashed (high)
-
-### **Customizing Colors**
-
-In `src/dashboard.py` around line 170:
-
-```python
-# Change these RGB values:
-self.color_calm = pg.mkColor(20, 50, 20)      # Currently dark green
-self.color_stressed = pg.mkColor(50, 50, 20)  # Currently dark yellow
-self.color_ultra = pg.mkColor(50, 20, 20)     # Currently dark red
-```
-
----
-
-## 📝 Implementation Checklist for Colleagues
-
-### **For Testing (Mock Mode)**
-- [ ] Clone repository
-- [ ] `pip install -r requirements.txt`
-- [ ] `python launcher.py`
-- [ ] Enter patient name when prompted
-- [ ] Check dashboard displays data
-
-### **For Real Device Deployment**
-- [ ] Install PLUX OpenSignals
-- [ ] Connect PLUX device & verify Bluetooth
-- [ ] Update `Config.DATA_SOURCE = 'real_plux'` in config.py
-- [ ] Verify `STREAM_TYPE` MAC address matches device
-- [ ] Test with `python launcher.py`
-- [ ] Check data comes from real device (not synthetic)
-
-### **For Customization**
-- [ ] Edit smoothing in `config.py` (`EMA_ALPHA_*`)
-- [ ] Adjust stress weights in `fusion.py` (`compute_s_instant()`)
-- [ ] Change alarm thresholds in `fusion.py` (`set_thresholds()`)
-- [ ] Modify dashboard colors in `dashboard.py`
-
----
-
-## 🔍 Key Files Quick Reference
-
-| Task | File | Line Range |
-|------|------|-----------|
-| Change data source | `src/config.py` | Line 8 |
-| Adjust signal smoothing | `src/config.py` | Lines 45-48 |
-| Change baseline duration | `src/config.py` | Line 49 |
-| Modify stress formula | `src/fusion.py` | Line 40-43 |
-| Adjust stress thresholds | `src/fusion.py` | Line 18-19 |
-| Change dashboard colors | `src/dashboard.py` | Lines 165-168 |
-| Modify chart update rate | `src/dashboard.py` | Line 130 |
-| Add new data source | `src/data_sources.py` | Add class + factory |
-
----
-
-## 🆘 Common Issues
-
-| Problem | Solution | File |
-|---------|----------|------|
-| "LSL stream not found" | Check streamer.py is running | Terminal log |
-| Dashboard blank | Ensure main.py is running | Check 3 processes |
-| Data stops after 5 seconds | Adjust `STREAM_TIMEOUT_SEC` | `src/config.py` |
-| Baseline takes too long | Change `BASELINE_SEC` to 60 | `src/config.py` |
-| Signals too noisy | Increase `EMA_ALPHA` | `src/config.py` |
-| Alarms too sensitive | Adjust sigma multipliers | `src/fusion.py` |
-
----
-
-## 📚 For Developers
-
-### **Adding a New Data Source**
-
-1. **Create class in `src/data_sources.py`:**
-```python
-class MyCustomSource(DataSource):
-    def get_next_sample(self) -> tuple:
-        # Return (eda, hr, hrv)
-        pass
-    def cleanup(self):
-        pass
-```
-
-2. **Add to factory in same file:**
-```python
-elif source_type == 'my_custom':
-    return MyCustomSource()
-```
-
-3. **Update `src/config.py`:**
-```python
-DATA_SOURCE = 'my_custom'
-```
-
-### **Extending Output**
-
-To save sessions to database or send to external service:
-- Edit `src/session_manager.py` - add export methods
-- Modify `src/output.py` - add export formats
-
-### **Dashboard Customization**
-
-To add new metrics:
-- Extend `src/session_manager.py` to track metric
-- Add panel to `src/dashboard.py` to display
-- Update `src/main.py` to record metric
-
----
-
-## 📞 Support
-
-For issues or questions:
-1. Check section "Common Issues" above
-2. Review `src/config.py` - 90% of problems solved by adjusting settings
-3. Check terminal output - descriptive error messages guide troubleshooting
-4. Verify all 3 processes running: streamer, main, dashboard
-
----
-
-**Last Updated:** May 25, 2026
-**Version:** 2.0 (Modular, Patient-Aware, Real Device Ready)
+The Python pipeline and the math are complete and verified against the spec documents (`shayans_biofeedback_math_pipeline` and `shayans_biofeedback_walkthrough`). What's left is integration: the live PLUX device path is built but needs a hands-on dry run, and the Unity scene is being built separately against the stream contract described in `OUTPUTS.md`.

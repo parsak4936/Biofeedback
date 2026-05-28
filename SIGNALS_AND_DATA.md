@@ -122,7 +122,9 @@ RMSSD = sqrt( mean( (RR_n+1 - RR_n)^2 ) )
 
 If the RR intervals are perfectly regular (which would be physiologically weird), RMSSD is zero. If they vary beat to beat, RMSSD is larger. Healthy adults at rest tend to sit in the 20 to 80 ms range. Acute stress lowers HRV; relaxation raises it.
 
-For the offline mock data we pre-compute the whole HR and HRV series at file load time using `scipy.signal.find_peaks` over a bandpassed ECG. For the live PLUX device the same logic runs incrementally on a rolling 5-second buffer of incoming ECG samples. Either way the math is the same.
+Finding the R-peaks reliably is the tricky part, because real ECG is noisy and the peak amplitude differs from person to person and recording to recording. A fixed amplitude threshold breaks the moment a recording is noisier than expected — which is exactly what happened the first time we ran a longer, movement-heavy recording. So the detector is adaptive: it bandpasses the ECG to the 5-15 Hz QRS band, detects on peak prominence (how far a peak stands out from its local surroundings, which ignores slow baseline drift) rather than raw height, and uses a two-pass approach where it first gathers candidate peaks, measures the typical R-peak size in that specific signal, and then keeps peaks at a fraction of that size. A 300 ms refractory window stops the T-wave that follows each beat from being counted as a second heartbeat. The upshot is that the same code handles a clean short clip and a noisy 14-minute recording without any per-file tuning.
+
+For the offline mock data this runs once over the whole recording at load time. For the live PLUX device the same logic runs incrementally on a rolling 5-second buffer of incoming ECG samples. Either way the math is identical.
 
 ## EDA needs no derivation
 

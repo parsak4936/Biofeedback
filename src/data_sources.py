@@ -63,6 +63,41 @@ def parse_opensignals_header(file_path: str) -> dict:
     }
 
 
+def _detect_r_peaks(ecg_filt: np.ndarray, distance: int) -> np.ndarray:
+    """
+    Adaptive, two-pass R-peak detection on an already-bandpassed ECG signal.
+
+    Why two passes: a fixed amplitude threshold breaks across recordings —
+    one person's R-peaks may be 0.1 mV, another's 1.0 mV, and a recording with
+    occasional motion artifacts inflates any percentile-based threshold so the
+    real beats get missed. Instead we:
+      1. Loosely gather candidate peaks using a low prominence floor.
+      2. Take the median prominence of those candidates as the typical R-peak
+         size for THIS recording.
+      3. Keep peaks whose prominence is at least a fraction of that median.
+
+    Detecting on prominence (not raw height) ignores slow baseline wander.
+    `distance` is the refractory period in samples (blocks T-wave re-triggers).
+    """
+    std = float(np.std(ecg_filt))
+    if std <= 0:
+        return np.array([], dtype=np.int64)
+
+    # Pass 1 — loose candidates.
+    floor = Config.ECG_CANDIDATE_PROMINENCE_STD_FRAC * std
+    cand, props = find_peaks(ecg_filt, prominence=floor, distance=distance)
+
+    if len(cand) >= 5:
+        ref_prom = float(np.median(props['prominences']))
+        prominence = Config.ECG_PEAK_PROMINENCE_FRACTION * ref_prom
+    else:
+        # Not enough candidates to estimate; fall back to the loose floor.
+        prominence = floor
+
+    peaks, _ = find_peaks(ecg_filt, prominence=prominence, distance=distance)
+    return peaks
+
+
 def derive_hr_hrv_from_ecg(ecg_mv: np.ndarray, fs_hz: float) -> tuple:
     """
     Convert a 1000Hz ECG trace into per-sample HR (BPM) and RMSSD (ms) arrays.
@@ -86,10 +121,8 @@ def derive_hr_hrv_from_ecg(ecg_mv: np.ndarray, fs_hz: float) -> tuple:
                   btype='band')
     ecg_filt = filtfilt(b, a, ecg_mv)
 
-    # Peak amplitude threshold: 60% of the 99th-percentile (robust to outliers).
-    height = 0.6 * np.percentile(np.abs(ecg_filt), 99)
     distance = int(Config.ECG_MIN_RR_MS * fs_hz / 1000)
-    peaks, _ = find_peaks(ecg_filt, height=height, distance=distance)
+    peaks = _detect_r_peaks(ecg_filt, distance)
 
     n = len(ecg_mv)
     hr_series = np.full(n, Config.MOCK_HR_BASE, dtype=np.float32)
@@ -392,8 +425,9 @@ class RealPLUXDataSource(DataSource):
         except ValueError:
             return  # buffer momentarily too short for filtfilt
 
-        height = 0.6 * np.percentile(np.abs(filt), 99)
-        peaks_rel, _ = find_peaks(filt, height=height, distance=self._refractory_samples)
+        # Same adaptive prominence-based detector used for offline mock data,
+        # so live and replayed sessions behave identically.
+        peaks_rel = _detect_r_peaks(filt, self._refractory_samples)
         if len(peaks_rel) == 0:
             return
 

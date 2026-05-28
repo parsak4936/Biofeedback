@@ -1,139 +1,88 @@
-# Code-Level Audit — Error Handling & Spec Compliance
+# How the code handles things going wrong
 
-**Date:** 2026-05-25
-**Scope:** every module in `src/`, every documented failure mode.
-**Companion docs:** [AUDIT.md](AUDIT.md) (spec/feature audit), [DATA_FLOW.md](DATA_FLOW.md) (per-layer walkthrough).
+Real recordings are messy: electrodes lose contact, Bluetooth drops, people move, the occasional sample comes through as garbage. This document lists everything that can plausibly go wrong and points at the exact place in the code that deals with it. If you're ever asked "what happens if the signal cuts out mid-session?", this is the file to open.
 
-This document is a **code audit**, not an output-file audit. It maps every plausible thing that can go wrong in production (network, hardware, math, user error) to the line of code that catches it. If a row says ❌, that's a known untreated failure mode; otherwise the link tells you where defense lives.
-
----
+The short answer to the general question is: the pipeline is built to degrade gracefully. It rejects bad input rather than letting it corrupt the math, it warns the operator when data quality drops, and if something truly fatal happens it still saves whatever was recorded before stopping.
 
 ## Failure-mode matrix
 
-| # | Failure mode | Caught? | Where | Behavior |
-|---|---|---|---|---|
-| 1 | LSL stream not present at startup | ✅ | [acquisition.py:_connect_to_stream](src/acquisition.py) | `RuntimeError` → launcher aborts with message. |
-| 2 | LSL stream goes silent mid-session (device unplug, BT drop) | ✅ | [acquisition.py:get_synchronized_sample](src/acquisition.py) deadman switch | `ConnectionError` after `STREAM_TIMEOUT_SEC` (default 5 s). |
-| 3 | LSL inlet pile-up (hardware rate > pipeline rate) | ✅ | [acquisition.py:get_synchronized_sample](src/acquisition.py) `pull_chunk()` | Drains inlet, uses latest sample. Matches walkthrough Step 0. |
-| 4 | Mock file truncated / partial trailing row | ✅ | [data_sources.py:MockDataSource.__init__](src/data_sources.py) | `genfromtxt(invalid_raise=False)` + finite-mask filter. |
-| 5 | Mock file header rewrites channel order (ECG/EDA swap) | ✅ | [data_sources.py:parse_opensignals_header](src/data_sources.py) | Channel index derived from `sensor` array, not hardcoded. |
-| 6 | Mock file sample-rate change (200 Hz vs 1000 Hz) | ✅ | [data_sources.py:parse_opensignals_header](src/data_sources.py) | Rate read from JSON header, fed into both streamer pacing and R-peak detection. |
-| 7 | **NaN or Inf in a sample** | ✅ | [acquisition.py:get_synchronized_sample](src/acquisition.py) `_is_valid_number` | Sample rejected, last good value held, `NAN_REJ` logged. `invalid_sample_count` incremented. |
-| 8 | **Physiologically impossible value** (HR=400, EDA=−5) | ✅ | [acquisition.py:get_synchronized_sample](src/acquisition.py) `_within` checks | Sample rejected, last good held, `OOR_REJ` logged. `out_of_range_count` incremented. |
-| 9 | **Electrode disconnect** (signal pinned to a rail / noise floor) | ✅ | [acquisition.py:_check_disconnect](src/acquisition.py) | Rolling-window variance < threshold → one-shot `[WARN] Possible electrode disconnect…` printed. Pipeline keeps running so partial data is still recorded. |
-| 10 | ADC saturation (signal hits full-scale repeatedly) | 🟡 | Covered indirectly | Saturated values usually trip rule #8 or rule #9. A dedicated rail-clip detector would be nicer; currently not separated out. |
-| 11 | Baseline buffer never fills (signal cut during baseline) | ✅ | acquisition deadman + general catch | `ConnectionError` triggers session-end + CSV flush via outer `except`. |
-| 12 | **σ_baseline = 0** (signal perfectly flat through baseline) | ✅ | [fusion.py:set_thresholds](src/fusion.py) | Falls back to `SIGMA_FALLBACK=1.5` with loud WARN. Thresholds set to non-degenerate values; system stays usable. |
-| 13 | **3σ filter rejects every sample** (numerical edge case) | ✅ | [processing.py:_compute_personal_baselines](src/processing.py) | Falls back to raw buffer with WARN. |
-| 14 | Baseline average = 0 (divide-by-zero risk in fusion %) | ✅ | [fusion.py:compute_s_instant](src/fusion.py) | `base_xxx or 1e-6` guard. |
-| 15 | R-peak detector finds 0 or 1 peaks (mock with no ECG) | ✅ | [data_sources.py:derive_hr_hrv_from_ecg](src/data_sources.py) | Returns default arrays (`MOCK_HR_BASE` / `MOCK_HRV_BASE`) instead of empty/NaN. |
-| 16 | Missed beats producing RR-outlier spikes (artificial 1000 BPM) | ✅ | [data_sources.py:derive_hr_hrv_from_ecg](src/data_sources.py) | RR intervals >50 % off median are substituted with the median before HR/RMSSD calculation. |
-| 17 | KeyboardInterrupt (operator Ctrl+C) | ✅ | [main.py](src/main.py) | Graceful: prints "TERMINATED BY OPERATOR", session CSV is already on disk. |
-| 18 | Session-end cap reached | ✅ | [main.py](src/main.py) `live_tick_cap` | Prints "SESSION COMPLETE", exits loop, CSV flushed. |
-| 19 | Any other unhandled exception | ✅ | [main.py](src/main.py) outer `except Exception` | Prints `[UNEXPECTED ERROR]`, flushes partial CSV, re-raises so launcher sees the failure. |
-| 20 | Dashboard cannot reach `Biofeedback_State` stream | ✅ | [dashboard.py](src/dashboard.py) | Catches `Exception`, prints actionable message ("Ensure main.py is running"). |
-| 21 | Pyqtgraph Y-range collapse on stable signal | ✅ | [dashboard.py:_create_signal_plot + update](src/dashboard.py) | Y-range locked every tick; autorange button hidden; menu disabled. |
-| 22 | Dashboard click/zoom that breaks the layout | ✅ | [dashboard.py](src/dashboard.py) | Y mouse disabled per chart; menus disabled; auto-scale button hidden. |
-| 23 | Network jitter / out-of-order packets | n/a | LSL middleware | LSL inherently provides timestamped samples and reordering; our consumer only uses values, not order, so jitter is invisible to us. |
+The "Handled" column means there's explicit code for it; the "Where" column is the file and function to look at.
 
-> **Legend:** ✅ caught with defense in code · 🟡 caught indirectly via another rule · ❌ untreated (none right now).
+| Failure mode | Handled | Where | What happens |
+|---|---|---|---|
+| LSL stream not present at startup | yes | `acquisition.py` `_connect_to_stream` | Raises an error; the launcher aborts with a clear message |
+| Stream goes silent mid-session (unplug, Bluetooth drop) | yes | `acquisition.py` `get_synchronized_sample` | After 5 seconds of silence (`STREAM_TIMEOUT_SEC`) it raises a connection error and the session ends cleanly |
+| Device streams faster than the pipeline reads | yes | `acquisition.py` `get_synchronized_sample` | Drains the inlet each tick and uses the most recent sample, so we never fall behind real time |
+| Recording file has a truncated final row | yes | `data_sources.py` `MockDataSource` | Loads with a tolerant parser that skips malformed lines |
+| File has a different ECG/EDA channel order | yes | `data_sources.py` `parse_opensignals_header` | Channel positions are read from the file header, never hardcoded |
+| File has a different sample rate (200 vs 1000 Hz) | yes | `data_sources.py` `parse_opensignals_header` | Rate is read from the header and fed into pacing and R-peak detection |
+| NaN or infinite value in a sample | yes | `acquisition.py` `_is_valid_number` | Sample rejected, previous value held, logged as `NAN_REJ`, counter incremented |
+| Physiologically impossible value (HR 400, EDA -5) | yes | `acquisition.py` `_within` checks | Sample rejected, previous value held, logged as `OOR_REJ`, counter incremented |
+| Electrode disconnect (signal pinned flat) | yes | `acquisition.py` `_check_disconnect` | If a signal's variance stays near zero for 15 seconds, prints a one-time warning; the session keeps running so partial data is still saved |
+| ADC saturation (signal stuck at full scale) | partial | covered indirectly | Usually trips the out-of-range or disconnect rule above; there's no dedicated rail-clip detector yet |
+| Baseline never finishes (signal cut during the first 2 minutes) | yes | acquisition timeout + main loop | The connection error ends the session and flushes the CSV |
+| Flat signal through the whole baseline (sigma comes out zero) | yes | `fusion.py` `set_thresholds` | Falls back to a safe default sigma with a loud warning, so the thresholds aren't set to zero (which would mark everything ultra-stressed) |
+| The 3-sigma cleaning rejects every sample | yes | `processing.py` `_compute_personal_baselines` | Falls back to the raw buffer with a warning |
+| Baseline average of zero (would divide by zero) | yes | `fusion.py` `compute_s_instant` | Guarded with a tiny floor value |
+| R-peak detector finds no beats | yes | `data_sources.py` `derive_hr_hrv_from_ecg` | Returns sensible default HR/HRV instead of empty or NaN |
+| Missed or doubled beats spiking HR/HRV | yes | `data_sources.py` `derive_hr_hrv_from_ecg` | RR intervals far off the running median are replaced by the median before HR and HRV are computed |
+| Operator presses Ctrl+C | yes | `main.py` | Stops cleanly, the session CSV is already on disk |
+| Session-end cap reached | yes | `main.py` `live_tick_cap` | Prints "SESSION COMPLETE", exits, CSV flushed |
+| Any other unexpected error | yes | `main.py` outer exception handler | Prints the error, flushes the partial CSV, re-raises so the failure is visible |
+| Dashboard can't find the output stream | yes | `dashboard.py` | Catches it and prints "ensure main.py is running" |
+| Chart Y-axis collapsing on flat data | yes | `dashboard.py` `_create_signal_plot` | Y-range is locked each tick; the autorange button and right-click menu are disabled |
+| Network jitter / out-of-order packets | n/a | LSL itself | LSL timestamps and reorders samples; we only use the values, so jitter is invisible to us |
 
----
+## What the operator can see
 
-## Diagnostics surfaced to the operator
+The acquisition layer keeps three running counters and broadcasts them on the live stream, so the dashboard's Session Statistics panel shows them in real time and turns them red if they go above zero:
 
-`BiofeedbackAcquisition` now exposes three live counters:
+- `invalid_sample_count` — NaN or infinite samples rejected
+- `out_of_range_count` — samples outside the physiological bounds rejected
+- `disconnect_warnings_issued` — electrode-disconnect episodes flagged
 
-| Counter | What it counts |
-|---|---|
-| `invalid_sample_count` | NaN / Inf samples rejected |
-| `out_of_range_count` | Samples outside physiological bounds rejected |
-| `disconnect_warnings_issued` | Electrode-disconnect events flagged |
+On a clean session these all stay at zero. Any nonzero value points at a hardware or contact problem rather than a software one.
 
-These are not yet broadcast to the dashboard — easiest follow-up is one extra LSL channel each, or a sidecar JSON read by the dashboard once per second.
+## Spec compliance, in brief
 
----
+Every numbered step of the math-pipeline document is implemented. The detailed step-by-step is in `DATA_FLOW.md`; this is just the checklist.
 
-## Spec compliance recap (math pipeline, Steps 0–10)
+| Step | What | Where |
+|---|---|---|
+| 0 | Acquisition, zero-order hold, HR and HRV from ECG | `acquisition.py`, `data_sources.derive_hr_hrv_from_ecg` |
+| 1 | EMA smoothing | `processing.py` `_apply_ema` |
+| 2 | 120-second baseline buffer | `processing.py` `_buffer_sample` |
+| 3 | 3-sigma outlier removal | `processing.py` `_compute_personal_baselines` |
+| 4 | Personal baselines and frozen sigma | `processing.py` and `fusion.calculate_baseline_sigma` |
+| 5 | Per-sample percentage deviation (HRV inverted) | `fusion.compute_s_instant` |
+| 6 | Weighted fusion (0.5 / 0.3 / 0.2) | `fusion.compute_s_instant` |
+| 7 | One-second rolling mean to get S_t | `fusion.evaluate_state` |
+| 8 | Thresholds at 1.33 and 2.28 times sigma, frozen for the session | `fusion.set_thresholds` |
+| 9 | State classification and rate-based balloon control, three modes | `fusion.evaluate_state`, `Config.MODE_RANGES` |
+| 10 | 0-100 dashboard score | `fusion.evaluate_state` |
+| outputs | 18-channel LSL stream | `output.UnityBridge` |
 
-This stays unchanged from [AUDIT.md](AUDIT.md), but here's the short version for completeness:
+## What's modular versus what needs a code change
 
-| Step | Description | Implementation | Status |
-|------|---|---|---|
-| 0 | LSL acquisition, ZOH, R-peak HR + RMSSD | `acquisition.py`, `data_sources.derive_hr_hrv_from_ecg` | ✅ |
-| 1 | EMA smoothing α=0.10/0.05/0.05 | `processing.py:_apply_ema` | ✅ |
-| 2 | 120 s baseline buffer | `processing.py:_buffer_sample` | ✅ |
-| 3 | 3σ outlier removal | `processing.py:_compute_personal_baselines` | ✅ |
-| 4 | Personal baselines + σ_baseline frozen | `processing.py` + `fusion.calculate_baseline_sigma` | ✅ |
-| 5 | Per-sample % deviation (HRV inverted) | `fusion.compute_s_instant` | ✅ |
-| 6 | Weighted fusion 0.5 / 0.3 / 0.2 | `fusion.compute_s_instant` (Config) | ✅ |
-| 7 | 50-sample rolling mean → S_t | `fusion.evaluate_state` | ✅ |
-| 8 | thresh_mild = 1.33·σ, thresh_high = 2.28·σ — **fixed for session** | `fusion.set_thresholds`, called once from `main.py` | ✅ |
-| 9a | Three states with same thresholds | `fusion.evaluate_state` | ✅ |
-| 9b | Three modes (easy / moderate / intense) | `Config.MODE_RANGES`, `FusionEngine._apply_mode` | ✅ |
-| 9c | Rate-based balloon (k_down=2·k_up, clamped) | `fusion.evaluate_state` | ✅ |
-| 9d | Per-frame Unity lerp | n/a — Unity's responsibility | ✅ |
-| 10 | 0–100 piecewise dashboard score | `fusion.evaluate_state` | ✅ |
-| ✓ | Per-tick outputs on LSL | `output.UnityBridge` (12 channels) | 🟡 missing `baseline_status`, `elapsed_baseline_sec`, `mode_enum` |
+You can change all of this by editing `src/config.py` alone, no pipeline code touched: the data source, the mock file path, the session mode, every math constant (smoothing factors, the 3-sigma multiplier, the fusion weights, the threshold multipliers, the mode altitude ranges, the balloon rate constants), the physiological bounds, the disconnect-detection thresholds, the dashboard chart ranges, and the session timing. Adding a fourth difficulty mode is just one more entry in the mode-ranges dictionary.
 
----
+These still require editing code: the LSL channel layout (changing it means updating both `output.py` and `dashboard.py`), the dashboard color theme (RGB values in `dashboard.py`), the Butterworth filter order in the R-peak detector, and the logging directory (the string "data/" appears in a few modules).
 
-## What remains before "done"
+## What's left before the project is fully done
 
-In priority order, with rough effort estimates:
+The pipeline and the math are finished and verified. What remains is integration work, not pipeline work:
 
-### High-value, lab-relevant
-1. **Real PLUX dry-run.** Flip `Config.DATA_SOURCE = 'real_plux'`, start OpenSignals, run `launcher.py`. Verify the deadman switch fires correctly when you unplug the device. ~30 min once hardware is available.
-2. **Surface the diagnostic counters.** Add `invalid_sample_count` / `out_of_range_count` / `disconnect_warnings_issued` to the dashboard's Session Statistics panel — either via 3 more LSL channels or a sidecar JSON polled at 1 Hz. ~30 min.
-3. **Three remaining spec outputs on LSL** (`baseline_status`, `elapsed_baseline_sec`, `mode_enum`). Unity needs these. ~20 min.
+The real PLUX device path is written but needs a hands-on dry run — flip `Config.DATA_SOURCE` to `'real_plux'`, start OpenSignals, run a session, and confirm the disconnect detection fires when you unplug an electrode. The Unity scene is a separate project being built against the output stream described in `OUTPUTS.md`. And there are a few small polish items: a dedicated ECG waveform plot for visually confirming electrode contact, and moving the last couple of hardcoded values into config.
 
-### Quality of life
-4. **Session-review viewer.** `python session_review.py` that lists past `data/session_*.csv`, lets you pick one, replays the charts, exports a one-page PDF summary. ~1 hr.
-5. **ECG plot.** Add a fourth chart that shows the actual ECG waveform — this is the "squiggly hospital monitor" view, useful for operators to visually confirm electrode contact. ~30 min.
-6. **Move last hardcoded knobs.** R-peak height factor (0.6), dashboard color scheme, log directory — all currently hardcoded. ~15 min.
+## Checks you can run right now
 
-### Stretch
-7. **Unity client.** Subscribes to `Biofeedback_State`, applies per-frame lerp, sends `mode` handshake at start. **`FusionEngine.set_mode()` is the runtime hook.** Effort: depends on Unity scene scope, hours to days.
-8. **Live recalibration mode.** Optional ability to re-baseline mid-session (clinical use only; spec says baseline is frozen, so this would be a *new* operating mode rather than a change to the existing pipeline).
-
----
-
-## What's modular and what isn't
-
-Modular (swap with config edit only, no code touch):
-- ✅ Data source — `Config.DATA_SOURCE = 'mock' | 'real_plux'`
-- ✅ Mock file path — `Config.MOCK_DATA_FILE` (any OpenSignals export works; header parser self-configures)
-- ✅ Session mode — `Config.SESSION_MODE` plus `set_mode()` runtime hook
-- ✅ All math constants — EMA alphas, 3σ multiplier, fusion weights, threshold K's, mode ranges, rate constants C_DOWN/C_UP
-- ✅ Physiological bounds — `Config.HR_MIN_BPM` etc.
-- ✅ Disconnect-detection thresholds
-- ✅ Dashboard Y-range halfranges
-- ✅ Session timing — `BASELINE_SEC`, `LIVE_PHASE_MAX_SEC`, `PIPELINE_RATE`
-
-Requires touching code:
-- 🔧 LSL channel layout — `UnityBridge.CHANNELS` schema (output.py + dashboard.py both need updating to add a channel)
-- 🔧 Dashboard color theme — RGB tuples in `dashboard.py:152-154`
-- 🔧 R-peak detector tuning — bandpass orders, height factor (mostly Config, height factor still inline)
-- 🔧 Logging directory — `"data/"` hardcoded in `session_manager.py`, `acquisition.py`, `processing.py`
-- 🔧 New session mode — adding a 4th mode means editing `Config.MODE_RANGES` (just a dict entry) AND no other change needed
-
----
-
-## Quick verification you can run right now
-
-```powershell
-# 1. Confirm degenerate-σ guard
+```
+# Degenerate-baseline guard kicks in
 python -c "import sys; sys.path.insert(0,'src'); from fusion import FusionEngine; fe=FusionEngine(); fe.set_thresholds(0.0)"
-# Expected: 'WARN: σ_baseline=0.0 is degenerate. Using fallback σ=1.5.'
 
-# 2. Confirm header parser works on both files
-python -c "import sys; sys.path.insert(0,'src'); from data_sources import parse_opensignals_header as p; print(p('data/opensignals_2026-05-25_14-57-56.txt'))"
-# Expected: fs_hz=200, sensor_order=['ECG','EDA']
+# Header parser reads rate and channel order from any file
+python -c "import sys; sys.path.insert(0,'src'); from data_sources import parse_opensignals_header as p; print(p('data/14_minute_test_of_myself_2026-05-26_16-47-36.txt'))"
 
-# 3. Sample-rate sanity check from the file
-python -c "import sys; sys.path.insert(0,'src'); import numpy as np; data=np.genfromtxt('data/opensignals_2026-05-25_14-57-56.txt',skip_header=3,invalid_raise=False); print(f'rows={data.shape[0]}, duration={data.shape[0]/200:.1f}s')"
-# Expected: rows=104205, duration=521.0s
-
-# 4. Run a full session and confirm no exceptions
+# Full session, confirm no errors
 python launcher.py
 ```

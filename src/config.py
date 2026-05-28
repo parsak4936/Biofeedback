@@ -128,8 +128,19 @@ class Config:
     # Bandpass cutoffs for QRS detection. Works at any sample rate.
     ECG_BANDPASS_LOW_HZ = 5.0
     ECG_BANDPASS_HIGH_HZ = 15.0
-    # Minimum spacing between R-peaks (refractory). 250 ms = max ~240 BPM.
-    ECG_MIN_RR_MS = 250
+    # Minimum spacing between R-peaks (refractory). 300 ms = max 200 BPM.
+    # Set to 300 (not 250) so we don't double-count the T-wave that follows
+    # each QRS ~200-400 ms later as a second beat.
+    ECG_MIN_RR_MS = 300
+    # Adaptive R-peak detection. We detect on peak PROMINENCE (how far a peak
+    # stands out from the local baseline), not raw height — prominence is
+    # robust to baseline wander and to recordings with occasional big motion
+    # artifacts. A two-pass approach estimates the typical R-peak prominence,
+    # then keeps peaks at this fraction of it. Lower = more sensitive.
+    ECG_PEAK_PROMINENCE_FRACTION = 0.5
+    # The loose first pass uses this fraction of the filtered signal's std as a
+    # provisional prominence floor, just to gather candidate peaks.
+    ECG_CANDIDATE_PROMINENCE_STD_FRAC = 0.5
     # RMSSD window — math-pipeline Step 0 says ~10 s rolling.
     RMSSD_WINDOW_SEC = 10
 
@@ -176,5 +187,6 @@ class Config:
     # ============================================
     # MockDataSource auto-detects sampling rate AND channel order (ECG vs EDA)
     # from the OpenSignals header JSON — switch files freely, no other edits.
-    MOCK_DATA_FILE = "data/opensignals_2026-05-25_14-57-56.txt"
-    # MOCK_DATA_FILE = "data/fake_opensignals_2026-05-13_15-24-44.txt"  # 1000Hz, 42s, EDA=col2/ECG=col3
+    MOCK_DATA_FILE = "data/14_minute_test_of_myself_2026-05-26_16-47-36.txt"  # 1000Hz, 14min, EDA=col2/ECG=col3
+    # MOCK_DATA_FILE = "data/opensignals_2026-05-25_14-57-56.txt"            # 200Hz, 8.7min, ECG=col2/EDA=col3
+    # MOCK_DATA_FILE = "data/fake_opensignals_2026-05-13_15-24-44.txt"       # 1000Hz, 42s, EDA=col2/ECG=col3
