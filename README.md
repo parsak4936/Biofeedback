@@ -75,6 +75,3 @@ Almost everything tunable is in `src/config.py`: the data source, the session di
 | `src/main.py` | The 50 Hz loop that ties it together |
 | `src/session_review.py` | Offline replay of a saved session |
 
-## Status
-
-The Python pipeline and the math are complete and verified against the spec documents (`shayans_biofeedback_math_pipeline` and `shayans_biofeedback_walkthrough`). What's left is integration: the live PLUX device path is built but needs a hands-on dry run, and the Unity scene is being built separately against the stream contract described in `OUTPUTS.md`.
