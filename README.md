@@ -6,8 +6,6 @@ This repository is the Python side: signal acquisition, the stress-fusion math, 
 
 ## Where to find things
 
-This is the map. If someone asks you a question about the system, this table tells you which file answers it, so you don't have to dig through everything.
-
 | If you want to know... | Read |
 |---|---|
 | What a term means (R-peak, RMSSD, EDA, EMA, baseline, sigma, S_t...) | `CONCEPTS.md` |
@@ -22,7 +20,6 @@ This is the map. If someone asks you a question about the system, this table tel
 | How the code handles noise, dropouts, and bad input | `CODE_AUDIT.md` |
 | How to set up the real device in the lab | `LAB_SETUP.md` |
 
-A quick worked example of using the map: a professor asks "how did you compute heart rate variability?" You'd open `CONCEPTS.md` for the definition of RMSSD and `DATA_FLOW.md` Layer 2 for exactly how the code does it. Two files, no searching.
 
 ## Running it
 

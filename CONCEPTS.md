@@ -1,6 +1,6 @@
 # Concepts and terms, explained
 
-This is the plain-language glossary for the project. If a term shows up in the code or the other docs and you're not sure what it means, it's here. The goal is that you can read this once and then explain any part of the system to someone else without hand-waving.
+This is the plain-language glossary for the project. 
 
 The terms are grouped roughly in the order they appear as a signal travels through the system: the body and the sensors first, then the numbers we compute, then the plumbing.
 
