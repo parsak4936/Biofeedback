@@ -1,13 +1,29 @@
 # launcher.py
 """
-BIOFEEDBACK VIRTUAL CLINIC - Single Entry Point
+Entry point. This is the only file a normal user runs.
 
-This is the ONLY file a casual user needs to run.
+What it does, in order:
+  1. Shows the patient intake dialog (a PyQt5 form from src/patient_intake.py).
+     Validates name, last name, ID, gender, date, and session number.
+     Cancel here exits cleanly without starting anything else.
 
-Configuration:
-  - Change Config.DATA_SOURCE in src/config.py to switch between mock/real hardware
-  - Default is 'real_plux' (real PLUX device)
-  - Change to 'mock' to use synthetic test data
+  2. Writes the validated patient record to data/patient_<id>_<date>_s<n>.json
+     and passes the path to the subprocesses via the PATIENT_INTAKE_JSON
+     environment variable. (The legacy PATIENT_NAME / PATIENT_ID env vars
+     are also set for backward compatibility.)
+
+  3. Spawns three subprocesses in order, with delays between them so the
+     LSL streams have time to come up before the next process attaches:
+       (a) src/streamer.py — publishes the OpenSignals raw signal stream
+       (b) src/main.py    — runs the 50 Hz state-machine pipeline
+       (c) src/dashboard.py — operator UI with Start/Stop/Reset buttons
+
+  4. Stays alive until Ctrl+C, then terminates the three subprocesses
+     in reverse order.
+
+Mock vs real-device selection is in src/config.py (Config.DATA_SOURCE).
+Default is 'mock' for safe testing on the recorded files in data/.
+Change to 'real_plux' when running with the PLUX hardware via OpenSignals.
 
 Startup Sequence:
   1. streamer.py - Data acquisition (mock or real hardware)
@@ -17,6 +33,7 @@ Startup Sequence:
 All systems shut down automatically when you close this launcher.
 """
 
+import json
 import subprocess
 import time
 import sys
@@ -26,43 +43,66 @@ from pathlib import Path
 
 def launch_system():
     """Launch the complete biofeedback system."""
-    
+
     print("\n" + "=" * 60)
     print("  BIOFEEDBACK VIRTUAL CLINIC - LAUNCHING SYSTEM           ")
     print("=" * 60 + "\n")
-    
+
     # ============================================
-    # PATIENT INFORMATION
+    # PATIENT INTAKE
     # ============================================
-    print("[SYSTEM] Patient Information")
-    print("-" * 60)
-    patient_name = input("Enter patient name: ").strip()
-    patient_id = input("Enter patient ID (or press Enter to skip): ").strip()
-    
-    if not patient_name:
-        patient_name = "UNNAMED"
-    if not patient_id:
-        patient_id = "NO_ID"
-    
-    patient_info = f"{patient_name}_{patient_id}"
-    print(f"[SYSTEM] ✓ Patient: {patient_info}\n")
-    
-    # Get paths
+    # Show a PyQt5 form to collect and validate patient info before anything
+    # else starts. The dialog handles all the field-level error checking; we
+    # only get here with a complete, valid dict.
     src_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'src')
+    sys.path.insert(0, src_dir)
+    from patient_intake import collect_patient_info
+
+    patient = collect_patient_info()
+    if patient is None:
+        print("[LAUNCHER] Intake cancelled by operator. Nothing to do.")
+        return 0
+
+    # Persist the collected info to a sidecar JSON in data/, and pass the path
+    # to the subprocesses via env var so every component sees the same record.
+    project_root = os.path.dirname(os.path.abspath(__file__))
+    data_dir = os.path.join(project_root, 'data')
+    os.makedirs(data_dir, exist_ok=True)
+    patient_json_path = os.path.join(
+        data_dir,
+        f"patient_{patient['patient_id']}_{patient['session_date']}_s{patient['session_number']}.json"
+    )
+    with open(patient_json_path, 'w', encoding='utf-8') as f:
+        json.dump(patient, f, indent=2)
+
+    patient_name = patient['first_name']
+    patient_id = patient['patient_id']
+    patient_info = f"{patient['first_name']}_{patient['last_name']}_{patient_id}"
+    print(f"[LAUNCHER] Patient: {patient_info}")
+    print(f"[LAUNCHER] Session {patient['session_number']} on {patient['session_date']}")
+    print(f"[LAUNCHER] Intake record: {os.path.basename(patient_json_path)}\n")
+
+    # src_dir is already on sys.path (set above for the intake import).
     config_file = os.path.join(src_dir, 'config.py')
     
-    # Read current config to show user
+    # Read current config to show user. Match the assignment line so a
+    # commented-out alternative doesn't fool the detection.
+    _LABELS = {
+        'mock':       "MOCK (recorded file, in-house adaptive detector)",
+        'mock2':      "MOCK 2 (recorded file, colleague's NeuroKit2 chain)",
+        'real_plux':  "REAL PLUX (live, in-house adaptive detector)",
+        'real_plux2': "REAL PLUX 2 (live, colleague's NeuroKit2 chain)",
+    }
+    current_source = "UNKNOWN"
     try:
+        import re
         with open(config_file, 'r') as f:
             content = f.read()
-            if "DATA_SOURCE = 'mock'" in content:
-                current_source = "MOCK (Synthetic Test Data)"
-            elif "DATA_SOURCE = 'real_plux'" in content:
-                current_source = "REAL PLUX DEVICE"
-            else:
-                current_source = "UNKNOWN"
-    except:
-        current_source = "UNKNOWN"
+        m = re.search(r"^\s*DATA_SOURCE\s*=\s*'([^']+)'", content, re.MULTILINE)
+        if m:
+            current_source = _LABELS.get(m.group(1), f"UNKNOWN ({m.group(1)})")
+    except Exception:
+        pass
     
     print(f"[CONFIG] Active Data Source: {current_source}")
     print(f"[CONFIG] To change: Edit src/config.py and set DATA_SOURCE\n")
@@ -83,12 +123,16 @@ def launch_system():
         time.sleep(2)  # Give LSL network time to establish
         
         # 2. Processing Pipeline
-        print("[LAUNCHER] ② Starting Signal Processing Pipeline...")
-        print(f"[LAUNCHER]    (Patient: {patient_info})")
-        print("[LAUNCHER]    (Baseline calibration: 120 seconds)\n")
+        print("[LAUNCHER] (2) Starting signal processing pipeline...")
+        print(f"[LAUNCHER]     Patient: {patient_info}")
+        print("[LAUNCHER]     The pipeline will wait for you to click")
+        print("[LAUNCHER]     'Start Baseline' on the dashboard.\n")
         
-        # Pass patient info as environment variable
+        # Pass patient info to subprocesses. The PATIENT_INTAKE_JSON path is
+        # the canonical source (full record); the legacy NAME/ID env vars are
+        # kept for backwards compatibility with anything that still reads them.
         env = os.environ.copy()
+        env['PATIENT_INTAKE_JSON'] = patient_json_path
         env['PATIENT_NAME'] = patient_name
         env['PATIENT_ID'] = patient_id
         
@@ -102,41 +146,58 @@ def launch_system():
         time.sleep(2)
         
         # 3. Clinical Dashboard
-        print("[LAUNCHER] ③ Starting Clinical Dashboard...")
-        print("[LAUNCHER]    (Connecting to data streams...)\n")
+        print("[LAUNCHER] (3) Starting clinical dashboard...")
+        print("[LAUNCHER]     The dashboard hosts the Start / Stop / Reset")
+        print("[LAUNCHER]     buttons that drive the rest of the pipeline.\n")
         p_dash = subprocess.Popen(
-            [sys.executable, "dashboard.py"], 
+            [sys.executable, "dashboard.py"],
             cwd=src_dir,
             env=env
         )
         processes.append(p_dash)
-        
+
         print("=" * 60)
-        print(f"  ✓ SYSTEM ONLINE - Patient: {patient_info}                ")
+        print(f"  SYSTEM ONLINE - Patient: {patient_info}")
         print("=" * 60)
-        print("\nDashboard is now displaying patient metrics in real-time.")
+        print("\nDashboard is open. Click 'Start Baseline' to begin the 120-second")
+        print("calibration; once baseline finishes, click 'Start Live Session'.")
         print("Session data will be saved to: data/session_*.csv")
         print("\nTo shutdown: Close the Dashboard window or press Ctrl+C below.\n")
-        
-        # Keep launcher alive
-        while True:
-            time.sleep(1)
-            
-    except KeyboardInterrupt:
-        print("\n\n[LAUNCHER] Shutting down all subsystems...")
-        
-        # Terminate processes in reverse order
+
+        # Block until either (a) the operator closes the dashboard window
+        # (p_dash exits) or (b) Ctrl+C is pressed in this terminal. Both
+        # paths fall through to the shared cleanup below — closing the
+        # dashboard now actually kills the whole session, no orphan
+        # streamer/main processes left running in the background.
+        shutdown_reason = "Ctrl+C"
+        try:
+            while True:
+                if p_dash.poll() is not None:
+                    shutdown_reason = f"dashboard closed (exit {p_dash.returncode})"
+                    break
+                time.sleep(1)
+        except KeyboardInterrupt:
+            pass
+
+        print(f"\n\n[LAUNCHER] {shutdown_reason}. Shutting down all subsystems...")
+
+        # Terminate processes in reverse order. Skip any that are already
+        # gone (typically the dashboard, on the window-close path).
         for p in reversed(processes):
             try:
-                p.terminate()
-                p.wait(timeout=2)
-            except:
-                p.kill()
-        
+                if p.poll() is None:
+                    p.terminate()
+                    p.wait(timeout=2)
+            except Exception:
+                try:
+                    p.kill()
+                except Exception:
+                    pass
+
         print("[LAUNCHER] All systems offline.")
         print("[LAUNCHER] Goodbye.\n")
         return 0
-    
+
     except Exception as e:
         print(f"\n[ERROR] System startup failed: {str(e)}")
         print("\nTroubleshooting:")

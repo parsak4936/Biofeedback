@@ -1,10 +1,22 @@
 # src/streamer.py
 """
-Universal Data Streamer
+Data streamer subprocess.
 
-Replaces both hardware_mock.py and mock_streamer.py
-Uses DataSourceFactory to automatically select mock or real hardware based on config
-Broadcasts selected data source on LSL at 1000Hz
+Tiny wrapper that creates a DataSource (mock or real PLUX, chosen by
+Config.DATA_SOURCE) and drives its `get_next_sample()` in a loop. The
+data source itself handles the LSL outlet and the per-sample pacing,
+so this file is just the loop. Runs forever until Ctrl+C.
+
+In mock mode, the data source publishes a 3-channel LSL stream
+(`Config.STREAM_NAME` — typically "OpenSignals") at the recording file's
+native rate, plus a 1-channel ECG side stream for the dashboard's
+waveform display. In real-PLUX mode, OpenSignals software is the
+publisher; this script just consumes from it and the upstream stream
+publish is done by the PLUX/OpenSignals side.
+
+The streamer must be started before main.py so the OpenSignals LSL
+stream exists for acquisition to subscribe to. The launcher handles
+this ordering.
 """
 
 import time

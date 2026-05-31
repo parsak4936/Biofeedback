@@ -21,6 +21,8 @@ This is the "Monitoring and Analysis -> Data Logger" view from the framework
 diagram — a way to audit any past participant's session without re-running it.
 """
 
+import glob
+import json
 import os
 import sys
 import argparse
@@ -84,41 +86,119 @@ def interactive_pick(sessions):
         print(f"  Invalid input. Enter a number 1-{len(sessions)}.")
 
 
-def summarize(df: pd.DataFrame) -> dict:
-    """Compute summary statistics for the session."""
-    live_df = df[df['phase'] == 'LIVE']
-    state_counts = live_df['state'].value_counts().to_dict()
+def _safe(col, default=None):
+    """Return a single value from a Series-or-missing column."""
+    if col is None or len(col) == 0:
+        return default
+    try:
+        return col.iloc[0]
+    except Exception:
+        return default
+
+
+def load_baseline_json(csv_path: str):
+    """Find the baseline_*.json that matches this session CSV's timestamp
+    + patient id, if one exists in the same data/ folder. The CSV filename
+    looks like  session_<ts>_<first>_<id>.csv  and the baseline JSON looks
+    like  baseline_<ts>_<id>.json  — same timestamp, same id. Returns the
+    parsed dict, or None if no match found."""
+    base = os.path.basename(csv_path)
+    if not base.startswith('session_'):
+        return None
+    parts = base[len('session_'):-len('.csv')].split('_')
+    if len(parts) < 3:
+        return None
+    ts = '_'.join(parts[:2])      # 'YYYYMMDD_HHMMSS'
+    pid = parts[-1]               # last token is patient id
+    pattern = os.path.join(os.path.dirname(csv_path),
+                           f"baseline_{ts}_{pid}.json")
+    matches = glob.glob(pattern)
+    if not matches:
+        return None
+    try:
+        with open(matches[0], 'r', encoding='utf-8') as f:
+            return json.load(f)
+    except Exception:
+        return None
+
+
+def summarize(df: pd.DataFrame, baseline_meta: dict = None) -> dict:
+    """Compute summary statistics for one session.
+
+    Pulls demographics from the per-tick CSV (every row carries them) and,
+    if a matching baseline JSON is present, also pulls the personal
+    averages and locked thresholds for the clinical record."""
+    live_df = df[df['phase'] == 'LIVE'] if 'phase' in df.columns else df
+    state_counts = (live_df['state'].value_counts().to_dict()
+                    if 'state' in live_df.columns else {})
     pipeline_rate = 50.0  # Hz; matches Config.PIPELINE_RATE
 
     def seconds(state):
         return state_counts.get(state, 0) / pipeline_rate
 
-    return {
-        'patient': f"{df['patient_name'].iloc[0]} ({df['patient_id'].iloc[0]})",
-        'mode': df.get('session_mode', pd.Series(['unknown'])).iloc[0],
-        'samples_total': len(df),
-        'samples_live': len(live_df),
-        'duration_sec': len(df) / pipeline_rate,
-        'live_duration_sec': len(live_df) / pipeline_rate,
-        'time_calm': seconds('calm'),
-        'time_stressed': seconds('stressed'),
-        'time_ultra': seconds('ultra_stressed'),
-        'mean_s_t': live_df['s_t'].mean() if len(live_df) else 0.0,
-        'max_s_t': live_df['s_t'].max() if len(live_df) else 0.0,
-        'artifacts_eda': df.get('artifacts_eda', pd.Series([0])).iloc[-1] if len(df) else 0,
-        'artifacts_hr':  df.get('artifacts_hr',  pd.Series([0])).iloc[-1] if len(df) else 0,
-        'artifacts_hrv': df.get('artifacts_hrv', pd.Series([0])).iloc[-1] if len(df) else 0,
+    first = _safe(df.get('patient_first_name'), '')
+    last  = _safe(df.get('patient_last_name'),  '')
+    pid   = _safe(df.get('patient_id'),        '?')
+    gender = _safe(df.get('gender'), '?')
+    sdate  = _safe(df.get('session_date'), '?')
+    snum   = _safe(df.get('session_number'), '?')
+
+    out = {
+        'patient_full':       f"{first} {last}".strip() or '?',
+        'patient_id':         str(pid),
+        'gender':             str(gender),
+        'session_date':       str(sdate),
+        'session_number':     str(snum),
+        'samples_total':      len(df),
+        'samples_live':       len(live_df),
+        'duration_sec':       len(df) / pipeline_rate,
+        'live_duration_sec':  len(live_df) / pipeline_rate,
+        'time_calm':          seconds('calm'),
+        'time_stressed':      seconds('stressed'),
+        'time_ultra':         seconds('ultra_stressed'),
+        'mean_s_t':           float(live_df['s_t'].mean()) if len(live_df) else 0.0,
+        'max_s_t':            float(live_df['s_t'].max())  if len(live_df) else 0.0,
+        'mean_dashboard':     float(live_df['dashboard_score'].mean()) if len(live_df) else 0.0,
+        'artifacts_eda':      int(_safe(df.get('artifacts_eda'), 0) or 0),
+        'artifacts_hr':       int(_safe(df.get('artifacts_hr'),  0) or 0),
+        'artifacts_hrv':      int(_safe(df.get('artifacts_hrv'), 0) or 0),
+        'baseline_eda':       None,
+        'baseline_hr':        None,
+        'baseline_hrv':       None,
+        'thresh_mild':        None,
+        'thresh_high':        None,
+        'sigma_baseline':     None,
+        'data_source':        None,
     }
+    if baseline_meta:
+        try:
+            pb = baseline_meta.get('personal_baselines', {})
+            out['baseline_eda']  = pb.get('eda_uS')
+            out['baseline_hr']   = pb.get('hr_bpm')
+            out['baseline_hrv']  = pb.get('hrv_ms')
+            th = baseline_meta.get('thresholds', {})
+            out['thresh_mild']   = th.get('mild')
+            out['thresh_high']   = th.get('high')
+            out['sigma_baseline'] = baseline_meta.get('sigma_baseline')
+            out['data_source']    = baseline_meta.get('source')
+        except Exception:
+            pass
+    return out
 
 
-def render(df: pd.DataFrame, summary: dict, csv_path: str):
-    """Build the matplotlib review window — dark theme, clinical look."""
+def render(df: pd.DataFrame, summary: dict, csv_path: str,
+           show: bool = True, save_path: str = None):
+    """Build the matplotlib review figure. If save_path is given, write it
+    to disk (PNG/PDF per file extension) instead of (or in addition to)
+    popping a window."""
     fig, axes = plt.subplots(4, 1, figsize=(14, 9), sharex=True,
                              gridspec_kw={'height_ratios': [3, 1, 1, 1]})
     fig.suptitle(
-        f"Session Review — {summary['patient']} — mode={summary['mode']} — "
-        f"file={os.path.basename(csv_path)}",
-        fontsize=12, fontweight='bold', color='#ffffff'
+        f"Session Review — {summary['patient_full']} "
+        f"(ID {summary['patient_id']}, {summary['gender']}, "
+        f"session #{summary['session_number']} on {summary['session_date']}) — "
+        f"{os.path.basename(csv_path)}",
+        fontsize=11, fontweight='bold', color='#ffffff'
     )
 
     t = df.index.values / 50.0  # convert sample index to seconds
@@ -157,17 +237,34 @@ def render(df: pd.DataFrame, summary: dict, csv_path: str):
     axes[-1].set_xlabel("time (s)", color='#dddddd')
 
     # --- Summary text box ---
+    def _fmt(x, unit='', spec='.2f'):
+        return f"{x:{spec}}{unit}" if x is not None else "--"
+
     box = (
-        f"Patient: {summary['patient']}\n"
-        f"Mode: {summary['mode']}\n"
-        f"Total duration: {summary['duration_sec']:.1f}s "
-        f"(LIVE: {summary['live_duration_sec']:.1f}s)\n"
+        f"Patient:    {summary['patient_full']}\n"
+        f"ID / sex:   {summary['patient_id']}  /  {summary['gender']}\n"
+        f"Session:    #{summary['session_number']}  on  {summary['session_date']}\n"
+        f"Source:     {summary.get('data_source') or '--'}\n"
+        f"\n"
+        f"Duration:   {summary['duration_sec']:.1f}s total "
+        f"({summary['live_duration_sec']:.1f}s LIVE)\n"
         f"\n"
         f"Time CALM:     {summary['time_calm']:>6.1f}s\n"
         f"Time STRESSED: {summary['time_stressed']:>6.1f}s\n"
         f"Time ULTRA:    {summary['time_ultra']:>6.1f}s\n"
         f"\n"
-        f"S_t mean: {summary['mean_s_t']:.2f}    max: {summary['max_s_t']:.2f}\n"
+        f"S_t  mean: {summary['mean_s_t']:+.2f}  max: {summary['max_s_t']:+.2f}\n"
+        f"Score mean: {summary['mean_dashboard']:.1f}/100\n"
+        f"\n"
+        f"Personal baseline:\n"
+        f"  EDA = {_fmt(summary['baseline_eda'], ' uS')}\n"
+        f"  HR  = {_fmt(summary['baseline_hr'],  ' BPM')}\n"
+        f"  HRV = {_fmt(summary['baseline_hrv'], ' ms')}\n"
+        f"\n"
+        f"Locked thresholds:\n"
+        f"  MILD = {_fmt(summary['thresh_mild'])}\n"
+        f"  HIGH = {_fmt(summary['thresh_high'])}\n"
+        f"  sigma = {_fmt(summary['sigma_baseline'])}\n"
         f"\n"
         f"Artifacts removed:\n"
         f"  EDA = {summary['artifacts_eda']}\n"
@@ -198,29 +295,56 @@ def render(df: pd.DataFrame, summary: dict, csv_path: str):
         )
     except Exception:
         pass
-    plt.show()
+    if save_path:
+        # dpi=150 + tight margins gives a crisp page suitable for
+        # printing on A4/Letter and stapling to the patient file.
+        fig.savefig(save_path, dpi=150, facecolor=fig.get_facecolor(),
+                    bbox_inches='tight')
+    if show:
+        plt.show()
+    else:
+        plt.close(fig)
 
 
 def cli_summary_line(summary: dict, csv_path: str):
-    """One-line summary printed to console — paste-friendly for notes."""
+    """Multi-line summary printed to console — paste-friendly for the
+    patient file. Mirrors what's in the review-window box."""
     print()
     print(f"[REVIEW] {os.path.basename(csv_path)}")
-    print(f"   patient={summary['patient']}  mode={summary['mode']}  "
-          f"live={summary['live_duration_sec']:.0f}s")
-    print(f"   CALM={summary['time_calm']:.0f}s  "
+    print(f"   patient    : {summary['patient_full']}  "
+          f"(ID {summary['patient_id']}, {summary['gender']})")
+    print(f"   session    : #{summary['session_number']}  on {summary['session_date']}")
+    print(f"   source     : {summary.get('data_source') or '--'}")
+    print(f"   duration   : {summary['live_duration_sec']:.0f}s LIVE "
+          f"({summary['duration_sec']:.0f}s total)")
+    print(f"   time-state : CALM={summary['time_calm']:.0f}s  "
           f"STRESSED={summary['time_stressed']:.0f}s  "
-          f"ULTRA={summary['time_ultra']:.0f}s  "
-          f"|  mean S_t={summary['mean_s_t']:.2f}  max={summary['max_s_t']:.2f}")
-    print(f"   artifacts: EDA={summary['artifacts_eda']} "
+          f"ULTRA={summary['time_ultra']:.0f}s")
+    print(f"   S_t        : mean={summary['mean_s_t']:+.2f}  "
+          f"max={summary['max_s_t']:+.2f}  "
+          f"score mean={summary['mean_dashboard']:.1f}/100")
+    if summary['baseline_eda'] is not None:
+        print(f"   baseline   : EDA={summary['baseline_eda']:.2f}uS  "
+              f"HR={summary['baseline_hr']:.1f}BPM  "
+              f"HRV={summary['baseline_hrv']:.1f}ms")
+    if summary['thresh_mild'] is not None:
+        print(f"   thresholds : MILD={summary['thresh_mild']:.2f}  "
+              f"HIGH={summary['thresh_high']:.2f}  "
+              f"sigma={summary['sigma_baseline']:.3f}")
+    print(f"   artifacts  : EDA={summary['artifacts_eda']} "
           f"HR={summary['artifacts_hr']} HRV={summary['artifacts_hrv']}")
     print()
 
 
 def main():
     parser = argparse.ArgumentParser(description="Replay a past Biofeedback session.")
-    parser.add_argument('csv', nargs='?', help="Path to session_*.csv (omit for picker).")
+    parser.add_argument('csv', nargs='?',
+                        help="Path to session_*.csv (omit for picker).")
     parser.add_argument('--no-window', action='store_true',
                         help="Print summary only; skip the matplotlib window.")
+    parser.add_argument('--save',
+                        help="Save the review figure to PATH (PNG or PDF) for "
+                             "attaching to the patient file. Implies --no-window.")
     args = parser.parse_args()
 
     if args.csv:
@@ -235,8 +359,18 @@ def main():
         path = interactive_pick(sessions)
 
     df = pd.read_csv(path)
-    summary = summarize(df)
+    baseline = load_baseline_json(path)
+    summary = summarize(df, baseline_meta=baseline)
     cli_summary_line(summary, path)
+
+    if args.save:
+        # Build the figure but don't pop a window — dump to disk and exit.
+        # matplotlib will pick PDF vs PNG from the file extension.
+        plt.ioff()
+        render(df, summary, path, show=False, save_path=args.save)
+        print(f"[REVIEW] Saved review to: {args.save}")
+        return
+
     if not args.no_window:
         render(df, summary, path)
 

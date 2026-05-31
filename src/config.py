@@ -1,13 +1,35 @@
 # src/config.py
+"""
+Central configuration.
+
+Every tunable parameter in the system lives here. The design intent is that
+behavior changes should almost always be a `Config` edit, not a code edit.
+The values are grouped by concern (data source, pipeline rates, smoothing,
+fusion math, thresholds, physiological bounds, dashboard rendering, UDP
+bridge, R-peak detection, etc.). Sections are headed by comment banners so
+you can scan to the area you want.
+
+For an overview of which constants are config-only versus which need a
+code touch, see CODE_AUDIT.md.
+"""
+
 
 class Config:
     # ============================================
     # DATA SOURCE SELECTION (CRITICAL FOR MODULARITY)
     # ============================================
-    # Options: 'mock' | 'real_plux'
-    # When real PLUX device is connected, simply change to 'real_plux'
-    # All other code remains unchanged
-    DATA_SOURCE = 'mock'  # Change to 'mock' to use synthetic data
+    # Options: 'mock' | 'mock2' | 'real_plux' | 'real_plux2'
+    #   mock        - replays MOCK_DATA_FILE; HR/HRV via in-house adaptive
+    #                 R-peak detector + per-beat 60/RR (see derive_hr_hrv_from_ecg).
+    #   mock2       - replays MOCK_DATA_FILE; HR/HRV via the colleague's
+    #                 vret_server_v2 chain (nk.ecg_clean -> ecg_peaks ->
+    #                 ecg_rate / hrv_time) with 30 s HR window and 60 s
+    #                 RMSSD window. Use for A/B-testing the two derivation
+    #                 methods against the same recording.
+    #   real_plux   - live PLUX over OpenSignals LSL, adaptive detector.
+    #   real_plux2  - live PLUX over OpenSignals LSL, NeuroKit2 chain.
+    # Switching is a one-line change here; nothing downstream needs editing.
+    DATA_SOURCE = 'mock'
     
     # ============================================
     # LSL NETWORK SETTINGS
@@ -20,6 +42,11 @@ class Config:
     # SYSTEM LIMITS
     # ============================================
     STREAM_TIMEOUT_SEC = 5.0  # Maximum seconds of silence before declaring stream dead
+    # The mock streamer waits up to this long for the acquisition consumer to
+    # subscribe before it begins pushing samples. This is the reproducibility
+    # fix — without it the streamer races ahead while subprocesses spawn and
+    # the same input produces different baselines run to run.
+    STREAMER_CONSUMER_WAIT_SEC = 10.0
     
     # ============================================
     # FREQUENCIES (Hz)
@@ -73,27 +100,6 @@ class Config:
     THRESH_HIGH_K = 2.28
 
     # ============================================
-    # SESSION MODE (per math-pipeline Step 9b)
-    # ============================================
-    # Selects the VR balloon altitude range.
-    # MODULAR: set here for now. Later, Unity will override at session start
-    # via an LSL handshake (see FusionEngine.set_mode()). The launcher could
-    # also prompt for this — flip CALL SITE to either keep this constant or
-    # read an env var like PATIENT_NAME does.
-    SESSION_MODE = 'easy'  # 'easy' | 'moderate' | 'intense'
-
-    MODE_RANGES = {
-        'easy':     {'y_low': 20.0, 'y_high': 30.0, 'y_mid': 25.0},
-        'moderate': {'y_low': 30.0, 'y_high': 45.0, 'y_mid': 37.5},
-        'intense':  {'y_low': 45.0, 'y_high': 65.0, 'y_mid': 55.0},
-    }
-
-    # Rate scaling constants from math-pipeline Step 9c (per second).
-    # k_down = C_DOWN * (y_high - y_low),  k_up = C_UP * (y_high - y_low).
-    C_DOWN = 0.010
-    C_UP = 0.005
-
-    # ============================================
     # SAMPLE VALIDATION (physiological sanity bounds)
     # ============================================
     # Any sample outside these bounds is considered an artifact and is replaced
@@ -118,9 +124,13 @@ class Config:
     # ============================================
     # SESSION END POLICY
     # ============================================
-    # Operator can Ctrl+C at any time. If they don't, the LIVE phase auto-finishes
-    # after this many seconds (default 5 min). Set to None to disable the cap.
-    LIVE_PHASE_MAX_SEC = 300
+    # The session runs until the operator presses Ctrl+C or stops it from the
+    # dashboard. There is no automatic time cap: the duration of a session is
+    # a clinical decision, not something to be hardcoded.
+
+    # Upper bound for the "Session number" field in the patient intake form.
+    # Multi-session protocols (e.g. 5 weekly visits) should raise this.
+    MAX_SESSION_NUMBER = 3
 
     # ============================================
     # ECG -> HR / HRV  (same pipeline for mock + real PLUX)
@@ -132,17 +142,56 @@ class Config:
     # Set to 300 (not 250) so we don't double-count the T-wave that follows
     # each QRS ~200-400 ms later as a second beat.
     ECG_MIN_RR_MS = 300
-    # Adaptive R-peak detection. We detect on peak PROMINENCE (how far a peak
-    # stands out from the local baseline), not raw height — prominence is
-    # robust to baseline wander and to recordings with occasional big motion
-    # artifacts. A two-pass approach estimates the typical R-peak prominence,
-    # then keeps peaks at this fraction of it. Lower = more sensitive.
+    # R-peak detection uses NeuroKit2 as primary (team-preferred reference
+    # library). Method options: 'neurokit' (default, robust), 'pantompkins1985'
+    # (classic gold standard), 'hamilton2002', 'christov2004', 'elgendi2010'.
+    # If you change this, re-verify on your recordings — they don't all agree.
+    NEUROKIT_RPEAK_METHOD = 'neurokit'
+    # Fallback detector parameters, used only if NeuroKit2 fails on the input.
+    # The fallback is a prominence-based two-pass algorithm; lower fractions
+    # are more sensitive but more vulnerable to noise.
     ECG_PEAK_PROMINENCE_FRACTION = 0.5
-    # The loose first pass uses this fraction of the filtered signal's std as a
-    # provisional prominence floor, just to gather candidate peaks.
     ECG_CANDIDATE_PROMINENCE_STD_FRAC = 0.5
     # RMSSD window — math-pipeline Step 0 says ~10 s rolling.
     RMSSD_WINDOW_SEC = 10
+
+    # ============================================
+    # DATA SOURCE 2 (NeuroKit2 sliding-window variant)
+    # ============================================
+    # Knobs for MockDataSource2 / RealPLUXDataSource2 only. The original
+    # detectors above are untouched, so flipping DATA_SOURCE between
+    # 'mock' and 'mock2' gives a clean A/B comparison on the same file.
+    DS2_HR_WINDOW_SEC = 30          # trailing ECG fed to nk.ecg_rate (matches colleague)
+    DS2_HRV_WINDOW_SEC = 60         # trailing ECG fed to nk.hrv_time   (matches colleague)
+    DS2_UPDATE_INTERVAL_SEC = 0.5   # how often to recompute (HR_COMPUTE_INTERVAL=25 @ 50 Hz)
+    DS2_MIN_PEAKS_HRV = 10          # require this many R-peaks before RMSSD is reported
+    DS2_RMSSD_MIN_MS = 5            # reject RMSSD below this as a detector failure
+    DS2_RMSSD_MAX_MS = 300          # reject RMSSD above this as a detector failure
+    DS2_PLUX_ECG_BUFFER_SEC = 65    # live PLUX buffer must exceed DS2_HRV_WINDOW_SEC
+
+    # ============================================
+    # UNITY UDP BRIDGE
+    # ============================================
+    # Plain-text commands ("start", "stop", "increase", "decrease") are sent
+    # to Unity's BioFeedbackMiddleware (see AcrophobiaBalloonFlightController.cs)
+    # over UDP. Default targets localhost; set the host to Unity's IP if the
+    # VR rig is on a separate machine. The port matches Unity's default
+    # listenPort in BioFeedbackMiddleware.cs (5005).
+    UNITY_UDP_HOST = '127.0.0.1'
+    UNITY_UDP_PORT = 5005
+    # Minimum gap between two consecutive state-driven commands. The Unity
+    # middleware steps the balloon by stepAmount (default 1 m) per packet,
+    # so flooding would move the balloon impossibly fast. One per second
+    # gives 1 m/s under sustained state, which the visual lerp on the Unity
+    # side then smooths. Tune lower for snappier reaction, higher for gentler.
+    UNITY_COMMAND_INTERVAL_SEC = 1.0
+    # Wait-for-calm gate: after "start" is sent, the bridge holds all
+    # state-driven commands until the patient hits the calm state. This
+    # window is the period we wait *before* checking for calm, so the
+    # synthetic "calm" the fusion engine returns during its 1-second buffer
+    # warmup doesn't trigger a false open. Default 1.5 s gives the buffer
+    # plenty of time to fill with real samples.
+    UDP_GATE_WARMUP_SEC = 1.5
 
     # ============================================
     # REAL PLUX OPENSIGNALS LSL CONFIG

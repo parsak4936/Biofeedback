@@ -1,103 +1,172 @@
 # What the system produces, and what every number means
 
-This is the reference I'd hand to anyone who needs to read our data without having written the code. It covers the three files we write to disk, the live network stream we send to Unity and the dashboard, and how to actually interpret the important numbers.
+A reference for anyone who needs to read the data without having written the code. It covers the files written to disk, the live network streams that go to the dashboard and Unity, and how to interpret the important numbers.
 
-If you only remember one thing: the device gives us voltage, and everything else in here is computed by our software from that voltage.
+One thing to remember: the device gives voltage; everything else is computed by software from that voltage.
 
-## The three files we write per session
+## The files written per session
 
-Every session drops three CSV files into the `data/` folder. They share a timestamp so you can tell which three belong together.
+Every session drops a small set of files into the `data/` folder. They share a timestamp so it is clear which ones belong together.
 
-The one that matters for keeping is `session_<timestamp>_<patient>.csv`. That's the clinical record — one row per processing tick (50 per second) with the full picture: the signals, the stress index, the state, the balloon height inputs, everything. This is what you archive per patient and what `session_review.py` reads.
+| File | What it is | When written |
+|---|---|---|
+| `session_<timestamp>_<patient_id>.csv` | The clinical record. One row per processing tick (50 rows/sec), 21 columns covering demographics, phase, the three smoothed signals, the three percentage deltas from baseline, the stress index, the state, the operator score, and the per-signal baseline artifact counts. | Per-tick from session start. Rotated to a new file on Start Live after a Stop. |
+| `baseline_<timestamp>_<patient_id>.json` | The personal averages, noise-floor sigma, locked thresholds, bonus HRV metrics (RMSSD, SDNN, pNN50, etc. from NeuroKit2), per-signal artifact counts, source label, and the pipeline constants in force. The canonical record of "what calibrated this session". Reusable for follow-up sessions on the same patient. | Once, at the 120 s baseline lock. |
+| `patient_<id>_<date>_s<n>.json` | The intake form's output: first name, last name, ID, gender, session date, session number. | Once, at launcher startup after the operator submits the intake dialog. |
+| `live_log_<timestamp>_<patient_id>.txt` | Human-readable 1 Hz transcript of the live session. One line per second with the timestamp, smoothed signals, deltas, S_t, and state. Convenient for terminal review and for pasting into clinical notes. | Per-second during LIVE. |
+| `unity_udp_log_<timestamp>_<patient_id>.csv` | Audit log of every UDP packet sent to Unity. Columns: timestamp, kind (`lifecycle` or `state`), command, state, s_t, gate_open. Use it to verify the throttle is working and to correlate the balloon's behavior with the stress trace. | Per UDP send. |
+| `acquisition_log_<timestamp>.csv` | Raw 50 Hz signal values and a status code per tick. Diagnostic; safe to delete after confirming a session went fine. | Per-tick. |
+| `processing_log_<timestamp>.csv` | The same ticks after EMA smoothing. Diagnostic; safe to delete. | Per-tick. |
 
-The other two are diagnostic logs you can usually delete after you've confirmed a session went fine:
-
-`acquisition_log_<timestamp>.csv` records what arrived from the device before any processing — the raw signal values and whether each tick got fresh data or had to reuse the last value. Columns: `timestamp, status, raw_eda, raw_hr, raw_hrv`. The `status` column is the interesting one; see the status codes further down.
-
-`processing_log_<timestamp>.csv` records the signals after smoothing. Columns: `timestamp, phase, smooth_eda, smooth_hr, smooth_hrv`. Useful if you want to see how much the EMA filter changed the raw input.
+The session CSV and baseline JSON are the long-term archive. The diagnostic logs are scratch.
 
 ## The session CSV, column by column
 
-Fifteen columns. Here's what each one is, its unit, and when it actually has a meaningful value.
+21 columns. Unit and meaning per column:
 
 | Column | Unit | Meaning |
 |---|---|---|
 | `timestamp` | wall clock | Time the row was written, millisecond precision |
-| `phase` | text | `BASELINE` for the first 120 s, `LIVE` after |
-| `session_mode` | text | `easy`, `moderate`, or `intense` — the difficulty range for this session |
-| `patient_name` | text | Entered at launch |
-| `patient_id` | text | Entered at launch |
+| `phase` | text | `BASELINE` for the 120 s baseline, `BASELINE_DONE` between baseline lock and Start Live, `LIVE` during the live session, `STOPPED` after Stop |
+| `patient_first_name` | text | From the intake form |
+| `patient_last_name` | text | From the intake form |
+| `patient_id` | text | From the intake form |
+| `gender` | text | F or M, from the intake dropdown |
+| `session_date` | YYYY-MM-DD | Set at intake (always today) |
+| `session_number` | integer | Set at intake (1 to `Config.MAX_SESSION_NUMBER`) |
 | `eda` | microsiemens | Smoothed skin conductance |
 | `hr` | BPM | Smoothed heart rate |
 | `hrv` | milliseconds | Smoothed RMSSD (heart-rate variability) |
-| `s_instant` | percent-ish | The raw per-tick stress value before smoothing. Zero during baseline. |
-| `s_t` | percent-ish | The smoothed stress index — this is the canonical stress number. Zero during baseline. |
+| `delta_eda` | percent | EDA's deviation from this patient's baseline |
+| `delta_hr` | percent | HR's deviation from baseline |
+| `delta_hrv` | percent | HRV's deviation from baseline (inverted so positive = more stressed) |
+| `s_instant` | percent-ish | Raw per-tick stress value before smoothing. Zero during baseline. |
+| `s_t` | percent-ish | Smoothed stress index. Zero during baseline. |
 | `state` | text | `calm`, `stressed`, or `ultra_stressed`. Always `calm` during baseline. |
-| `dashboard_score` | 0–100 | The operator-friendly version of `s_t`. Zero during baseline. |
-| `artifacts_eda` | count | How many EDA samples the 3-sigma baseline cleaning threw out |
+| `dashboard_score` | 0-100 | Operator-friendly remap of `s_t`. Zero during baseline. |
+| `artifacts_eda` | count | EDA samples thrown out by the 3-sigma cleaning during baseline |
 | `artifacts_hr` | count | Same for HR |
 | `artifacts_hrv` | count | Same for HRV |
 
-A couple of things worth knowing. During the 120-second baseline, the stress columns (`s_instant`, `s_t`, `state`, `dashboard_score`) are deliberately zero/calm — the math that produces them isn't running yet, by design. They come alive at the baseline-to-live transition. The artifact counts stay zero until the baseline finishes (that's when the cleaning happens), then hold their final value for the rest of the file.
+During the 120 s baseline, the stress-related columns are deliberately zero or calm; the math that produces them is not running yet, by design. They come alive at the baseline-to-live transition. The artifact counts stay zero until the baseline finishes (that is when the cleaning happens), then hold their final value for the rest of the file.
 
-## The live LSL stream (to Unity and the dashboard)
+## The UDP bridge to Unity
 
-While a session runs, `main.py` broadcasts a stream called `Biofeedback_State` at 50 Hz. It has 18 channels. Both the dashboard and (soon) the Unity scene subscribe to it. The order is fixed and defined in `src/output.py` as `UnityBridge.CHANNELS`, so anyone coding against it can rely on the index.
+Unity gets a deliberately simple feed: plain text commands over UDP to its `BioFeedbackMiddleware`, listening on port 5005 by default (`Config.UNITY_UDP_HOST` / `UNITY_UDP_PORT`). Four commands:
+
+| Command | When sent | What Unity does |
+|---|---|---|
+| `start` | Once, the moment Start Live Session is clicked (and again on every subsequent Start Live within the same launch) | Flips the VR scene into running state |
+| `stop` | Once, when the operator clicks Stop on the live panel (and on shutdown) | Stops the scene |
+| `increase` | While the patient is `calm`, at most once per `UNITY_COMMAND_INTERVAL_SEC` (default 1.0 s) | Bumps the balloon target altitude up by one step |
+| `decrease` | While the patient is `ultra_stressed`, same throttle | Bumps the balloon target altitude down by one step |
+
+When the state is `stressed` (the therapeutic target zone), nothing is sent. Silence is the command: Unity holds altitude. The goal of the stressed band is to keep the patient there, not to move the balloon.
+
+### The wait-for-calm gate
+
+When the live phase begins, the bridge does not start emitting `increase` / `decrease` immediately. Two reasons: the patient may still be adjusting (putting on the headset, settling into the chair), so the first stress reading is often unreliable; and the fusion engine reports a synthetic `calm` during its first ~1 second of buffer warmup that should not count as a real reading.
+
+The bridge waits through a brief warmup window (`Config.UDP_GATE_WARMUP_SEC`, default 1.5 s) and then watches for the first genuine `calm` state. Until that happens, every `increase` / `decrease` is held back and counted in `commands_gated`. Stressed states during the wait remain silent as usual. The moment the patient first hits calm, the gate opens permanently and the throttled command stream takes over.
+
+The dashboard surfaces the gate state on the live panel: orange "UDP gate: WAITING for first calm reading" while waiting, gray "UDP gate: ACTIVE" once open. The same state is on LSL channel 19 (`udp_gate_open`, 0 or 1) for any other consumer that needs it.
+
+The throttle prevents flooding. Unity's middleware applies `stepAmount` per packet, so without throttling 50 packets/second from the 50 Hz pipeline would jerk the balloon by 50 m/second. At one per second with the default 1 m step, sustained calm gives a 1 m/s ascent, gentle enough for therapeutic pacing, and the Unity-side lerp (`altitudeSmoothing`) smooths it into continuous motion.
+
+The UDP bridge runs in parallel with the LSL stream. They do not share state. LSL is for the dashboard and audit logs (which need every channel and every tick); UDP is for Unity (which only needs the decision).
+
+### Verifying with the UDP audit log
+
+`unity_udp_log_<timestamp>_<patient>.csv` records every packet actually sent. Sample rows:
+
+```
+timestamp,kind,command,state,s_t,gate_open
+2026-05-31 12:00:00.000,lifecycle,start,,,0
+2026-05-31 12:00:01.523,state,increase,calm,-2.4100,1
+2026-05-31 12:00:02.534,state,increase,calm,-2.3800,1
+2026-05-31 12:02:15.117,state,decrease,ultra_stressed,38.7200,1
+2026-05-31 12:05:00.000,lifecycle,stop,,,1
+```
+
+- `kind=lifecycle` covers `start` and `stop` (the state and s_t columns are blank because those are not state-driven).
+- `kind=state` covers `increase` and `decrease` (state and s_t are populated).
+- `gate_open` is 0 before the wait-for-calm gate opens, 1 after.
+- The interval between two `state` rows for the same command should be at least `UNITY_COMMAND_INTERVAL_SEC`.
+
+If the file shows two `increase` rows with timestamps less than 1 second apart, that is a real throttle issue. Console prints sometimes flush in bursts because of Windows stdout buffering, so the terminal can give a misleading impression; the audit CSV is the ground truth.
+
+## The live LSL stream
+
+While a session runs, `main.py` broadcasts a stream called `Biofeedback_State` at 50 Hz. The dashboard subscribes for visualization and audit. 24 channels, fixed order. The schema lives in `output.py` as `UnityBridge.CHANNELS` so any consumer can rely on the indices.
+
+Unity does not need this stream; it gets its commands over the UDP bridge. The LSL stream is for the dashboard, the audit pipeline, and any future analysis tools.
 
 | # | Channel | Unit | What it is |
 |---|---|---|---|
-| 0 | `s_t` | percent-ish | Smoothed stress index. Centered on zero, positive means more stressed than baseline. |
+| 0 | `s_t` | percent-ish | Smoothed stress index, centered on zero |
 | 1 | `state_enum` | 0/1/2 | 0 = calm, 1 = stressed, 2 = ultra_stressed |
-| 2 | `dashboard_score` | 0–100 | Operator display value derived from `s_t` |
-| 3 | `y_t` | meters | The balloon's target altitude. This is the main thing Unity acts on. |
-| 4 | `eda` | microsiemens | Smoothed skin conductance |
-| 5 | `hr` | BPM | Smoothed heart rate |
-| 6 | `hrv` | milliseconds | Smoothed RMSSD |
-| 7 | `avg_eda` | microsiemens | The patient's personal EDA baseline (0 until baseline locks) |
-| 8 | `avg_hr` | BPM | Personal HR baseline |
-| 9 | `avg_hrv` | milliseconds | Personal HRV baseline |
-| 10 | `thresh_mild` | same as s_t | The calm/stressed boundary, locked after baseline |
-| 11 | `thresh_high` | same as s_t | The stressed/ultra boundary, locked after baseline |
-| 12 | `baseline_status` | 0/1 | 0 during baseline, 1 once calibration is done |
-| 13 | `elapsed_baseline_sec` | seconds | Time since the session started |
-| 14 | `mode_enum` | 0/1/2 | 0 = easy, 1 = moderate, 2 = intense |
-| 15 | `qa_invalid_count` | count | Running total of NaN/infinite samples rejected |
-| 16 | `qa_out_of_range_count` | count | Running total of samples outside physiological bounds |
-| 17 | `qa_disconnect_warnings` | count | Running total of electrode-disconnect episodes flagged |
+| 2 | `dashboard_score` | 0-100 | Operator display value derived from `s_t` |
+| 3 | `eda` | microsiemens | Smoothed skin conductance |
+| 4 | `hr` | BPM | Smoothed heart rate |
+| 5 | `hrv` | milliseconds | Smoothed RMSSD |
+| 6 | `delta_eda` | percent | EDA deviation from baseline |
+| 7 | `delta_hr` | percent | HR deviation from baseline |
+| 8 | `delta_hrv` | percent | HRV deviation from baseline (inverted) |
+| 9 | `avg_eda` | microsiemens | Personal EDA baseline (zero until baseline locks) |
+| 10 | `avg_hr` | BPM | Personal HR baseline |
+| 11 | `avg_hrv` | milliseconds | Personal HRV baseline |
+| 12 | `thresh_mild` | same as s_t | Locked calm/stressed boundary |
+| 13 | `thresh_high` | same as s_t | Locked stressed/ultra boundary |
+| 14 | `baseline_status` | 0/1 | 0 during baseline, 1 once calibration is done |
+| 15 | `elapsed_baseline_sec` | seconds | Time spent in BASELINE state, frozen on lock |
+| 16 | `qa_invalid_count` | count | Running total of NaN/infinite samples rejected |
+| 17 | `qa_out_of_range_count` | count | Running total of samples outside physiological bounds |
+| 18 | `qa_disconnect_warnings` | count | Running total of electrode-disconnect episodes flagged |
+| 19 | `udp_gate_open` | 0/1 | 0 while waiting for first calm, 1 once the gate has opened |
+| 20 | `session_state` | 0..4 | 0=IDLE, 1=BASELINE, 2=BASELINE_DONE, 3=LIVE, 4=STOPPED. Drives the dashboard's button enable/disable logic. |
+| 21 | `elapsed_live_sec` | seconds | Time spent in LIVE state, frozen on Stop |
+| 22 | `unity_last_command_code` | 0..4 | Numeric encoding of the most recent UDP packet sent. 0=none, 1=increase, 2=decrease, 3=start, 4=stop |
+| 23 | `unity_commands_sent` | count | Running total of UDP packets actually sent (lifecycle + state) |
 
-Channels 0 through 6 are the live readings. Channels 7 through 14 are mostly fixed once the baseline locks (the personal averages, the thresholds, the mode) — they're there so a consumer that joins mid-session has everything it needs without missing the baseline. Channels 15 through 17 are the data-quality counters; on a clean session they stay at zero.
-
-For Unity specifically, the channels that matter most are `y_t` (channel 3, the balloon height), `state_enum` (channel 1), and `mode_enum` (channel 14, so it knows which altitude range to render).
+The personal averages and thresholds (channels 9-13) are zero during the baseline and become live the instant calibration completes. The QA counters stay at zero on a clean session; any nonzero value points at a hardware or contact issue and turns red on the dashboard.
 
 ## The status codes in the acquisition log
 
-The `status` column in `acquisition_log_*.csv` tells you what happened to each incoming tick:
+The `status` column in `acquisition_log_*.csv` tells what happened to each incoming tick:
 
-- `NEW_DATA` — a fresh sample arrived from the device and was used. This is what you want to see most of the time.
-- `HOLD_LAST` — no new sample this tick, so we reused the previous value. A few of these is normal (the device and our loop aren't perfectly in lockstep). A long run of them means the stream stalled.
-- `NAN_REJ` — the incoming sample contained a NaN or infinite value and was rejected; the previous value was held instead.
-- `OOR_REJ` — the sample was a real number but physiologically impossible (e.g. a heart rate of 400 BPM), so it was rejected as an artifact.
+- `NEW_DATA`: a fresh sample arrived from the device and was used. This should be the common case.
+- `HOLD_LAST`: no new sample this tick, the previous value was reused. A few of these are normal. A long run means the stream stalled.
+- `NAN_REJ`: the incoming sample contained a NaN or infinite value and was rejected; the previous value was held.
+- `OOR_REJ`: the sample was a real number but physiologically impossible (heart rate of 400 BPM, negative EDA), so it was rejected as an artifact.
 
-If you see a lot of `NAN_REJ` or `OOR_REJ`, that points at an electrode or connection problem, not a software problem.
+Lots of `NAN_REJ` or `OOR_REJ` indicates an electrode problem, not a software problem.
 
 ## Reading the important numbers
 
-A few of these come up constantly, so here's how to actually interpret them.
+**`s_t`, the stress index.** A weighted blend of how far the three signals have moved from the patient's own resting baseline, on a roughly percentage scale, smoothed over the last second. Zero means at baseline. Positive means more aroused than baseline; the bigger the number, the more aroused. Small negative values are possible (slightly more relaxed than baseline) and harmless. The absolute scale depends on the person, which is why it is compared against thresholds derived from that person's own baseline rather than a fixed cutoff.
 
-**`s_t`, the stress index.** It's a weighted blend of how far the three signals have moved from the patient's own resting baseline, expressed as a roughly percentage-scale number and smoothed over the last second. Zero means "at baseline". Positive means more aroused than baseline; the bigger the number, the more aroused. Small negative values are possible (slightly more relaxed than baseline) and are nothing to worry about. The absolute scale depends on the person, which is why we compare it against thresholds derived from their own baseline rather than a fixed cutoff.
+**`state`.** `s_t` bucketed by the two thresholds. At or below `thresh_mild` it is `calm`. Between the thresholds it is `stressed`, and that is the therapeutic target zone, not a problem. Above `thresh_high` it is `ultra_stressed`, the "back off" signal. The state is what gets sent to Unity; Unity decides what to do with it in the scene.
 
-**`state`.** This is just `s_t` bucketed by the two thresholds. At or below `thresh_mild` it's `calm`. Between the two thresholds it's `stressed` — and that's actually the therapeutic target zone, not a problem. Above `thresh_high` it's `ultra_stressed`, which is the "back off" signal.
+**`dashboard_score`, the 0-100 number.** A cosmetic remapping of `s_t` for quick reading. 0 at baseline, around 50 when the patient just crossed into the stressed zone, 100 at ultra. Display-only; it does not drive the VR scene.
 
-**`dashboard_score`, the 0–100 number.** This is a cosmetic remapping of `s_t` for quick reading. 0 is baseline, around 50 means the patient just crossed into the stressed zone, and 100 means they've hit ultra. It does not drive the balloon — it's purely for the operator's situational awareness. The balloon is driven by `state` and `y_t`.
+**The deltas.** The three percentage-deviation values, one per signal. Useful for understanding why the stress index moved the way it did: was it mostly EDA, mostly HR, mostly HRV? The dashboard shows them as `dEDA / dHR / dHRV` in the state panel.
 
-**`y_t`, the balloon height.** Starts at the middle of the session's altitude range. When the patient is calm it drifts up (more exposure to height); when they go ultra it drops (relief); when they're in the stressed target zone it holds. The rates are tuned so a sustained-calm patient takes about 200 seconds to rise the full range and a sustained-ultra patient takes about 100 seconds to fall it — same timing in every mode, just different absolute heights.
-
-**The thresholds.** `thresh_mild` and `thresh_high` are computed once, at the end of the 120-second baseline, from how much that specific patient's stress index naturally wobbles at rest. After that they're frozen for the whole session. That's intentional — if they adapted during the session, a big stress response would raise the bar and hide itself.
+**The thresholds.** `thresh_mild` and `thresh_high` are computed once at the end of the 120-second baseline from how much that specific patient's stress index naturally wobbles at rest. After that they are frozen for the whole session. Intentional: if they adapted during the session, a big stress response would raise the bar and hide itself.
 
 ## What the dashboard shows
 
-The operator dashboard is a live view of the same stream. Top bar: patient, session mode, phase with a baseline countdown, elapsed time, and a big color-coded state chip (green calm, yellow stressed, red ultra). Left: the stress index chart with the two threshold lines drawn across it and their numeric values labeled on the lines. Right: three stacked charts for EDA, HR, and HRV. Bottom: the patient's personal baseline values, the current state and threshold numbers, and a session-statistics panel that includes time-in-each-state and the three data-quality counters. Those quality counters turn red if they go above zero, so a bad electrode is obvious at a glance.
+The dashboard is split into two side-by-side panels, one per session phase.
 
-## The short version for someone who just wants the gist
+**Top bar** spans both panels: patient name and ID, the current phase (`IDLE`, `BASELINE`, `BASELINE DONE`, `LIVE`, `STOPPED`), and a status banner that mirrors the console state messages.
 
-We record one clinical CSV per session with everything in it, plus two throwaway diagnostic logs. Live, we broadcast an 18-channel stream that the dashboard draws and Unity uses to move the balloon. The single most important number is `s_t`, the stress index; `state` is that number bucketed into calm / stressed / ultra; and `y_t` is the balloon height the stress state drives. Everything is measured relative to the patient's own resting baseline, captured in the first two minutes of every session.
+**Left panel: Baseline Calibration.** Two buttons at the top: Start Baseline, Stop. Below them, the baseline-duration counter (`MM:SS / 02:00`) and a captured-values readout that fills in once calibration finishes (personal averages for EDA, HR, HRV, the noise-floor sigma, the locked thresholds, and the per-signal artifact counts). The bottom of the panel is four stacked live charts: EDA, HR, HRV, and ECG. These charts are alive from the moment the dashboard opens, even during IDLE, so the operator can verify electrode contact before starting baseline.
+
+**Right panel: Live Session.** Two buttons at the top: Start Live Session, Stop. Both are disabled until a baseline has been captured. Below the buttons, the live-duration counter and a numeric strip with: a big colored state chip (CALM green / STRESSED yellow / ULTRA STRESSED red), S_t value, dashboard score, the three deltas, the locked thresholds, time-in-each-state, the UDP gate indicator (orange "WAITING for first calm" / gray "ACTIVE"), and the Unity last-command tracker (color-coded by command: green for INCREASE, red for DECREASE, blue for START, gray for STOP, plus a total-sent counter). The bottom of the panel is the stress-index chart with the mild and high threshold lines drawn across it, and the component-deltas chart below that.
+
+**Bottom strip** spans both panels: data-quality counters (samples processed, invalid samples rejected, out-of-range samples rejected, electrode-disconnect warnings). The counters turn red if they go above zero, so a bad electrode is obvious at a glance.
+
+The buttons enable and disable based on the session state coming in on channel 20. The operator cannot reach an invalid state from clicking; the dashboard only offers the transitions that make sense from where the pipeline currently is.
+
+## The short version
+
+One clinical CSV per session, a JSON capture of the baseline, the patient intake form, a human-readable live transcript, a UDP audit log, and two diagnostic logs. Live, a 24-channel LSL stream goes to the dashboard, plus a UDP feed of plain text commands to Unity. The single most important number is `s_t`, the stress index; `state` is that number bucketed into calm / stressed / ultra; the deltas tell which signal moved how much. Everything is measured relative to the patient's own resting baseline, captured in the first two minutes of the session.

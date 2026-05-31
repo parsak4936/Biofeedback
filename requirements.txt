@@ -1,9 +1,35 @@
+# Runtime dependencies for the Biofeedback pipeline.
+# Versions pinned to what is installed and known-working in the env/ venv.
+#
+# Install:  env\Scripts\activate  &&  pip install -r requirements.txt
+
+# --- LSL networking ---
+# Lab Streaming Layer client. Used by the streamer, acquisition, output,
+# dashboard, and session_control modules for inter-process messaging.
 pylsl==1.16.2
-numpy==1.26.4
-scipy==1.13.1
-PyQt5==5.15.9
-pyqtgraph==0.13.7
-matplotlib==3.10.9
+
+# --- Numerical core ---
+numpy==2.2.6
+scipy==1.15.3
 pandas==2.3.3
+
+# --- Signal processing (R-peak detection, HRV metrics) ---
+# Primary R-peak detector for the adaptive path (mock / real_plux), and
+# the full sliding-window derivation chain for the NeuroKit path
+# (mock2 / real_plux2). Both code paths import this.
+neurokit2==0.2.13
+
+# --- Dashboard GUI + plotting ---
+PyQt5==5.15.11
+pyqtgraph==0.14.0
+
+# --- Offline review (session_review.py) ---
+matplotlib==3.10.9
+# Pillow is matplotlib's image backend; needed for --save *.png / *.jpg.
 pillow==12.2.0
-python-docx==1.1.2
+
+# --- Optional: reading the docx specs in the repo root ---
+# Not imported by the runtime pipeline, but useful for anyone who wants
+# to load shayans_biofeedback_math_pipeline.docx / walkthrough.docx
+# programmatically. Safe to remove if disk space matters.
+python-docx==1.2.0

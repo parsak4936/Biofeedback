@@ -1,14 +1,16 @@
 # How a sample becomes a stress state
 
-This walks one sample from the device all the way to the balloon height, so the whole pipeline is traceable. It matches the architecture diagram (`biofeedback_acrophobia_framework_valid.drawio.png`) and the math-pipeline and walkthrough documents. If you want the input side in isolation, read `SIGNALS_AND_DATA.md`; if you want the outputs in isolation, read `OUTPUTS.md`. This is the end-to-end version.
+A walk through of one sample from the device all the way to the stress state that goes out to Unity, so the whole pipeline is traceable. It matches the architecture diagram (`biofeedback_acrophobia_framework_valid.drawio.png`) and the math-pipeline and walkthrough documents. For the input side in isolation, read `SIGNALS_AND_DATA.md`; for the outputs in isolation, read `OUTPUTS.md`. This is the end-to-end version.
 
-## Layer 0 — the device
+A note on the boundary: Python does the signal processing and the stress classification. Unity owns altitude, scene logic, and any phobia-specific imagery. The Python side only sends "calm / stressed / ultra" as state, and `increase` / `decrease` / `start` / `stop` over UDP. Unity decides how to move the balloon. That split means the same Python pipeline can drive any exposure scene.
 
-A PLUX biosignalsplux hub sits on the patient with two sensors: ECG (heart electrical activity) and EDA (skin conductance). OpenSignals, the desktop software, talks to it over Bluetooth and publishes the readings two ways — a `.txt` file on disk and a live LSL network stream. Either way, what comes out is raw analog-to-digital counts (16-bit integers, 0 to 65535), not physical units. The device measures voltage; nothing physiological has been computed yet.
+## Layer 0: the device
 
-The sampling rate and which sensor is on which channel vary between recordings. We've seen 200 Hz and 1000 Hz, and the ECG/EDA channel order flipped between files. So we never hardcode those — we read them from the OpenSignals header. `parse_opensignals_header()` in `src/data_sources.py` pulls the sampling rate and the channel-to-sensor mapping out of the JSON header line, and everything downstream adapts.
+A PLUX biosignalsplux hub sits on the patient with two sensors: ECG (heart electrical activity) and EDA (skin conductance). OpenSignals, the desktop software, talks to it over Bluetooth and publishes the readings two ways: a `.txt` file on disk and a live LSL network stream. Either way, what comes out is raw analog-to-digital counts (16-bit integers, 0 to 65535), not physical units. The device measures voltage; nothing physiological has been computed yet.
 
-## Layer 1 — raw counts to physical units
+The sampling rate and which sensor is on which channel vary between recordings. Both 200 Hz and 1000 Hz are common, and the ECG / EDA channel order can flip between files. So those are not hardcoded: `parse_opensignals_header()` in `src/data_sources.py` pulls the sampling rate and the channel-to-sensor mapping from the JSON header line for mock files, and `resolve_plux_channels()` reads the LSL stream's channel-label metadata for live PLUX. Everything downstream adapts.
+
+## Layer 1: raw counts to physical units
 
 The ADC integers get converted with PLUX's published transfer constants:
 
@@ -17,37 +19,48 @@ EDA (microsiemens) = (ADC / 65536) * 3.0 / 0.132
 ECG (millivolts)   = ((ADC / 65536) - 0.5) * 3.0 / 1100 * 1000
 ```
 
-The 3.0 is the reference voltage, 0.132 is the EDA sensor constant, 1100 is the ECG amplifier gain, and the `- 0.5` recenters ECG because it swings both ways around zero. After this step we have EDA in microsiemens and ECG in millivolts.
+The 3.0 is the reference voltage, 0.132 is the EDA sensor constant, 1100 is the ECG amplifier gain, and the `- 0.5` recenters ECG because it swings both ways around zero. After this step the values are EDA in microsiemens and ECG in millivolts.
 
-## Layer 2 — ECG becomes HR and HRV
+## Layer 2: ECG becomes HR and HRV
 
-The device doesn't give us heart rate. We derive it from the ECG voltage by finding the R-peaks (the tall spikes, one per heartbeat) and measuring the time between them.
+The device does not give heart rate. The pipeline derives it from the ECG voltage by finding the R-peaks (the tall spikes, one per heartbeat) and measuring the time between them.
 
-The detector is adaptive, which matters because real ECG is noisy and amplitudes differ between people and recordings. A fixed threshold breaks the moment a recording is noisier than expected. Instead, `_detect_r_peaks()` in `src/data_sources.py`:
+Two derivation methods are available, selected by `Config.DATA_SOURCE`:
 
-1. Bandpasses the ECG to 5–15 Hz, the frequency band where QRS energy lives. This kills baseline wander and high-frequency noise.
-2. Detects on peak *prominence* (how far a peak rises above its local surroundings) rather than raw height, so a drifting baseline doesn't fool it.
-3. Runs two passes: a loose first pass to gather candidate peaks, then it measures the typical R-peak prominence in *this* signal and keeps peaks at half that size. This self-calibration is why the same code handles a clean 42-second clip and a noisy 14-minute recording without changes.
-4. Enforces a 300 ms refractory gap so the T-wave that follows each beat isn't miscounted as a second beat.
+**Adaptive prominence detector** (used by `mock` and `real_plux`). NeuroKit2's R-peak detector is primary; `_detect_r_peaks()` in `src/data_sources.py` is the fallback for degenerate inputs. The detector:
+
+1. Bandpasses the ECG to 5-15 Hz, the frequency band where QRS energy lives. This kills baseline wander and high-frequency noise.
+2. Detects on peak prominence (how far a peak rises above its local surroundings) rather than raw height, so a drifting baseline does not fool it.
+3. Runs two passes: a loose first pass to gather candidate peaks, then measures the typical R-peak prominence in this signal and keeps peaks at half that size. This self-calibration is why the same code handles a clean 42-second clip and a noisy 14-minute recording without changes.
+4. Enforces a 300 ms refractory gap so the T-wave that follows each beat is not miscounted as a second beat.
 
 From the peaks:
 
 ```
-HR (BPM)    = 60000 / RR_interval_in_ms
+HR (BPM)    = 60000 / RR_interval_in_ms       (per beat, held until next beat)
 RMSSD (ms)  = sqrt( mean( (RR_n+1 - RR_n)^2 ) )   over a rolling 10-second window
 ```
 
-RR intervals that are wildly off the running median (a missed or doubled beat) get replaced with the median before these calculations, so one bad beat doesn't spike HR or HRV. For the offline mock file this runs once over the whole recording; for the live device it runs incrementally on a rolling 5-second ECG buffer. Same logic both ways.
+RR intervals wildly off the running median (a missed or doubled beat) get replaced with the median before these calculations, so one bad beat does not spike HR or HRV.
 
-EDA needs none of this — the converted microsiemens value is used directly. It's a slow signal, so the high sample rate is just oversampling.
+**NeuroKit2 sliding-window chain** (used by `mock2` and `real_plux2`). `derive_hr_hrv_from_ecg_nk()` follows the reference `vret_server_v2.py` chain: `nk.ecg_clean` → `nk.ecg_peaks(correct_artifacts=True)`. From the detected peak list it then computes:
 
-## Layer 3 — onto the network at 50 Hz
+- HR as 60000 / mean(RR) over the trailing 30 seconds of beats (equivalent to the mean of `nk.ecg_rate` for full windows)
+- RMSSD as sqrt(mean(diff(RR)^2)) over the trailing 60 seconds (the same formula `nk.hrv_time` returns as `HRV_RMSSD`)
 
-In mock mode, `MockDataSource` reads the file, does the conversions and HR/HRV derivation above, and publishes three channels — EDA, HR, HRV — on the LSL stream named in `Config.STREAM_NAME` ("OpenSignals"), paced at the file's native rate. In real-device mode the OpenSignals software is the publisher and `RealPLUXDataSource` does the conversion/derivation as samples arrive.
+Values are recomputed every 0.5 seconds and held (zero-order hold) between updates. RMSSD outside 5-300 ms is rejected as a detector failure rather than reported as a real reading. The HRV window needs 60 s to fill, so for the first ~60 s of live the RMSSD reading stays at the seed value of `Config.MOCK_HRV_BASE`.
+
+For the offline mock paths the detection runs once over the whole recording at load time. For the live PLUX paths the same logic runs incrementally on a rolling ECG buffer (5 seconds for the adaptive detector, 65 seconds for the NeuroKit chain). The downstream math is the same either way.
+
+EDA needs none of this: the converted microsiemens value is used directly. It is a slow signal, so the high sample rate is just oversampling.
+
+## Layer 3: onto the network at 50 Hz
+
+In mock mode, `MockDataSource` (or `MockDataSource2`) reads the file, does the conversions and HR/HRV derivation above, and publishes three channels (EDA, HR, HRV) on the LSL stream named in `Config.STREAM_NAME` (`OpenSignals`), paced at the file's native rate. A side stream `OpenSignals_ECG` carries the raw ECG voltage for the dashboard's waveform chart. In real-device mode the OpenSignals software is the publisher and `RealPLUXDataSource` (or `RealPLUXDataSource2`) does the conversion / derivation as samples arrive.
 
 `BiofeedbackAcquisition` (inside `main.py`) consumes that stream at the pipeline rate of 50 Hz. It drains the inlet to the most recent sample each tick rather than reading one-at-a-time, which keeps it from falling behind when the device streams faster than 50 Hz. Every incoming sample is validated here: NaN or infinite values are rejected, physiologically impossible values are rejected, and if a signal goes flat for more than 15 seconds it flags a probable electrode disconnect. If the stream goes silent for 5 seconds it raises a connection error and the session ends cleanly with whatever was recorded saved.
 
-## Layer 4 — smoothing and the baseline
+## Layer 4: smoothing and the baseline
 
 `SignalProcessor` applies a one-pole exponential moving average to each signal:
 
@@ -55,19 +68,23 @@ In mock mode, `MockDataSource` reads the file, does the conversions and HR/HRV d
 y_t = alpha * x_t + (1 - alpha) * y_(t-1)
 ```
 
-with alpha 0.05 for EDA, 0.10 for HR, 0.05 for HRV. Lower alpha means heavier smoothing.
+with alpha 0.05 for EDA, 0.10 for HR, 0.05 for HRV. Lower alpha means heavier smoothing. The EMA runs every tick, regardless of state, so the dashboard's signal charts stay continuous.
 
-For the first 120 seconds (6000 ticks at 50 Hz) the smoothed samples just accumulate in buffers — this is the baseline phase. The patient sits still; no stress math runs yet. At the 120-second mark, `_compute_personal_baselines()` runs once:
+For the 120 seconds inside the BASELINE state the smoothed samples accumulate in buffers. The patient sits still; no stress math runs yet. Accumulation is gated by `accumulate_baseline` (set to True only while the state machine is in BASELINE), so samples from IDLE never leak into the baseline.
+
+At the 120-second mark, `_compute_personal_baselines()` runs once:
 
 1. For each signal, drop any sample more than 3 standard deviations from the mean (motion spikes, glitches). If a signal is perfectly flat the filter is skipped with a warning rather than rejecting everything.
-2. Average what's left. Those three averages are the patient's personal resting baseline.
+2. Average what is left. Those three averages are the patient's personal resting baseline.
 3. Keep the cleaned arrays around so the next layer can compute the noise floor.
 
-The baseline is per-person and computed fresh every session from that session's first two minutes. Two different people produce two different baselines, which is the whole point — everything afterward is measured relative to this patient at rest, not against population norms.
+A wall-clock safety net runs alongside: if 120 seconds of BASELINE has elapsed but the main loop ran slower than nominal 50 Hz and the buffer hasn't quite filled to 6000 samples, `finalize_baseline_now()` forces the computation on whatever is there. The lock therefore always fires at 02:00 on the dashboard counter, even on slower machines.
 
-## Layer 5 — the noise floor (sigma)
+The baseline is per-person and computed fresh every session. Two different people produce two different baselines, which is the whole point: everything afterward is measured relative to this patient at rest, not against population norms.
 
-To know what counts as a real stress response, we need to know how much the stress index naturally jitters when the patient is just sitting there. `calculate_baseline_sigma()` in `src/fusion.py` does this by running the cleaned baseline samples through the same stress math the live phase will use (layers 6 and 7 below), then taking the standard deviation of the result. That number is sigma_baseline.
+## Layer 5: the noise floor (sigma)
+
+To know what counts as a real stress response, the pipeline needs to know how much the stress index naturally jitters when the patient is just sitting there. `calculate_baseline_sigma()` in `src/fusion.py` does this by running the cleaned baseline samples through the same stress math the live phase will use (layers 6 and 7 below), then taking the standard deviation of the result. That number is sigma_baseline.
 
 The two thresholds come from it:
 
@@ -76,9 +93,9 @@ thresh_mild = 1.33 * sigma_baseline   (calm / stressed boundary)
 thresh_high = 2.28 * sigma_baseline   (stressed / ultra boundary)
 ```
 
-Both are frozen for the rest of the session. If they adapted live, a big stress response would inflate sigma, raise the bar, and mask itself. There's also a guard: if the baseline was degenerate (flat signal, sigma near zero) it falls back to a safe default and logs a warning rather than setting the thresholds to zero, which would label everything ultra-stressed.
+Both are frozen for the rest of the session. If they adapted live, a big stress response would inflate sigma, raise the bar, and mask itself. There is also a guard: if the baseline was degenerate (flat signal, sigma near zero) it falls back to a safe default and logs a warning rather than setting the thresholds to zero, which would label everything ultra-stressed.
 
-## Layer 6 — fusing three signals into one stress number
+## Layer 6: fusing three signals into one stress number
 
 Each live sample is turned into a percentage deviation from the personal baseline. HRV is inverted because lower HRV means more stress:
 
@@ -88,71 +105,133 @@ delta_HR  = (HR  - avg_HR ) / avg_HR  * 100
 delta_HRV = (avg_HRV - HRV) / avg_HRV * 100      (inverted)
 ```
 
-Then they're combined with weights that reflect how specifically each signal indicates sympathetic arousal:
+Then they are combined with weights that reflect how specifically each signal indicates sympathetic arousal:
 
 ```
 S_instant = 0.5 * delta_EDA + 0.3 * delta_HRV + 0.2 * delta_HR
 ```
 
-EDA gets the most weight because it's purely sympathetic; HR gets the least because it's influenced by lots of non-stress things. All the weights and the threshold multipliers live in `config.py` if you want to retune them.
+EDA gets the most weight because it is purely sympathetic; HR gets the least because it is influenced by lots of non-stress things. All the weights and the threshold multipliers live in `config.py` for retuning.
 
-## Layer 7 — smoothing the stress index
+## Layer 7: smoothing the stress index
 
-`S_instant` per tick is noisy, so it's averaged over the last 50 samples (one second at 50 Hz) to produce `S_t`, the canonical stress index. From here on, `S_t` is *the* stress number that drives both the dashboard and the balloon.
+`S_instant` per tick is noisy, so it is averaged over the last 50 samples (one second at 50 Hz) to produce `S_t`, the canonical stress index. From here on, `S_t` is the single number that drives the dashboard and the state classification.
 
-## Layer 8 — state and balloon height
+## Layer 8: state classification
 
-`evaluate_state()` does two things from `S_t`.
+`evaluate_state()` classifies `S_t` into one of three states: at or below `thresh_mild` it is calm, between the thresholds it is stressed (the therapeutic target zone), above `thresh_high` it is ultra_stressed. That is it on the Python side. There is no altitude calculation here. The state is what gets published to Unity, and Unity decides how to translate it into balloon movement (or whatever the active VR scene happens to be).
 
-First it classifies the state: at or below `thresh_mild` it's calm, between the thresholds it's stressed (the therapeutic target zone), above `thresh_high` it's ultra_stressed.
+The Python pipeline used to compute a balloon altitude itself, with rate constants scaled to one of three difficulty modes. All of that is now gone. The reason: the same stress signal should be able to drive an acrophobia balloon, a spider-phobia scene, or a social-anxiety crowd render, and the VR scene knows much better than Python does how to map "the patient just hit ultra" to visual change. So the Python side hands off the state and lets Unity handle the rest. The `BioFeedbackMiddleware.cs` script on the Unity side does the lerp and any per-scene scaling.
 
-Then it moves the balloon. The altitude `y_t` updates by a small amount each tick depending on state: it rises when the patient is calm (more exposure), holds when they're in the target zone, and falls when they're ultra-stressed (relief). The rates scale with the session's altitude range so the feel is consistent across modes:
+## Layer 9: the 0-100 score
+
+A cosmetic remap of `S_t` to a 0-100 number for the operator's dashboard: 0 at baseline, around 50 at the stressed boundary, 100 at ultra. Display-only.
+
+## Layer 10: LSL output
+
+Every 50 Hz tick, `UnityBridge.broadcast_state()` pushes a 24-channel vector on the LSL stream `Biofeedback_State`. The full channel list and meanings are in `OUTPUTS.md`. In short it carries the stress index, the state, the dashboard score, the three smoothed signals, the three percentage deltas from baseline, the personal averages, the locked thresholds, baseline status and per-state elapsed time, three data-quality counters, the UDP gate state, the current session-machine state, and the Unity last-command code plus total-sent counter.
+
+In parallel, `SessionManager` writes the per-tick row to the session CSV (with the full patient demographics from the intake form), writes a 1 Hz human-readable line to the live transcript log, and the acquisition and processing layers each write their own diagnostic log.
+
+## Layer 11: UDP bridge to Unity
+
+A separate, deliberately simple feed runs alongside the LSL output: plain text commands over UDP to Unity's `BioFeedbackMiddleware` on port 5005. The pipeline picks one of four strings (`start`, `stop`, `increase`, `decrease`) based on the current stress state.
+
+The mapping:
+
+- calm -> `increase` (balloon rises, more exposure)
+- stressed -> no command sent (balloon holds: silence is the command for "hold")
+- ultra_stressed -> `decrease` (balloon descends, relief)
+- entering the LIVE state -> `start` (first time and on every subsequent Start Live)
+- leaving LIVE -> `stop`
+
+Two safety mechanisms wrap this:
+
+A **command throttle** (default 1 second between consecutive `increase` / `decrease`) prevents flooding. Unity steps the balloon by `stepAmount` (default 1 m) per packet, so without throttling the 50 Hz pipeline would jerk the balloon by 50 m every second. At one command per second, sustained-calm gives a 1 m/s ascent, which Unity's per-frame lerp smooths visually.
+
+A **wait-for-calm gate** holds all state-driven commands when the LIVE phase first starts, until the patient hits a genuine calm reading. A 1.5 second warmup ignores the synthetic "calm" the fusion engine returns while its rolling buffer fills. The reason for the gate: when the LIVE phase begins, the patient may still be adjusting (putting on the VR headset, settling in), so the first stress readings are often noise. Waiting prevents that noise from instantly driving the balloon.
+
+Every packet that actually goes out is also recorded to `data/unity_udp_log_<timestamp>_<patient>.csv` with timestamp, kind (`lifecycle` for start/stop, `state` for increase/decrease), command, current state, current S_t, and the gate-open flag. The dashboard's UDP gate indicator shows when the gate is open versus waiting; the gate state is also on LSL channel 19, and the most recent command + cumulative sent count are on channels 22 and 23.
+
+## Layer 12: operator control via the state machine
+
+The pipeline does not auto-transition from baseline into live. The operator drives transitions via Start and Stop buttons on the dashboard. The states are:
 
 ```
-easy:     20-30 m, midpoint 25 m
-moderate: 30-45 m, midpoint 37.5 m
-intense:  45-65 m, midpoint 55 m
-
-descent rate = 0.010 * range per second
-ascent rate  = 0.005 * range per second
+IDLE          - waiting for the operator to click Start Baseline
+BASELINE      - 120-second baseline buffer is filling
+BASELINE_DONE - baseline captured, thresholds locked, JSON written;
+                waiting for Start Live
+LIVE          - full pipeline: fusion runs, UDP commands to Unity
+STOPPED       - live session ended; ready to Start Live again or close
 ```
 
-Descent is twice as fast as ascent on purpose — relief from being overwhelmed should be quick, re-exposure should be gentle. The net effect is that a sustained-calm patient takes about 200 seconds to float from floor to ceiling, and a sustained-ultra patient takes about 100 seconds to drop from ceiling to floor, in every mode. `y_t` is clamped to the mode's range.
+When the operator clicks a button, the dashboard publishes a command code (`BASELINE_START`, `BASELINE_STOP`, `LIVE_START`, `LIVE_STOP`, or `LIVE_RESTART`) on the LSL stream `Biofeedback_Control`. Closing the dashboard window prompts for save vs discard, then sends one of `SHUTDOWN_SAVE_BOTH` / `SHUTDOWN_DISCARD_LIVE` / `SHUTDOWN_DISCARD_BOTH`. The main pipeline reads commands every tick and applies them via a small lookup table of valid transitions (`_TRANSITIONS` in `src/session_control.py`). Invalid transitions are no-ops: the dashboard's button enable / disable logic already prevents the operator from clicking anything that does not make sense from the current state, and the main loop is defensive on top of that.
 
-The mode is read from `Config.SESSION_MODE` for now. When the Unity client exists it will send the mode at session start and `main.py` will call `fusion.set_mode()` once — the hook is already there, nothing else changes.
+State transitions trigger side effects:
 
-## Layer 9 — the 0-100 score
-
-A cosmetic remap of `S_t` to a 0-100 number for the operator: 0 at baseline, ~50 at the stressed boundary, 100 at ultra. It's display-only and does not drive the balloon.
-
-## Layer 10 — output
-
-Every 50 Hz tick, `UnityBridge.broadcast_state()` pushes an 18-channel vector on the LSL stream `Biofeedback_State`. The full channel list and meanings are in `OUTPUTS.md`. In short it carries the stress index, the state, the balloon height, the three smoothed signals, the personal baselines, the thresholds, the mode, baseline status and elapsed time, and three data-quality counters.
-
-In parallel, `SessionManager` writes the per-tick row to the session CSV, and the acquisition and processing layers each write their own diagnostic log.
+- Entering IDLE from a non-initial state: `SignalProcessor.reset()`, `FusionEngine.reset()`, `UnityUDPBridge.reset()` so the next attempt starts from a clean slate. Diagnostic logs from a Stop-during-baseline are discarded.
+- Entering BASELINE from BASELINE_DONE or STOPPED: previously captured baseline is cleared so the new run starts fresh.
+- Entering LIVE: `unity.send_raw("start")` fires (whether from BASELINE_DONE on the first live run or from STOPPED on a subsequent one). When coming from STOPPED, the session CSV is rotated to a fresh file and the fusion buffer is reset.
+- Entering STOPPED: `unity.send_raw("stop")` fires, and `print_session_summary()` writes a clinical-style block to the console.
+- SHUTDOWN commands: per the operator's choice, the relevant files are deleted before main exits cleanly.
 
 ## Session lifecycle
 
 ```
-T=0    Launch, stream resolves, baseline buffering starts
-T=120  Personal baselines computed, sigma and thresholds locked, phase flips to LIVE
-        (the balloon and stress visualization come alive here)
-...    Live therapy: S_t every tick, balloon moves, dashboard updates
-T=120+LIVE_PHASE_MAX_SEC   Auto-end (default 5 minutes of live phase)
-*or*   Operator presses Ctrl+C at any point
+T=0    Launcher shows the patient intake form; operator fills it in
+       Subprocesses start; the dashboard window opens in IDLE state
+        - signal charts (EDA, HR, HRV, ECG) are alive immediately
+        - all buttons except Start Baseline are disabled
+
+T=t0   Operator clicks Start Baseline.
+       IDLE -> BASELINE. Baseline-duration counter starts at 00:00.
+        - the live signal charts on the left keep running
+        - the stress-related charts on the right stay empty
+        - no UDP traffic to Unity
+
+T=t0+120
+       BASELINE -> BASELINE_DONE.
+        - personal averages, sigma, and thresholds computed and locked
+        - baseline_<timestamp>_<patient_id>.json written
+        - dashboard shows the captured values, threshold lines drawn
+        - banner reads "Baseline complete. You can start the Live Session."
+        - Start Live Session button becomes clickable
+       Operator puts on the VR headset and gets the patient ready.
+       No UDP traffic to Unity yet: the bridge waits in BASELINE_DONE.
+
+T=t1   Operator clicks Start Live Session.
+       BASELINE_DONE -> LIVE. unity.send_raw("start") fires.
+        - UDP wait-for-calm gate is closed
+        - fusion runs, deltas compute, dashboard updates
+        - once the patient hits a calm reading (after 1.5 s warmup),
+          the gate opens and increase/decrease commands flow to Unity
+        - live transcript log accumulates one line per second
+
+...    Live therapy. Session runs until the operator stops it.
+
+End    Operator clicks Stop or closes the dashboard window.
+       LIVE -> STOPPED. unity.send_raw("stop") fires.
+       Session summary prints to the console. CSV, baseline JSON,
+       live transcript, and UDP audit are all on disk.
+       Click Start Live again for a second run against the same baseline
+       (a fresh session CSV is rotated in).
 ```
 
-Both endings flush the session CSV and print the filename. The session-end cap is one global value (`LIVE_PHASE_MAX_SEC`, default 300 s) that applies to every mode the same way.
+There is no automatic time cap. The session runs as long as the clinical situation calls for; the operator decides when to stop.
 
 ## Where each piece lives
 
-- `src/config.py` — every tunable number
-- `src/data_sources.py` — file/device adapters, ADC conversion, R-peak detection
-- `src/acquisition.py` — 50 Hz consumer, sample validation, disconnect detection
-- `src/processing.py` — EMA smoothing, baseline buffering, 3-sigma cleaning
-- `src/fusion.py` — sigma, thresholds, stress fusion, state, balloon kinematics
-- `src/output.py` — the 18-channel LSL output
-- `src/session_manager.py` — the per-session CSV
-- `src/dashboard.py` — the operator GUI
-- `src/main.py` — the 50 Hz loop tying it together
-- `src/session_review.py` — offline replay of a saved session
+- `src/config.py`: every tunable number
+- `src/patient_intake.py`: modal demographic dialog before the dashboard
+- `src/data_sources.py`: file / device adapters (two derivation methods each), ADC conversion, NeuroKit2 R-peak detection, LSL channel auto-detection for live PLUX
+- `src/acquisition.py`: 50 Hz consumer, sample validation, disconnect detection
+- `src/processing.py`: EMA smoothing, baseline buffering, 3-sigma cleaning, wall-clock-safety finalization
+- `src/fusion.py`: sigma, thresholds, stress fusion, state classification
+- `src/session_control.py`: Command enum, SessionState enum, control LSL bus
+- `src/output.py`: the 24-channel LSL output
+- `src/unity_bridge.py`: UDP commands to Unity with throttle, wait-for-calm gate, and per-packet audit log
+- `src/session_manager.py`: per-session CSV, baseline JSON capture, live transcript log
+- `src/dashboard.py`: two-panel operator GUI with close-window save/discard prompt
+- `src/main.py`: the 50 Hz loop with the state machine
+- `src/session_review.py`: offline replay of a saved session, with optional PDF/PNG export for the patient file

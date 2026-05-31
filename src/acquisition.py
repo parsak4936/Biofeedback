@@ -1,4 +1,32 @@
 # src/acquisition.py
+"""
+Acquisition layer: 50 Hz consumer of the OpenSignals LSL stream.
+
+This module pulls samples from whatever is publishing under the name
+`Config.STREAM_NAME` (either our own streamer in mock mode, or the PLUX
+OpenSignals software in real-device mode) and presents them to the rest
+of the pipeline as a synchronous 50 Hz feed. Three responsibilities live
+here that are easy to miss in the main loop:
+
+  1. Draining the inlet to the LATEST sample each tick (not the oldest).
+     If the hardware streams faster than 50 Hz (200 or 1000 Hz typical),
+     the LSL inlet would otherwise pile up and the pipeline would drift
+     minutes behind real time. We use pull_chunk() and take the tail.
+
+  2. Sample validation. Any NaN / Inf gets rejected; any physiologically
+     impossible value (HR > 220 BPM, EDA < 0, etc.) gets rejected. Last
+     known good value is held in either case. The bounds and the rejection
+     status codes (NEW_DATA / HOLD_LAST / NAN_REJ / OOR_REJ) are all
+     visible in the per-tick acquisition_log_*.csv that this module writes.
+
+  3. Disconnect detection. A rolling 15-second variance check on each
+     signal — if any signal goes flat, the operator gets a one-shot
+     warning ("possible electrode disconnect"). The pipeline keeps
+     running so a partial recording is still saved.
+
+A deadman switch raises ConnectionError if the source stops publishing
+for more than Config.STREAM_TIMEOUT_SEC seconds.
+"""
 
 import collections
 import math
@@ -51,16 +79,46 @@ class BiofeedbackAcquisition:
         
         # Diagnostic tracking
         self.tick_counter = 0
+        self.log_path = None
+        self.log_file = None
+        self.csv_writer = None
+        self._open_log()
+
+    def _open_log(self):
+        """(Re-)open the acquisition audit log with a fresh timestamp."""
         session_time = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
         current_dir = os.path.dirname(os.path.abspath(__file__))
-        filename = f'acquisition_log_{session_time}.csv'
         project_root = os.path.dirname(current_dir)
         data_dir = os.path.join(project_root, 'data')
-       # Setup Auditing Log
         os.makedirs(data_dir, exist_ok=True)
-        self.log_file = open(os.path.join(data_dir, filename), mode='w', newline='')
+        filename = f'acquisition_log_{session_time}.csv'
+        self.log_path = os.path.join(data_dir, filename)
+        self.log_file = open(self.log_path, mode='w', newline='')
         self.csv_writer = csv.writer(self.log_file)
         self.csv_writer.writerow(['timestamp', 'status', 'raw_eda', 'raw_hr', 'raw_hrv'])
+
+    def discard_log(self, final: bool = False):
+        """Close and delete the current acquisition log.
+
+        final=False (default): reopen a fresh log for the next baseline.
+        final=True: skip the reopen. Used on shutdown so the discarded
+        file doesn't immediately come back as an empty one."""
+        path = self.log_path
+        try:
+            if self.log_file is not None:
+                self.log_file.flush()
+                self.log_file.close()
+                self.log_file = None
+        except Exception:
+            pass
+        try:
+            if path and os.path.exists(path):
+                os.remove(path)
+                print(f"[ACQUISITION] Discarded partial log: {os.path.basename(path)}")
+        except OSError as e:
+            print(f"[ACQUISITION] WARN: could not delete log {path}: {e}")
+        if not final:
+            self._open_log()
     def _connect_to_stream(self) -> StreamInlet:
         """
         Locates the target LSL stream on the local network and establishes an inlet.
@@ -76,8 +134,14 @@ class BiofeedbackAcquisition:
             
         # Create an inlet to receive signal samples from the first matched stream
         inlet = StreamInlet(streams[0])
-        print(f"[SUCCESS] Connected to '{Config.STREAM_NAME}'. Inlet established.")
-        
+        # Reproducibility fix: discard anything that may already be queued in
+        # the inlet by the time we got here. With the streamer's consumer-wait
+        # handshake on the other side, the streamer is now blocked until it
+        # sees us, and we have a clean buffer. The first sample we read will
+        # be the first sample the streamer pushes (file index 0).
+        inlet.flush()
+        print(f"[SUCCESS] Connected to '{Config.STREAM_NAME}'. Inlet flushed and ready.")
+
         return inlet
 
     def get_synchronized_sample(self) -> list:
@@ -141,7 +205,7 @@ class BiofeedbackAcquisition:
         # Diagnostic Printing
         if self.tick_counter % int(Config.PIPELINE_RATE) == 0:
             print(f"[TICK {self.tick_counter:05d}] {status} | "
-                  f"EDA: {self.latest_eda:>6.2f} μS | "
+                  f"EDA: {self.latest_eda:>6.2f} uS | "
                   f"HR: {self.latest_hr:>6.2f} BPM | "
                   f"HRV: {self.latest_hrv:>6.2f} ms")
 
