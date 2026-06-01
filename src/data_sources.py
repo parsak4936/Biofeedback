@@ -161,89 +161,146 @@ def compute_hrv_summary(peaks: np.ndarray, fs_hz: float) -> dict:
 
 def derive_hr_hrv_from_ecg(ecg_mv: np.ndarray, fs_hz: float) -> tuple:
     """
-    Convert a 1000Hz ECG trace into per-sample HR (BPM) and RMSSD (ms) arrays.
+    HR + RMSSD derivation for the `mock` and `real_plux` paths, computed
+    exclusively through NeuroKit2 library calls. Matches the design
+    principle stated in the VRET Biofeedback Pipeline technical report,
+    Section 1: "every number is computed by a validated library call
+    (NeuroKit2 for the biosignal math, pylsl for transport) rather than
+    by hand-rolled signal processing."
 
-    Pipeline per the math-pipeline document, Step 0:
-      1. Bandpass 5-15 Hz (QRS energy band).
-      2. find_peaks with minimum RR refractory.
-      3. HR = 60_000 / RR_ms, held until the next beat (Zero-Order Hold).
-      4. RMSSD = sqrt(mean(diff(RR)^2)) over a rolling 10 s RR window.
+    Chain (the canonical NeuroKit order, per the report Bug 2 + Bug 3):
+        nk.ecg_clean
+        -> nk.ecg_peaks(correct_artifacts=True)   # signal_fixpeaks internally
+        -> nk.ecg_rate(peaks, ..., desired_length=n)         for per-sample HR
+        -> nk.hrv_time(peaks_window, ...)["HRV_RMSSD"]       for rolling RMSSD
+
+    Per-beat output semantics (distinct from `derive_hr_hrv_from_ecg_nk`,
+    which is the 30 s / 60 s sliding-mean variant for `mock2` /
+    `real_plux2`):
+      - HR: per-sample series from nk.ecg_rate (monotone-cubic
+        interpolation between detected beats).
+      - RMSSD: nk.hrv_time on the trailing RMSSD_WINDOW_SEC of beats,
+        evaluated at each beat and held with zero-order hold between
+        beats. Default window 60 s (ultra-short-term HRV minimum).
+
+    Physiological plausibility band on RMSSD (report Bug 3): values
+    outside DS2_RMSSD_MIN_MS..DS2_RMSSD_MAX_MS are detector failures,
+    not measurements — they are rejected, and the previous valid value
+    is held instead of polluting the series.
+
+    Fallback: the prominence-based two-pass detector `_detect_r_peaks`
+    and the hand-rolled formulas are kept ONLY for the case where
+    NeuroKit2 itself raises (extremely short or pathological input) or
+    is not installed. In any normal recording the fallback never runs.
     """
-    if len(ecg_mv) < int(fs_hz):
-        # Too short to filter — return constants matching old defaults.
-        n = len(ecg_mv)
-        return (np.full(n, Config.MOCK_HR_BASE, dtype=np.float32),
-                np.full(n, Config.MOCK_HRV_BASE, dtype=np.float32),
-                np.array([], dtype=np.int64))
+    n = len(ecg_mv)
+    hr_series = np.full(n, Config.MOCK_HR_BASE, dtype=np.float32)
+    hrv_series = np.full(n, Config.MOCK_HRV_BASE, dtype=np.float32)
 
-    nyq = 0.5 * fs_hz
-    b, a = butter(2,
-                  [Config.ECG_BANDPASS_LOW_HZ / nyq, Config.ECG_BANDPASS_HIGH_HZ / nyq],
-                  btype='band')
-    ecg_filt = filtfilt(b, a, ecg_mv)
-    distance = int(Config.ECG_MIN_RR_MS * fs_hz / 1000)
+    if n < int(fs_hz):
+        # Too short for any of the library calls to behave well.
+        return hr_series, hrv_series, np.array([], dtype=np.int64)
 
-    # Primary: NeuroKit2 (the team-preferred reference library). It provides
-    # multiple well-tested R-peak detection algorithms; the default "neurokit"
-    # method matched our adaptive detector within 1-3 BPM on every test file.
-    # If NeuroKit2 raises (extremely short or degenerate input), fall back to
-    # our prominence-based detector so the pipeline never crashes here.
-    peaks = None
+    # ============ Primary path: NeuroKit2 only ============
     if _NEUROKIT_AVAILABLE:
         try:
             with warnings.catch_warnings():
                 warnings.simplefilter('ignore')
                 cleaned = nk.ecg_clean(ecg_mv, sampling_rate=fs_hz)
-                signals = nk.ecg_findpeaks(cleaned, sampling_rate=fs_hz,
-                                           method=Config.NEUROKIT_RPEAK_METHOD)
-            peaks = np.asarray(signals['ECG_R_Peaks'], dtype=np.int64)
+                # Report Bug 2 + Bug 3: clean BEFORE peaks; use ecg_peaks
+                # (which wraps ecg_findpeaks + signal_fixpeaks when
+                # correct_artifacts=True) not ecg_findpeaks alone.
+                _, info = nk.ecg_peaks(
+                    cleaned, sampling_rate=fs_hz,
+                    method=Config.NEUROKIT_RPEAK_METHOD,
+                    correct_artifacts=True,
+                )
+            peaks = np.asarray(info["ECG_R_Peaks"], dtype=np.int64)
         except Exception as e:
-            print(f"[ECG] NeuroKit2 failed ({e}); falling back to adaptive detector.")
+            print(f"[ECG] NeuroKit2 chain failed ({e}); falling back to "
+                  f"prominence detector + hand-rolled HR/RMSSD.")
             peaks = None
-    if peaks is None:
-        peaks = _detect_r_peaks(ecg_filt, distance)
 
-    n = len(ecg_mv)
-    hr_series = np.full(n, Config.MOCK_HR_BASE, dtype=np.float32)
-    hrv_series = np.full(n, Config.MOCK_HRV_BASE, dtype=np.float32)
+        if peaks is not None and len(peaks) >= 3:
+            # ---- HR: nk.ecg_rate, per-sample series for the full file ----
+            try:
+                with warnings.catch_warnings():
+                    warnings.simplefilter('ignore')
+                    rate = nk.ecg_rate(
+                        peaks, sampling_rate=fs_hz, desired_length=n,
+                    )
+                rate = np.asarray(rate, dtype=np.float32)
+                # NeuroKit can return NaN at the boundaries (before the
+                # first peak / after the last). Hold the seed default
+                # there so the pipeline never sees NaN.
+                hr_series = np.where(np.isfinite(rate),
+                                     rate,
+                                     Config.MOCK_HR_BASE).astype(np.float32)
+            except Exception as e:
+                print(f"[ECG] nk.ecg_rate failed ({e}); HR holds defaults.")
+
+            # ---- RMSSD: nk.hrv_time over a trailing window of beats ----
+            median_rr_ms = float(np.median(np.diff(peaks)) * 1000.0 / fs_hz)
+            window_n_beats = max(
+                4, int(Config.RMSSD_WINDOW_SEC * 1000.0 / median_rr_ms)
+            )
+            last_rmssd = Config.MOCK_HRV_BASE
+            for i in range(len(peaks) - 1):
+                start = peaks[i]
+                end = peaks[i + 1]
+                lo = max(0, i + 1 - window_n_beats)
+                peaks_window = peaks[lo:i + 1]
+                if len(peaks_window) >= 4:
+                    try:
+                        with warnings.catch_warnings():
+                            warnings.simplefilter('ignore')
+                            rmssd = float(nk.hrv_time(
+                                peaks_window, sampling_rate=fs_hz,
+                            )["HRV_RMSSD"].iloc[0])
+                        # Report Bug 3 plausibility band.
+                        if (np.isfinite(rmssd)
+                                and Config.DS2_RMSSD_MIN_MS <= rmssd
+                                <= Config.DS2_RMSSD_MAX_MS):
+                            last_rmssd = rmssd
+                    except Exception:
+                        pass
+                hrv_series[start:end] = last_rmssd
+            # Tail: hold the last valid RMSSD past the final beat.
+            last = peaks[-1]
+            hrv_series[last:] = last_rmssd
+
+            return hr_series, hrv_series, peaks
+
+    # ============ Fallback: prominence detector + hand-rolled math ============
+    # Only reached when NeuroKit is missing or raised on the input.
+    nyq = 0.5 * fs_hz
+    b, a = butter(2,
+                  [Config.ECG_BANDPASS_LOW_HZ / nyq,
+                   Config.ECG_BANDPASS_HIGH_HZ / nyq],
+                  btype='band')
+    ecg_filt = filtfilt(b, a, ecg_mv)
+    distance = int(Config.ECG_MIN_RR_MS * fs_hz / 1000)
+    peaks = _detect_r_peaks(ecg_filt, distance)
 
     if len(peaks) < 3:
-        # Not enough beats to be useful — keep defaults.
         return hr_series, hrv_series, peaks
 
     rr_ms = np.diff(peaks) * (1000.0 / fs_hz)
-    # Drop RR intervals far from the median — missed or extra detections inflate
-    # RMSSD wildly. Keep only RRs within 50% of the median.
     median_rr = float(np.median(rr_ms))
     rr_mask = np.abs(rr_ms - median_rr) <= 0.5 * median_rr
     rr_ms_clean = rr_ms.copy()
-    rr_ms_clean[~rr_mask] = median_rr  # substitute median for bad RRs
+    rr_ms_clean[~rr_mask] = median_rr
     hr_per_beat = 60_000.0 / rr_ms_clean
-
-    # RMSSD over a rolling 10 s window of RR intervals. We compute this using
-    # NeuroKit2's hrv_rmssd if available (so the published library is
-    # responsible for the canonical metric); the formula is the same one we
-    # used before (sqrt(mean(diff(rr)^2))) — using the library version is
-    # about auditability and citation alignment with the team's references.
     window_n = max(2, int(Config.RMSSD_WINDOW_SEC * 1000 / median_rr))
-
-    # Hold each beat's HR/RMSSD from that peak until the next.
     for i in range(len(peaks) - 1):
-        start = peaks[i]
-        end = peaks[i + 1]
-        hr_series[start:end] = hr_per_beat[i]
-
+        hr_series[peaks[i]:peaks[i + 1]] = hr_per_beat[i]
         window_lo = max(0, i + 1 - window_n)
         window_rr = rr_ms_clean[window_lo:i + 1]
         if len(window_rr) >= 2:
-            hrv_series[start:end] = _rmssd_from_rr(window_rr)
-
-    # Carry the final value forward to the end of the array.
-    if len(peaks) >= 1:
-        last = peaks[-1]
-        hr_series[last:] = hr_series[last - 1] if last > 0 else Config.MOCK_HR_BASE
-        hrv_series[last:] = hrv_series[last - 1] if last > 0 else Config.MOCK_HRV_BASE
-
+            hrv_series[peaks[i]:peaks[i + 1]] = _rmssd_from_rr(window_rr)
+    last = peaks[-1]
+    hr_series[last:] = hr_series[last - 1] if last > 0 else Config.MOCK_HR_BASE
+    hrv_series[last:] = hrv_series[last - 1] if last > 0 else Config.MOCK_HRV_BASE
     return hr_series, hrv_series, peaks
 
 
@@ -563,19 +620,31 @@ class MockDataSource(DataSource):
 class RealPLUXDataSource(DataSource):
     """
     Connects to real PLUX OpenSignals hardware via LSL and derives
-    (EDA μS, HR BPM, RMSSD ms) from the raw ADC channels in real time.
+    (EDA uS, HR BPM, RMSSD ms) from the raw ADC channels in real time.
 
-    OpenSignals broadcasts RAW ADC values (CH1, CH2, …) at the device's
-    sampling rate. The Python middleware (this class) is responsible for:
-      1. ADC -> physical units (μS, mV) using PLUX hardware formulas
-      2. Real-time R-peak detection on the ECG (sliding 5 s buffer)
-      3. HR (60 000 / RR_ms) and RMSSD (rolling 10 s of RR intervals)
+    OpenSignals broadcasts RAW ADC values (CH1, CH2, ...) at the device's
+    sampling rate. This class is responsible for:
+      1. ADC -> physical units (uS, mV) using PLUX hardware formulas.
+      2. Real-time R-peak detection via the NeuroKit2 chain on a sliding
+         ECG buffer (REAL_PLUX_ECG_BUFFER_SEC, default 5 s).
+      3. HR via nk.ecg_rate (per-sample series, mean returned each tick).
+      4. RMSSD via nk.hrv_time over a rolling RR buffer sized for
+         RMSSD_WINDOW_SEC.
+      5. Physiological plausibility band on RMSSD
+         (DS2_RMSSD_MIN_MS..DS2_RMSSD_MAX_MS) per the technical-report Bug 3.
+
+    Design principle (per the VRET technical report, Section 1): every
+    number is computed by a NeuroKit2 library call rather than by
+    hand-rolled signal processing. The prominence detector and
+    sqrt(mean(diff(rr)^2)) are kept only as the fallback for the case
+    where NeuroKit2 is unavailable or raises on the input.
 
     Prerequisites:
-    - PLUX device powered on and paired
-    - OpenSignals software running and streaming to LSL
-    - LSL stream named Config.STREAM_NAME available on network
-    - Config.REAL_PLUX_ECG_CHANNEL / EDA_CHANNEL match your sensor layout
+    - PLUX device powered on and paired.
+    - OpenSignals software running and streaming to LSL.
+    - LSL stream named Config.STREAM_NAME available on the network.
+    - Channel labels EDA/ECG on the stream, OR Config.REAL_PLUX_*_CHANNEL
+      indices set as the fallback (see resolve_plux_channels).
     """
 
     def __init__(self):
@@ -610,14 +679,26 @@ class RealPLUXDataSource(DataSource):
         self._ecg_buf = collections.deque(maxlen=buf_len)
         self._sample_index = 0          # absolute count since session start
         self._last_peak_index = -10**9  # so the first peak always qualifies
+        # Rolling RR buffer for RMSSD: sized to roughly
+        # RMSSD_WINDOW_SEC seconds of beats (~2 beats/s at adult resting).
+        # nk.hrv_time will run on these reconstructed peaks each update.
         self._rr_buffer = collections.deque(
-            maxlen=int(Config.RMSSD_WINDOW_SEC * 2)  # ~2 beats/s × 10 s
+            maxlen=max(8, int(Config.RMSSD_WINDOW_SEC * 2))
         )
 
         # Hold values between R-peaks (ZOH); seed with sane defaults.
         self.latest_hr = Config.MOCK_HR_BASE
         self.latest_hrv = Config.MOCK_HRV_BASE
         self.latest_eda = 0.0
+
+        # Bluetooth-dropout watchdog. The PLUX hub streams via Bluetooth,
+        # which drops out occasionally. If we keep returning held values
+        # forever, downstream consumers can't tell the stream has died —
+        # acquisition.py's deadman switch reads from our OUTLET, not the
+        # PLUX inlet, so it would never trip. We track wall-clock time
+        # since the last real PLUX sample and surface the gap loudly.
+        self._last_fresh_sample_time = time.time()
+        self._watchdog_warned = False
 
         # Pre-compute the bandpass filter once.
         nyq = 0.5 * self.fs_hz
@@ -636,7 +717,26 @@ class RealPLUXDataSource(DataSource):
         # we made in acquisition.py — protects against inlet pile-up).
         samples, _ = self.inlet.pull_chunk(timeout=0.0)
         if not samples:
+            # Watchdog: surface a sustained PLUX silence. Two thresholds:
+            #   * REAL_PLUX_WATCHDOG_WARN_SEC: print one warning.
+            #   * STREAM_TIMEOUT_SEC: raise, ending the session cleanly.
+            silent_for = time.time() - self._last_fresh_sample_time
+            if (silent_for > Config.REAL_PLUX_WATCHDOG_WARN_SEC
+                    and not self._watchdog_warned):
+                print(f"[DATA SOURCE] WARN: no PLUX samples for "
+                      f"{silent_for:.1f}s — Bluetooth dropout likely. "
+                      f"Holding last value; will raise at "
+                      f"{Config.STREAM_TIMEOUT_SEC}s.")
+                self._watchdog_warned = True
+            if silent_for > Config.STREAM_TIMEOUT_SEC:
+                raise ConnectionError(
+                    f"[DATA SOURCE] PLUX inlet silent for {silent_for:.1f}s "
+                    f"(threshold {Config.STREAM_TIMEOUT_SEC}s). Check "
+                    f"OpenSignals is still recording and the device is paired."
+                )
             return (self.latest_eda, self.latest_hr, self.latest_hrv)
+        self._last_fresh_sample_time = time.time()
+        self._watchdog_warned = False
 
         # Process every backlogged sample so the ECG buffer is dense (we'd
         # miss R-peaks if we only kept the last one). Cheap loop in practice.
@@ -660,43 +760,125 @@ class RealPLUXDataSource(DataSource):
         return (self.latest_eda, self.latest_hr, self.latest_hrv)
 
     def _detect_recent_peaks(self):
-        """Run find_peaks on the rolling buffer; update HR/HRV on new peaks."""
-        if len(self._ecg_buf) < int(self.fs_hz):  # need ≥1 s of data
+        """
+        Run the NeuroKit2 chain on the rolling ECG buffer to find R-peaks,
+        then update self.latest_hr via nk.ecg_rate and self.latest_hrv via
+        nk.hrv_time over the rolling RR buffer.
+
+        Called roughly 5 Hz from get_next_sample. The library calls do all
+        the math: nk.ecg_clean (mains + baseline-wander filtering),
+        nk.ecg_peaks (R-peak detection with correct_artifacts=True so
+        signal_fixpeaks corrects missed / doubled beats internally),
+        nk.ecg_rate (per-sample HR), nk.hrv_time (HRV_RMSSD on the
+        rolling RR window). Nothing here is hand-rolled.
+
+        If NeuroKit2 is unavailable or raises on the input, the fallback
+        is the original prominence-based detector + sqrt(mean(diff(rr)^2)).
+        """
+        if len(self._ecg_buf) < int(self.fs_hz):
+            return  # need >=1 s
+
+        if not _NEUROKIT_AVAILABLE:
+            self._detect_recent_peaks_fallback()
             return
 
-        arr = np.asarray(self._ecg_buf)
+        arr = np.asarray(self._ecg_buf, dtype=float)
         try:
-            filt = filtfilt(self._bp_b, self._bp_a, arr)
-        except ValueError:
-            return  # buffer momentarily too short for filtfilt
+            with warnings.catch_warnings():
+                warnings.simplefilter('ignore')
+                cleaned = nk.ecg_clean(arr, sampling_rate=self.fs_hz)
+                _, info = nk.ecg_peaks(
+                    cleaned, sampling_rate=self.fs_hz,
+                    method=Config.NEUROKIT_RPEAK_METHOD,
+                    correct_artifacts=True,
+                )
+            peaks_rel = np.asarray(info["ECG_R_Peaks"], dtype=np.int64)
+        except Exception:
+            # NeuroKit raised on this buffer (rare). Try the fallback.
+            self._detect_recent_peaks_fallback()
+            return
 
-        # Same adaptive prominence-based detector used for offline mock data,
-        # so live and replayed sessions behave identically.
-        peaks_rel = _detect_r_peaks(filt, self._refractory_samples)
         if len(peaks_rel) == 0:
             return
 
-        # Convert relative-to-buffer indices to absolute sample indices.
+        # ---- Track new peaks against the absolute sample index so RR
+        # intervals are correct across consecutive calls. ----
         buf_start_abs = self._sample_index - len(arr)
         peaks_abs = peaks_rel + buf_start_abs
-
-        # Process any peak we haven't already counted.
         new_peaks = peaks_abs[peaks_abs > self._last_peak_index]
         for p_abs in new_peaks:
             if self._last_peak_index < 0:
                 self._last_peak_index = int(p_abs)
                 continue
-            rr_samples = int(p_abs) - self._last_peak_index
-            rr_ms = rr_samples * 1000.0 / self.fs_hz
+            rr_ms = (int(p_abs) - self._last_peak_index) * 1000.0 / self.fs_hz
             self._last_peak_index = int(p_abs)
-
-            # Reject obviously bogus RRs (missed or double beats).
+            # nk.ecg_peaks(correct_artifacts=True) already handled most
+            # missed / doubled beats, but a cheap physiological clamp
+            # protects against the rare survivor (RR < refractory or
+            # > 2500 ms = below 24 BPM).
             if rr_ms < Config.ECG_MIN_RR_MS or rr_ms > 2500:
                 continue
+            self._rr_buffer.append(rr_ms)
 
+        # ---- HR via nk.ecg_rate ----
+        if len(peaks_rel) >= 2:
+            try:
+                with warnings.catch_warnings():
+                    warnings.simplefilter('ignore')
+                    rate = nk.ecg_rate(peaks_rel, sampling_rate=self.fs_hz)
+                hr_val = float(np.nanmean(rate))
+                if np.isfinite(hr_val):
+                    self.latest_hr = hr_val
+            except Exception:
+                pass
+
+        # ---- RMSSD via nk.hrv_time over the rolling RR buffer ----
+        # Reconstruct synthetic peak indices from the RR intervals so
+        # nk.hrv_time can consume them. nk.hrv_time only needs the deltas
+        # between peaks, so any consistent index sequence yields the same
+        # RMSSD.
+        if len(self._rr_buffer) >= max(4, Config.DS2_MIN_PEAKS_HRV):
+            try:
+                rr_arr = np.asarray(self._rr_buffer, dtype=float)
+                synth_peaks = np.concatenate(
+                    ([0.0], np.cumsum(rr_arr) * self.fs_hz / 1000.0)
+                ).astype(np.int64)
+                with warnings.catch_warnings():
+                    warnings.simplefilter('ignore')
+                    rmssd = float(nk.hrv_time(
+                        synth_peaks, sampling_rate=self.fs_hz,
+                    )["HRV_RMSSD"].iloc[0])
+                if (np.isfinite(rmssd)
+                        and Config.DS2_RMSSD_MIN_MS <= rmssd
+                        <= Config.DS2_RMSSD_MAX_MS):
+                    self.latest_hrv = rmssd
+            except Exception:
+                pass
+
+    def _detect_recent_peaks_fallback(self):
+        """Original prominence detector + sqrt(mean(diff(rr)^2)) RMSSD.
+        Only runs when NeuroKit2 is unavailable or raises on the buffer."""
+        arr = np.asarray(self._ecg_buf)
+        try:
+            filt = filtfilt(self._bp_b, self._bp_a, arr)
+        except ValueError:
+            return
+        peaks_rel = _detect_r_peaks(filt, self._refractory_samples)
+        if len(peaks_rel) == 0:
+            return
+        buf_start_abs = self._sample_index - len(arr)
+        peaks_abs = peaks_rel + buf_start_abs
+        new_peaks = peaks_abs[peaks_abs > self._last_peak_index]
+        for p_abs in new_peaks:
+            if self._last_peak_index < 0:
+                self._last_peak_index = int(p_abs)
+                continue
+            rr_ms = (int(p_abs) - self._last_peak_index) * 1000.0 / self.fs_hz
+            self._last_peak_index = int(p_abs)
+            if rr_ms < Config.ECG_MIN_RR_MS or rr_ms > 2500:
+                continue
             self._rr_buffer.append(rr_ms)
             self.latest_hr = 60_000.0 / rr_ms
-
             if len(self._rr_buffer) >= 2:
                 rr_arr = np.asarray(self._rr_buffer)
                 self.latest_hrv = float(np.sqrt(np.mean(np.diff(rr_arr) ** 2)))
@@ -776,10 +958,31 @@ class RealPLUXDataSource2(DataSource):
         self.latest_hrv = Config.MOCK_HRV_BASE
         self.latest_eda = 0.0
 
+        # Same Bluetooth-dropout watchdog as RealPLUXDataSource. See its
+        # constructor for the rationale.
+        self._last_fresh_sample_time = time.time()
+        self._watchdog_warned = False
+
     def get_next_sample(self) -> tuple:
         samples, _ = self.inlet.pull_chunk(timeout=0.0)
         if not samples:
+            silent_for = time.time() - self._last_fresh_sample_time
+            if (silent_for > Config.REAL_PLUX_WATCHDOG_WARN_SEC
+                    and not self._watchdog_warned):
+                print(f"[DATA SOURCE] WARN: no PLUX samples for "
+                      f"{silent_for:.1f}s — Bluetooth dropout likely. "
+                      f"Holding last value; will raise at "
+                      f"{Config.STREAM_TIMEOUT_SEC}s.")
+                self._watchdog_warned = True
+            if silent_for > Config.STREAM_TIMEOUT_SEC:
+                raise ConnectionError(
+                    f"[DATA SOURCE] PLUX inlet silent for {silent_for:.1f}s "
+                    f"(threshold {Config.STREAM_TIMEOUT_SEC}s). Check "
+                    f"OpenSignals is still recording and the device is paired."
+                )
             return (self.latest_eda, self.latest_hr, self.latest_hrv)
+        self._last_fresh_sample_time = time.time()
+        self._watchdog_warned = False
 
         for s in samples:
             ecg_adc = s[self.ecg_ch]

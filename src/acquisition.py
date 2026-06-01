@@ -161,6 +161,18 @@ class BiofeedbackAcquisition:
         if samples:
             # Use the most recent sample only
             latest = samples[-1]
+            # Defensive: the inlet's schema should always be 3-channel
+            # (EDA, HR, HRV) but a misconfigured streamer (e.g. real_plux
+            # subscribing to PLUX's raw ADC stream by mistake) can publish
+            # a different shape. A clear error here beats an IndexError
+            # mid-loop or silently unpacking ADC integers as physiology.
+            if len(latest) < 3:
+                raise RuntimeError(
+                    f"[ACQUISITION] Stream sample has {len(latest)} channels, "
+                    f"expected at least 3 (EDA, HR, HRV). Check that the "
+                    f"streamer is publishing the derived 3-channel stream, "
+                    f"not PLUX's raw ADC stream."
+                )
             new_eda, new_hr, new_hrv = float(latest[0]), float(latest[1]), float(latest[2])
 
             # ---- Sample validation ----

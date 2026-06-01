@@ -19,15 +19,25 @@ class Config:
     # DATA SOURCE SELECTION (CRITICAL FOR MODULARITY)
     # ============================================
     # Options: 'mock' | 'mock2' | 'real_plux' | 'real_plux2'
-    #   mock        - replays MOCK_DATA_FILE; HR/HRV via in-house adaptive
-    #                 R-peak detector + per-beat 60/RR (see derive_hr_hrv_from_ecg).
-    #   mock2       - replays MOCK_DATA_FILE; HR/HRV via the colleague's
-    #                 vret_server_v2 chain (nk.ecg_clean -> ecg_peaks ->
-    #                 ecg_rate / hrv_time) with 30 s HR window and 60 s
-    #                 RMSSD window. Use for A/B-testing the two derivation
-    #                 methods against the same recording.
-    #   real_plux   - live PLUX over OpenSignals LSL, adaptive detector.
-    #   real_plux2  - live PLUX over OpenSignals LSL, NeuroKit2 chain.
+    # All four paths use the same canonical NeuroKit2 chain
+    # (nk.ecg_clean -> nk.ecg_peaks(correct_artifacts=True) ->
+    # nk.ecg_rate / nk.hrv_time), per the VRET technical report design
+    # principle: every number is computed by a validated library call.
+    # The variants differ only in the windowing strategy on top of the
+    # same chain:
+    #   mock        - replays MOCK_DATA_FILE; per-beat HR (nk.ecg_rate
+    #                 with desired_length=n, interpolated per sample) and
+    #                 per-beat-rolling RMSSD over RMSSD_WINDOW_SEC.
+    #   mock2       - replays MOCK_DATA_FILE; mean HR over a 30 s ECG
+    #                 window and mean RMSSD over a 60 s ECG window,
+    #                 recomputed every 0.5 s. Smoother / slower.
+    #   real_plux   - live PLUX via OpenSignals LSL, per-beat semantics
+    #                 as in 'mock'.
+    #   real_plux2  - live PLUX via OpenSignals LSL, sliding-mean
+    #                 semantics as in 'mock2'.
+    # A prominence-based detector + sqrt(mean(diff(rr)^2)) is kept as
+    # the fallback ONLY for the case where NeuroKit2 is unavailable or
+    # raises on the input.
     # Switching is a one-line change here; nothing downstream needs editing.
     DATA_SOURCE = 'mock'
     
@@ -95,9 +105,34 @@ class Config:
     WEIGHT_HR = 0.2
 
     # Math-pipeline Step 8: threshold multipliers against frozen σ_baseline.
-    # 1.33 ≈ z=1.282 (~90th pct), 2.28 ≈ z=2.326 (~99th pct) under Gaussian assumption.
-    THRESH_MILD_K = 1.33
-    THRESH_HIGH_K = 2.28
+    # 1.28 = z for 90th percentile (top 10% tail), 2.33 = z for 99th percentile
+    # (top 1% tail). Per the VRET Biofeedback Pipeline technical report §2.
+    # Applied as thresh = mean_baseline + K * sigma_baseline (Bug 6 fix:
+    # thresholds are centred on the resting S_t mean, not on zero — resting
+    # S_t is generally not zero so K*sigma against zero flags calm patients).
+    THRESH_MILD_K = 1.28
+    THRESH_HIGH_K = 2.33
+
+    # ============================================
+    # EDA PHASIC DECOMPOSITION (PDF Cause 1 fix)
+    # ============================================
+    # Raw EDA is ~99% slow tonic drift (electrode hydration, temperature) on
+    # the reference recording, which dominated S_t when fed at weight 0.5.
+    # Per VRET technical report §7, we decompose EDA into tonic + phasic via
+    # nk.eda_phasic and feed only the PHASIC component (event-driven sympathetic
+    # responses, tonic drift removed) into the score.
+    EDA_PHASIC_WINDOW_SEC = 60          # rolling raw-EDA window fed to nk.eda_phasic
+    EDA_DECOMP_RATE_HZ = 10             # internal resample rate for decomposition
+    EDA_PHASIC_UPDATE_INTERVAL_SEC = 0.5  # recompute phasic at this cadence
+
+    # ============================================
+    # Z-SCORE FLOOR (PDF Cause 2 fix)
+    # ============================================
+    # When a baseline sigma collapses to ~0 the z-score divisor would blow up.
+    # Clamped to this floor so a degenerate per-signal sigma doesn't make the
+    # z-score Inf. Surfaces as a much smaller (but finite) z, instead of
+    # poisoning the whole live phase.
+    SIGMA_FLOOR = 1e-6
 
     # ============================================
     # SAMPLE VALIDATION (physiological sanity bounds)
@@ -152,8 +187,30 @@ class Config:
     # are more sensitive but more vulnerable to noise.
     ECG_PEAK_PROMINENCE_FRACTION = 0.5
     ECG_CANDIDATE_PROMINENCE_STD_FRAC = 0.5
-    # RMSSD window — math-pipeline Step 0 says ~10 s rolling.
-    RMSSD_WINDOW_SEC = 10
+    # =========================================================
+    # RMSSD WINDOW LENGTH (one knob, used by both derivation paths)
+    # =========================================================
+    # How many seconds of recent RR intervals (adaptive path) or trailing
+    # ECG (NeuroKit path, see DS2_HRV_WINDOW_SEC below) get averaged into
+    # one RMSSD value. Three common choices in the literature:
+    #
+    #   300  - Task Force 1996 / ESC classical "short-term" HRV gold
+    #          standard. Most stable estimate. Too laggy for real-time
+    #          biofeedback: a stress response takes 5 minutes to fully
+    #          surface in the number.
+    #    60  - Shaffer & Ginsberg 2017, Munoz et al. 2015 "ultra-short-
+    #          term" minimum. Reasonable real-time trade-off. With a 60 s
+    #          window the standard deviation of the RMSSD estimate is
+    #          roughly 12 ms; with a 10 s window it is roughly 56 ms.
+    #    10  - math-pipeline Step 0's original recommendation. Most
+    #          responsive, but the per-tick value is genuinely noisy.
+    #          Acceptable because downstream uses a percentage deviation,
+    #          not the absolute value.
+    #
+    # The DS2 path uses its own knob (DS2_HRV_WINDOW_SEC) so the two can
+    # diverge if needed for an A/B comparison, but the default for both
+    # is 60 s.
+    RMSSD_WINDOW_SEC = 60
 
     # ============================================
     # DATA SOURCE 2 (NeuroKit2 sliding-window variant)
@@ -161,8 +218,11 @@ class Config:
     # Knobs for MockDataSource2 / RealPLUXDataSource2 only. The original
     # detectors above are untouched, so flipping DATA_SOURCE between
     # 'mock' and 'mock2' gives a clean A/B comparison on the same file.
-    DS2_HR_WINDOW_SEC = 30          # trailing ECG fed to nk.ecg_rate (matches colleague)
-    DS2_HRV_WINDOW_SEC = 60         # trailing ECG fed to nk.hrv_time   (matches colleague)
+    DS2_HR_WINDOW_SEC = 30          # trailing ECG fed to nk.ecg_rate
+    # Trailing ECG fed to nk.hrv_time. Mirrors RMSSD_WINDOW_SEC above
+    # for the DS2 path. Keep both in sync unless A/B-testing a different
+    # window length between the two derivation methods.
+    DS2_HRV_WINDOW_SEC = 60
     DS2_UPDATE_INTERVAL_SEC = 0.5   # how often to recompute (HR_COMPUTE_INTERVAL=25 @ 50 Hz)
     DS2_MIN_PEAKS_HRV = 10          # require this many R-peaks before RMSSD is reported
     DS2_RMSSD_MIN_MS = 5            # reject RMSSD below this as a detector failure
@@ -205,6 +265,14 @@ class Config:
     # Streaming R-peak detection runs on a rolling ECG buffer. 5 s is plenty
     # for stable peak detection without consuming much memory.
     REAL_PLUX_ECG_BUFFER_SEC = 5
+    # Bluetooth-dropout watchdog. In real_plux mode the PLUX hub streams
+    # over Bluetooth; if it drops mid-session, RealPLUXDataSource would
+    # silently hold its last value forever (acquisition.py's deadman
+    # reads from our OUTLET, not the PLUX inlet, so it wouldn't trip).
+    # The watchdog prints one WARN after WARN_SEC of silence and raises
+    # at STREAM_TIMEOUT_SEC, matching how the acquisition-side deadman
+    # fails the session.
+    REAL_PLUX_WATCHDOG_WARN_SEC = 2.0
 
     # ============================================
     # DASHBOARD VISUAL SETTINGS

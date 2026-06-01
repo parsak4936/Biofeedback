@@ -181,8 +181,28 @@ def launch_system():
 
         print(f"\n\n[LAUNCHER] {shutdown_reason}. Shutting down all subsystems...")
 
+        # On Ctrl+C: drop a shutdown sentinel file that main.py polls and
+        # treats as SHUTDOWN_DISCARD_LIVE (same cleanup as the dashboard's
+        # "Keep baseline only" close prompt). This is the cross-platform
+        # alternative to SIGTERM, since Windows Popen.terminate is
+        # uncatchable. We give main up to 4 s to detect the marker and
+        # exit cleanly; the terminate() loop below is the fallback.
+        if shutdown_reason == "Ctrl+C":
+            try:
+                marker_path = os.path.join(project_root, 'data', '.shutdown_marker')
+                with open(marker_path, 'w') as _f:
+                    _f.write("shutdown")
+                if len(processes) >= 2 and processes[1].poll() is None:
+                    try:
+                        processes[1].wait(timeout=4)
+                    except subprocess.TimeoutExpired:
+                        pass
+            except OSError as e:
+                print(f"[LAUNCHER] WARN: could not write shutdown marker: {e}")
+
         # Terminate processes in reverse order. Skip any that are already
-        # gone (typically the dashboard, on the window-close path).
+        # gone (typically the dashboard, on the window-close path; or main,
+        # on the Ctrl+C cleanup path above).
         for p in reversed(processes):
             try:
                 if p.poll() is None:

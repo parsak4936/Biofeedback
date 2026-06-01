@@ -1,0 +1,42 @@
+{
+  "patient": {
+    "first_name": "qw",
+    "last_name": "qwed",
+    "patient_id": "12313",
+    "gender": "M",
+    "session_date": "2026-06-01",
+    "session_number": 1
+  },
+  "session_timestamp": "20260601_083336",
+  "captured_at": "2026-06-01 08:35:56",
+  "baseline_duration_sec": 120,
+  "sample_rate_pipeline_hz": 50.0,
+  "personal_baselines": {
+    "eda_uS": 3.386577601642066,
+    "hr_bpm": 78.09834388091404,
+    "hrv_ms": 114.71007732759546
+  },
+  "sigma_baseline": 0.578480974094677,
+  "thresholds": {
+    "mild": 0.7191136284068687,
+    "high": 1.3265186512062794
+  },
+  "hrv_metrics": {},
+  "artifacts_removed": {
+    "eda": 47,
+    "hr": 0,
+    "hrv": 0
+  },
+  "source": "mock:data/14_minute_test_of_myself_2026-05-26_16-47-36.txt",
+  "pipeline_constants": {
+    "ema_alpha_eda": 0.05,
+    "ema_alpha_hr": 0.1,
+    "ema_alpha_hrv": 0.05,
+    "artifact_sigma_multiplier": 3.0,
+    "weight_eda": 0.5,
+    "weight_hrv": 0.3,
+    "weight_hr": 0.2,
+    "thresh_mild_k": 1.28,
+    "thresh_high_k": 2.33
+  }
+}

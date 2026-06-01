@@ -72,15 +72,15 @@ A fifth script, `session_review.py`, is offline and independent. It replays any 
 A one-line change in `src/config.py`:
 
 ```python
-DATA_SOURCE = 'mock'        # replay MOCK_DATA_FILE, in-house adaptive detector
-DATA_SOURCE = 'mock2'       # replay MOCK_DATA_FILE, NeuroKit2 sliding-window chain
-DATA_SOURCE = 'real_plux'   # live PLUX hardware via OpenSignals LSL, in-house detector
-DATA_SOURCE = 'real_plux2'  # live PLUX hardware via OpenSignals LSL, NeuroKit2 chain
+DATA_SOURCE = 'mock'        # replay MOCK_DATA_FILE, NeuroKit2 chain (per-beat output)
+DATA_SOURCE = 'mock2'       # replay MOCK_DATA_FILE, NeuroKit2 chain (30 s / 60 s sliding-mean output)
+DATA_SOURCE = 'real_plux'   # live PLUX hardware via OpenSignals LSL, NeuroKit2 chain (per-beat)
+DATA_SOURCE = 'real_plux2'  # live PLUX hardware via OpenSignals LSL, NeuroKit2 chain (sliding-mean)
 ```
 
-`mock` and `mock2` use the same recorded OpenSignals file; only the HR/HRV derivation method differs. Useful for comparing the two approaches against the same input.
+All four paths run the same canonical NeuroKit2 chain (`nk.ecg_clean` → `nk.ecg_peaks(correct_artifacts=True)` → `nk.ecg_rate` / `nk.hrv_time`), following the design principle of the VRET Biofeedback Pipeline technical report Section 1: every number is computed by a validated library call. The `mock` / `mock2` paths replay the recorded file at `Config.MOCK_DATA_FILE`; `real_plux` / `real_plux2` read live samples from the OpenSignals LSL stream. The numbered variants differ in their windowing strategy on top of the same chain: per-beat updates (`mock`, `real_plux`) versus 30 s / 60 s sliding-mean updates every 0.5 s (`mock2`, `real_plux2`). A prominence-based detector is kept as a fallback only for the case where NeuroKit2 is unavailable or raises on the input.
 
-`real_plux` and `real_plux2` read live samples from the OpenSignals software's LSL stream. Both auto-detect which channel carries ECG and which carries EDA from the stream metadata; if the labels are missing, `Config.REAL_PLUX_ECG_CHANNEL` and `REAL_PLUX_EDA_CHANNEL` are the fallback.
+The live paths auto-detect which LSL channel carries ECG and which carries EDA from the stream metadata; if labels are missing, `Config.REAL_PLUX_ECG_CHANNEL` and `REAL_PLUX_EDA_CHANNEL` are the fallback.
 
 ## Configuration
 

@@ -118,6 +118,18 @@ class UnityUDPBridge:
         except Exception:
             pass  # not Windows, or feature unsupported on this build
 
+        # Reachability check: UDP is fire-and-forget, but a typo in
+        # UNITY_UDP_HOST (e.g. an IP that doesn't resolve) is silent at
+        # send time. Resolve once at startup and log clearly if it fails
+        # so the operator catches the misconfiguration before the lab
+        # session rather than during it.
+        try:
+            socket.getaddrinfo(self.host, self.port, type=socket.SOCK_DGRAM)
+        except socket.gaierror as e:
+            print(f"[UNITY] WARN: cannot resolve target {self.host}:{self.port} "
+                  f"({e}). Packets will be sent but Unity will never see them. "
+                  f"Check Config.UNITY_UDP_HOST / UNITY_UDP_PORT.")
+
         # Throttle tracking — for state commands only. Lifecycle commands
         # (start, stop) bypass the throttle, see send_raw().
         self._last_state_emit_time = 0.0

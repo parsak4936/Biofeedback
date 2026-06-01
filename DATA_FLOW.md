@@ -25,32 +25,26 @@ The 3.0 is the reference voltage, 0.132 is the EDA sensor constant, 1100 is the 
 
 The device does not give heart rate. The pipeline derives it from the ECG voltage by finding the R-peaks (the tall spikes, one per heartbeat) and measuring the time between them.
 
-Two derivation methods are available, selected by `Config.DATA_SOURCE`:
-
-**Adaptive prominence detector** (used by `mock` and `real_plux`). NeuroKit2's R-peak detector is primary; `_detect_r_peaks()` in `src/data_sources.py` is the fallback for degenerate inputs. The detector:
-
-1. Bandpasses the ECG to 5-15 Hz, the frequency band where QRS energy lives. This kills baseline wander and high-frequency noise.
-2. Detects on peak prominence (how far a peak rises above its local surroundings) rather than raw height, so a drifting baseline does not fool it.
-3. Runs two passes: a loose first pass to gather candidate peaks, then measures the typical R-peak prominence in this signal and keeps peaks at half that size. This self-calibration is why the same code handles a clean 42-second clip and a noisy 14-minute recording without changes.
-4. Enforces a 300 ms refractory gap so the T-wave that follows each beat is not miscounted as a second beat.
-
-From the peaks:
+Both derivation paths run on the same canonical NeuroKit2 chain, following the VRET technical-report design principle that every number is computed by a validated library call. The chain:
 
 ```
-HR (BPM)    = 60000 / RR_interval_in_ms       (per beat, held until next beat)
-RMSSD (ms)  = sqrt( mean( (RR_n+1 - RR_n)^2 ) )   over a rolling 10-second window
+nk.ecg_clean
+  -> nk.ecg_peaks(correct_artifacts=True)   # signal_fixpeaks internally
+  -> nk.ecg_rate(peaks, ...)                # per-sample HR
+  -> nk.hrv_time(peaks, ...)["HRV_RMSSD"]   # RMSSD
 ```
 
-RR intervals wildly off the running median (a missed or doubled beat) get replaced with the median before these calculations, so one bad beat does not spike HR or HRV.
+`correct_artifacts=True` is the technical-report Bug 3 fix: it routes detected peaks through `nk.signal_fixpeaks` to correct missed or doubled beats, replacing the older hand-rolled "drop RR intervals > 50% off the median" approach.
 
-**NeuroKit2 sliding-window chain** (used by `mock2` and `real_plux2`). `derive_hr_hrv_from_ecg_nk()` follows the reference `vret_server_v2.py` chain: `nk.ecg_clean` → `nk.ecg_peaks(correct_artifacts=True)`. From the detected peak list it then computes:
+The two paths differ only in how the chain's outputs are turned into per-tick HR and RMSSD:
 
-- HR as 60000 / mean(RR) over the trailing 30 seconds of beats (equivalent to the mean of `nk.ecg_rate` for full windows)
-- RMSSD as sqrt(mean(diff(RR)^2)) over the trailing 60 seconds (the same formula `nk.hrv_time` returns as `HRV_RMSSD`)
+**Adaptive path** (`mock` and `real_plux`). HR comes from `nk.ecg_rate(peaks, ..., desired_length=n)` which returns a per-sample series interpolated between detected beats (monotone cubic). RMSSD comes from `nk.hrv_time(peaks_window, ...)` evaluated at each beat over a trailing `RMSSD_WINDOW_SEC` window of beats (default 60 s), and held with zero-order hold between beats. Lower latency, per-beat granularity. RMSSD values outside 5-300 ms are rejected as detector failures (technical-report Bug 3 plausibility band) and the previous valid value is held.
 
-Values are recomputed every 0.5 seconds and held (zero-order hold) between updates. RMSSD outside 5-300 ms is rejected as a detector failure rather than reported as a real reading. The HRV window needs 60 s to fill, so for the first ~60 s of live the RMSSD reading stays at the seed value of `Config.MOCK_HRV_BASE`.
+**Windowed path** (`mock2` and `real_plux2`). Same chain, but HR is the mean of `nk.ecg_rate` over a trailing `DS2_HR_WINDOW_SEC` of ECG (default 30 s) and RMSSD is `nk.hrv_time` over a trailing `DS2_HRV_WINDOW_SEC` (default 60 s), both recomputed every 0.5 seconds and held between updates. Smoother but slower-responding. Same plausibility band on RMSSD.
 
-For the offline mock paths the detection runs once over the whole recording at load time. For the live PLUX paths the same logic runs incrementally on a rolling ECG buffer (5 seconds for the adaptive detector, 65 seconds for the NeuroKit chain). The downstream math is the same either way.
+A prominence-based two-pass detector + `sqrt(mean(diff(rr)^2))` fallback is kept ONLY for the case where NeuroKit2 is unavailable or raises on the input. In a normal recording the fallback never runs.
+
+For the offline mock paths the detection runs once over the whole recording at load time. For the live PLUX paths the same chain runs incrementally on a rolling ECG buffer (5 seconds for the adaptive path, 65 seconds for the windowed path).
 
 EDA needs none of this: the converted microsiemens value is used directly. It is a slow signal, so the high sample rate is just oversampling.
 

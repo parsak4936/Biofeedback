@@ -51,10 +51,31 @@ from session_manager import SessionManager
 from unity_bridge import UnityUDPBridge
 
 
+# File sentinel for cross-platform shutdown on launcher Ctrl+C. Windows
+# Popen.terminate() uses TerminateProcess (uncatchable), so we can't rely
+# on SIGTERM. Instead the launcher writes this file on Ctrl+C and the main
+# loop polls for it once per second. Treated as SHUTDOWN_DISCARD_LIVE,
+# matching the dashboard's "Keep baseline only" close prompt.
+_SHUTDOWN_MARKER_FILENAME = ".shutdown_marker"
+
+
 def run_pipeline():
     print("=" * 50)
     print("  BIOFEEDBACK PIPELINE STARTING")
     print("=" * 50 + "\n")
+
+    # Shutdown sentinel path (see _SHUTDOWN_MARKER_FILENAME). The launcher
+    # writes here on Ctrl+C; we poll it once per second below and treat it
+    # as SHUTDOWN_DISCARD_LIVE so the cleanup path matches the dashboard's
+    # close-window "Keep baseline only" prompt.
+    _project_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    _shutdown_marker_path = os.path.join(_project_root, 'data', _SHUTDOWN_MARKER_FILENAME)
+    # Clear any stale marker from a previous launch.
+    try:
+        if os.path.exists(_shutdown_marker_path):
+            os.remove(_shutdown_marker_path)
+    except OSError:
+        pass
 
     patient_name = os.environ.get('PATIENT_NAME', 'PATIENT')
     patient_id = os.environ.get('PATIENT_ID', '000')
@@ -118,6 +139,10 @@ def run_pipeline():
         if old_state == new_state:
             return
         print(f"[STATE] {old_state.name} -> {new_state.name}")
+        # Keep the processing audit log's phase column honest. Without this
+        # the column was derived from baseline_complete (saying "BASELINE"
+        # during IDLE and "LIVE" during BASELINE_DONE/STOPPED).
+        proc.set_phase(new_state.name)
 
         # ---- IDLE on entry: clear everything if we came from data. ----
         if new_state == SessionState.IDLE and old_state in (
@@ -168,11 +193,12 @@ def run_pipeline():
                 # Re-lock thresholds against the still-valid baseline so a
                 # subsequent LIVE_START reuses them.
                 if proc.cleaned_baseline_buffers and proc.personal_averages:
-                    sigma = fusion.calculate_baseline_sigma(
+                    mean_b, sigma_b = fusion.calculate_baseline_sigma(
                         proc.cleaned_baseline_buffers,
                         proc.personal_averages,
+                        phasic_buffer=proc.cleaned_phasic_buffer,
                     )
-                    fusion.set_thresholds(sigma_baseline=sigma)
+                    fusion.set_thresholds(mean_baseline=mean_b, sigma_baseline=sigma_b)
                 unity.reset()
                 if old_state == SessionState.LIVE:
                     unity.send_raw("stop")  # tell Unity the previous live ended
@@ -193,11 +219,12 @@ def run_pipeline():
                 # Re-lock thresholds against the still-valid baseline so
                 # the new live session uses the same calibration.
                 if proc.cleaned_baseline_buffers and proc.personal_averages:
-                    sigma = fusion.calculate_baseline_sigma(
+                    mean_b, sigma_b = fusion.calculate_baseline_sigma(
                         proc.cleaned_baseline_buffers,
                         proc.personal_averages,
+                        phasic_buffer=proc.cleaned_phasic_buffer,
                     )
-                    fusion.set_thresholds(sigma_baseline=sigma)
+                    fusion.set_thresholds(mean_baseline=mean_b, sigma_baseline=sigma_b)
                 unity.reset()
 
             live_started_at = time.time()
@@ -264,6 +291,19 @@ def run_pipeline():
 
             # ---- Phase A: read operator commands and transition ----
             shutdown_requested = False
+            # File-sentinel poll for launcher Ctrl+C (cross-platform; Windows
+            # Popen.terminate is uncatchable so this is the cheapest reliable
+            # mechanism). Polled once per second to keep the stat() cost
+            # negligible. Treated as SHUTDOWN_DISCARD_LIVE.
+            if (acq.tick_counter % int(Config.PIPELINE_RATE) == 0
+                    and os.path.exists(_shutdown_marker_path)):
+                print("[MAIN] Shutdown marker detected; treating as SHUTDOWN_DISCARD_LIVE.")
+                _handle_shutdown(Command.SHUTDOWN_DISCARD_LIVE)
+                try:
+                    os.remove(_shutdown_marker_path)
+                except OSError:
+                    pass
+                break
             for cmd in control.poll():
                 if cmd in SHUTDOWN_COMMANDS:
                     _handle_shutdown(cmd)
@@ -312,11 +352,39 @@ def run_pipeline():
                 # Auto-finish: when ready (by either path above), compute
                 # thresholds, write the baseline JSON, transition.
                 if ready_now and not baseline_locked:
-                    sigma = fusion.calculate_baseline_sigma(
+                    # Detector-failure sentinel check: when the data source
+                    # cannot find R-peaks (loose electrode, fully muted ECG)
+                    # it returns the MOCK_HR_BASE / MOCK_HRV_BASE seed
+                    # values for every sample. A baseline locked on those
+                    # is unusable — print a loud warning so the operator
+                    # restores contact and re-baselines before going live.
+                    import numpy as _np
+                    _hr_buf = proc.cleaned_baseline_buffers.get('hr')
+                    _hrv_buf = proc.cleaned_baseline_buffers.get('hrv')
+                    if _hr_buf is not None and len(_hr_buf) > 0:
+                        _hr_var = float(_np.std(_hr_buf))
+                        _hrv_var = float(_np.std(_hrv_buf)) if _hrv_buf is not None else 0.0
+                        _hr_mean = float(_np.mean(_hr_buf))
+                        _hrv_mean = float(_np.mean(_hrv_buf)) if _hrv_buf is not None else 0.0
+                        # Sentinel pattern: variance ~0 AND value at the seed default.
+                        if (_hr_var < 1e-3 and abs(_hr_mean - Config.MOCK_HR_BASE) < 0.01
+                                and _hrv_var < 1e-3 and abs(_hrv_mean - Config.MOCK_HRV_BASE) < 0.01):
+                            print("\n" + "!" * 60)
+                            print("!! [MAIN] WARN: baseline locked on detector-failure")
+                            print(f"!! defaults (HR={_hr_mean:.1f} BPM, HRV={_hrv_mean:.1f} ms,")
+                            print("!! both pinned). The R-peak detector found no usable")
+                            print("!! beats during baseline — likely loose ECG electrode")
+                            print("!! contact. Restore contact and click Start Baseline")
+                            print("!! again before going live, or the live phase will be")
+                            print("!! measuring against meaningless reference values.")
+                            print("!" * 60 + "\n")
+
+                    mean_b, sigma_b = fusion.calculate_baseline_sigma(
                         proc.cleaned_baseline_buffers,
                         proc.personal_averages,
+                        phasic_buffer=proc.cleaned_phasic_buffer,
                     )
-                    fusion.set_thresholds(sigma_baseline=sigma)
+                    fusion.set_thresholds(mean_baseline=mean_b, sigma_baseline=sigma_b)
                     baseline_locked = True
 
                     session.set_baseline_stats(
@@ -333,7 +401,7 @@ def run_pipeline():
                         else f"{Config.DATA_SOURCE}@{Config.STREAM_NAME}"
                     )
                     session.write_baseline_capture(
-                        sigma_baseline=sigma,
+                        sigma_baseline=sigma_b,
                         thresh_mild=fusion.thresh_mild,
                         thresh_high=fusion.thresh_high,
                         source_label=source_label,
@@ -343,9 +411,14 @@ def run_pipeline():
                     print("[STATE] BASELINE -> BASELINE_DONE (operator: click Start on the Live panel)")
 
             elif state == SessionState.LIVE:
-                # Full pipeline only when LIVE.
-                deltas = fusion.compute_deltas(smoothed_vector, proc.personal_averages)
-                s_inst = fusion.compute_s_instant(smoothed_vector, proc.personal_averages)
+                # Full pipeline only when LIVE. Phasic EDA is sourced from
+                # the processor's rolling decomposition (PDF §7 Cause 1
+                # fix); it replaces raw EDA in the fusion math.
+                phasic_eda = proc.current_phasic_eda
+                deltas = fusion.compute_deltas(
+                    smoothed_vector, phasic_eda, proc.personal_averages)
+                s_inst = fusion.compute_s_instant(
+                    smoothed_vector, phasic_eda, proc.personal_averages)
                 s_t, state_label, dashboard = fusion.evaluate_state(s_inst)
                 session.record_stress_metric(s_inst, s_t, state_label, dashboard)
                 # Pass s_t through so the audit log can show why each
@@ -363,7 +436,7 @@ def run_pipeline():
                         f"EDA={smoothed_vector[0]:.3f}uS  "
                         f"HR={smoothed_vector[1]:.1f}BPM  "
                         f"RMSSD={smoothed_vector[2]:.1f}ms  "
-                        f"dEDA={deltas['eda']:+.1f}%  "
+                        f"phasicEDA={deltas['eda']:+.3f}uS  "
                         f"dHR={deltas['hr']:+.1f}%  "
                         f"dHRV={deltas['hrv']:+.1f}%  "
                         f"S_t={s_t:+.2f}  "

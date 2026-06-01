@@ -389,9 +389,13 @@ class ClinicalDashboard:
                                 pen=pg.mkPen('#666666',
                                              style=pg.QtCore.Qt.DashLine, width=1))
         plot_widget.addItem(zero)
-        self.curve_delta_eda = plot_widget.plot([], [], pen=pg.mkPen('#00ff66', width=1.5), name='dEDA')
-        self.curve_delta_hr  = plot_widget.plot([], [], pen=pg.mkPen('#ff9933', width=1.5), name='dHR')
-        self.curve_delta_hrv = plot_widget.plot([], [], pen=pg.mkPen('#33aaff', width=1.5), name='dHRV')
+        # phEDA: phasic EDA in microsiemens (PDF Cause 1). dHR / dHRV:
+        # percent deviation from baseline. Different units on the same chart
+        # is intentional — what matters here is each signal's deviation
+        # direction over time, not absolute scale comparison.
+        self.curve_delta_eda = plot_widget.plot([], [], pen=pg.mkPen('#00ff66', width=1.5), name='phEDA µS')
+        self.curve_delta_hr  = plot_widget.plot([], [], pen=pg.mkPen('#ff9933', width=1.5), name='dHR %')
+        self.curve_delta_hrv = plot_widget.plot([], [], pen=pg.mkPen('#33aaff', width=1.5), name='dHRV %')
         plot_widget.addLegend(offset=(10, 10))
         return plot_widget
 
@@ -537,7 +541,7 @@ class ClinicalDashboard:
         self.label_state.setStyleSheet(f"color: {state_color}; font-weight: bold;")
         self.label_s_t.setText(f"S_t: {s_t:6.2f}    Score: {dashboard_score:5.1f}/100")
         self.label_deltas.setText(
-            f"dEDA: {delta_eda:+6.1f} %   dHR: {delta_hr:+6.1f} %   dHRV: {delta_hrv:+6.1f} %"
+            f"phEDA: {delta_eda:+6.3f} µS   dHR: {delta_hr:+6.1f} %   dHRV: {delta_hrv:+6.1f} %"
         )
 
         # ---- Stress chart (only while baseline is locked) ----

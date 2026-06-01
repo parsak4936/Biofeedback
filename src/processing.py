@@ -16,11 +16,23 @@ in main.py wraps this — proc.reset() is called when the operator clicks
 Reset, which clears the buffers and lets the next baseline start fresh.
 """
 
+import collections
 import numpy as np
+import warnings
 from config import Config
 import csv
 import datetime
 import os
+
+# NeuroKit2 is the reference library for EDA decomposition (PDF §7 Cause 1).
+# Falls back to a no-op if unavailable so the rest of the pipeline keeps
+# running, but the EDA z-score will then sit around 0 and the score will
+# be HR/HRV-driven only.
+try:
+    import neurokit2 as nk
+    _NEUROKIT_AVAILABLE = True
+except ImportError:
+    _NEUROKIT_AVAILABLE = False
 
 
 class SignalProcessor:
@@ -55,6 +67,10 @@ class SignalProcessor:
         # operator has even clicked Start Baseline.
         self.accumulate_baseline = False
         self.baseline_complete = False
+        # Phase string used in the processing audit log. main.py sets this
+        # via set_phase() on every state transition; "IDLE" is the safe
+        # default before the operator clicks anything.
+        self.current_phase = "IDLE"
         self.personal_averages = {}
         self.artifacts_removed = {
             'eda': 0,
@@ -69,6 +85,23 @@ class SignalProcessor:
             'hrv': None
         }
         self.target_buffer_size = int(Config.BASELINE_SEC * Config.PIPELINE_RATE)
+
+        # ---- Phasic EDA infrastructure (PDF §7 Cause 1) ----
+        # Rolling RAW (un-smoothed) EDA buffer fed to nk.eda_phasic so the
+        # tonic SCL drift can be subtracted out and only the phasic (SCR)
+        # component reaches the fusion engine.
+        self._phasic_window_n = int(Config.EDA_PHASIC_WINDOW_SEC
+                                    * Config.PIPELINE_RATE)
+        self._raw_eda_window = collections.deque(maxlen=self._phasic_window_n)
+        self._phasic_update_interval_n = max(
+            1, int(Config.EDA_PHASIC_UPDATE_INTERVAL_SEC * Config.PIPELINE_RATE)
+        )
+        self._tick_counter = 0
+        self.current_phasic_eda = 0.0
+        # Per-tick phasic-EDA values captured during BASELINE so fusion can
+        # compute the phasic mean + sigma used to z-score live phasic values.
+        self.phasic_baseline_buffer = []
+        self.cleaned_phasic_buffer = None
 
         self.log_path = None
         self.log_file = None
@@ -115,6 +148,13 @@ class SignalProcessor:
         if not final:
             self._open_log()
 
+    def set_phase(self, phase: str):
+        """Set the label written to the processing audit log (IDLE / BASELINE /
+        BASELINE_DONE / LIVE / STOPPED). Called by main.py on state transitions
+        so the per-tick log reflects the actual session state, not a derived
+        proxy."""
+        self.current_phase = phase
+
     def reset(self):
         """
         Discard everything and start over. Used when the operator clicks
@@ -130,40 +170,100 @@ class SignalProcessor:
         self.personal_averages = {}
         self.artifacts_removed = {'eda': 0, 'hr': 0, 'hrv': 0}
         self.cleaned_baseline_buffers = {'eda': None, 'hr': None, 'hrv': None}
+        self._raw_eda_window.clear()
+        self.current_phasic_eda = 0.0
+        self.phasic_baseline_buffer = []
+        self.cleaned_phasic_buffer = None
+        self._tick_counter = 0
         print("[PROCESSOR] Reset: baseline buffers cleared, EMA reseeded.")
 
     def process_sample(self, raw_vector: list) -> tuple:
         """
         Main entry point for each 50Hz tick.
         1. Smooths the raw vector.
-        2. Routes to buffer if baseline is incomplete.
-        
+        2. Maintains the rolling RAW EDA window and recomputes phasic EDA
+           periodically.
+        3. Routes to baseline buffers if baseline is incomplete.
+
         Returns:
             tuple: (smoothed_vector, is_baseline_complete)
         """
         raw_eda, raw_hr, raw_hrv = raw_vector
-        
+
         # 1. Apply EMA Smoothing
         smooth_eda = self._apply_ema('eda', raw_eda, Config.EMA_ALPHA_EDA)
         smooth_hr = self._apply_ema('hr', raw_hr, Config.EMA_ALPHA_HR)
         smooth_hrv = self._apply_ema('hrv', raw_hrv, Config.EMA_ALPHA_HRV)
-        
+
         smoothed_vector = [smooth_eda, smooth_hr, smooth_hrv]
 
-        # 2. Handle Baseline Phase
+        # 2. Phasic EDA pipeline (PDF §7 Cause 1). We append the RAW
+        # (un-smoothed) EDA value to the rolling window — nk.eda_phasic
+        # wants its own EDA, not our EMA-smoothed display version. The
+        # decomposition is expensive enough that we only recompute every
+        # EDA_PHASIC_UPDATE_INTERVAL_SEC seconds; the phasic value is
+        # held between recomputes (ZOH).
+        self._raw_eda_window.append(float(raw_eda))
+        self._tick_counter += 1
+        if (self._tick_counter % self._phasic_update_interval_n == 0
+                and len(self._raw_eda_window) >= int(Config.PIPELINE_RATE) * 5):
+            self._update_phasic_eda()
+
+        # 3. Handle Baseline Phase
         # accumulate_baseline is controlled by the state machine in main.py;
         # it's True only while state == BASELINE. baseline_complete still
         # short-circuits so the 120 s lock fires once and only once.
         if self.accumulate_baseline and not self.baseline_complete:
             self._buffer_sample(smoothed_vector)
-            # Write to audit log
+            # Capture the current phasic value per-tick so fusion can compute
+            # the phasic mean + sigma at baseline lock. Held value is fine
+            # for the ~25 ticks between decompositions; the values are then
+            # averaged by fusion anyway.
+            self.phasic_baseline_buffer.append(self.current_phasic_eda)
+
+        # Write to audit log every tick regardless of state, with the actual
+        # session phase set by main.py via set_phase(). The pre-fix label was
+        # derived from baseline_complete and showed "BASELINE" during IDLE +
+        # "LIVE" during BASELINE_DONE/STOPPED, which confused post-hoc review.
         current_time = datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S.%f')[:-3]
-        phase_label = "LIVE" if self.baseline_complete else "BASELINE"
         self.csv_writer.writerow([
-            current_time, phase_label, 
+            current_time, self.current_phase,
             round(smooth_eda, 4), round(smooth_hr, 4), round(smooth_hrv, 4)
         ])
         return smoothed_vector, self.baseline_complete
+
+    def _update_phasic_eda(self):
+        """
+        Decompose the rolling raw EDA window into tonic + phasic and pick the
+        most recent phasic value. Updated at EDA_PHASIC_UPDATE_INTERVAL_SEC
+        cadence; held between updates.
+
+        Mirrors compute_phasic_eda() in vret_server_v2.py: resample to
+        EDA_DECOMP_RATE_HZ, clean, run nk.eda_phasic, take the last
+        EDA_Phasic sample. Returns silently on failure (the last good value
+        is held).
+        """
+        if not _NEUROKIT_AVAILABLE:
+            return
+        try:
+            arr = np.asarray(self._raw_eda_window, dtype=float)
+            src_rate = Config.PIPELINE_RATE
+            with warnings.catch_warnings():
+                warnings.simplefilter('ignore')
+                ds = nk.signal_resample(
+                    arr, sampling_rate=src_rate,
+                    desired_sampling_rate=Config.EDA_DECOMP_RATE_HZ,
+                )
+                ds = nk.eda_clean(ds, sampling_rate=Config.EDA_DECOMP_RATE_HZ)
+                phasic = nk.eda_phasic(
+                    ds, sampling_rate=Config.EDA_DECOMP_RATE_HZ,
+                )["EDA_Phasic"].values
+            if phasic.size > 0:
+                self.current_phasic_eda = float(phasic[-1])
+        except Exception:
+            # Decomposition failed on this window — quietly hold the last
+            # good value rather than poisoning S_t with a synthetic zero.
+            pass
 
     def _apply_ema(self, signal_name: str, current_value: float, alpha: float) -> float:
         """
@@ -272,8 +372,29 @@ class SignalProcessor:
             # Diagnostic reporting
             print(f"  -> {signal.upper()}: Removed {artifacts_count} artifacts. Baseline Avg = {self.personal_averages[signal]:.2f}")
             
+        # Phasic baseline buffer: cleaned the same way as the others so the
+        # per-signal stats fusion derives from it aren't contaminated by
+        # decomposition artifacts at window edges. If the buffer is empty
+        # (e.g. NeuroKit unavailable for the whole baseline) we leave it
+        # None — fusion will warn and treat the EDA term as ~0.
+        if self.phasic_baseline_buffer:
+            ph_arr = np.asarray(self.phasic_baseline_buffer, dtype=np.float64)
+            ph_mu = float(np.mean(ph_arr))
+            ph_sigma = float(np.std(ph_arr))
+            if ph_sigma == 0.0:
+                self.cleaned_phasic_buffer = ph_arr.copy()
+            else:
+                k = Config.ARTIFACT_SIGMA_MULTIPLIER
+                lo, hi = ph_mu - k * ph_sigma, ph_mu + k * ph_sigma
+                ph_clean = ph_arr[(ph_arr >= lo) & (ph_arr <= hi)]
+                self.cleaned_phasic_buffer = (ph_clean if len(ph_clean) > 0
+                                              else ph_arr.copy())
+            print(f"  -> EDA PHASIC: kept {len(self.cleaned_phasic_buffer)}"
+                  f"/{len(ph_arr)} samples; "
+                  f"mean={float(np.mean(self.cleaned_phasic_buffer)):+.4f} uS")
+
         self.baseline_complete = True
-        
+
         # Free up memory (we don't need the 18,000 floats anymore)
         self.buffers = None
         print("[PROCESSOR] Calibration Complete. Switching to Live Therapy Mode.\n")
