@@ -44,9 +44,20 @@ class Config:
     # ============================================
     # LSL NETWORK SETTINGS
     # ============================================
-    STREAM_NAME = "OpenSignals"
-    STREAM_TYPE = "00:07:80:0F:31:9C"  # Hardware MAC or identifier
+    # `STREAM_NAME` is the INTERNAL derived 3-channel stream
+    # (EDA µS, HR BPM, HRV ms) that the data source publishes and the
+    # acquisition module subscribes to. The same stream name is used in
+    # both mock and real_plux modes — flipping Config.DATA_SOURCE doesn't
+    # change what acquisition.py reads.
+    STREAM_NAME = "Biofeedback_Raw"
+    STREAM_TYPE = "Derived"
     NUM_CHANNELS = 3
+
+    # `PLUX_LSL_NAME` is the UPSTREAM raw-ADC stream that OpenSignals
+    # publishes when its LSL integration is enabled. Only used in
+    # real_plux mode. The mock path doesn't see this stream — it reads
+    # the .txt file directly. Default matches OpenSignals' factory name.
+    PLUX_LSL_NAME = "OpenSignals"
     
     # ============================================
     # SYSTEM LIMITS
@@ -77,13 +88,11 @@ class Config:
     ECG_STREAM_NAME = "OpenSignals_ECG"
     ECG_STREAM_TYPE = "ECG"
     
-    # ============================================
-    # MOCK DATA BASELINES (Synthetic Generation)
-    # ============================================
-    MOCK_EDA_BASE = 5.0   # microsiemens
-    MOCK_HR_BASE = 75.0   # BPM
-    MOCK_HRV_BASE = 40.0  # ms
-    
+    # (MOCK_EDA_BASE / MOCK_HR_BASE / MOCK_HRV_BASE removed — these were
+    #  seed sentinels the data source held while HR/HRV warmed up. The
+    #  PDF-aligned data source now uses NaN as the warm-up sentinel, so
+    #  no per-signal seed defaults are needed.)
+
     # ============================================
     # PIPELINE MATH & BASELINE PARAMETERS
     # ============================================
@@ -168,66 +177,46 @@ class Config:
     MAX_SESSION_NUMBER = 3
 
     # ============================================
-    # ECG -> HR / HRV  (same pipeline for mock + real PLUX)
+    # ECG -> HR / HRV  (PDF-aligned canonical NeuroKit2 chain)
     # ============================================
-    # Bandpass cutoffs for QRS detection. Works at any sample rate.
-    ECG_BANDPASS_LOW_HZ = 5.0
-    ECG_BANDPASS_HIGH_HZ = 15.0
-    # Minimum spacing between R-peaks (refractory). 300 ms = max 200 BPM.
-    # Set to 300 (not 250) so we don't double-count the T-wave that follows
-    # each QRS ~200-400 ms later as a second beat.
-    ECG_MIN_RR_MS = 300
-    # R-peak detection uses NeuroKit2 as primary (team-preferred reference
-    # library). Method options: 'neurokit' (default, robust), 'pantompkins1985'
-    # (classic gold standard), 'hamilton2002', 'christov2004', 'elgendi2010'.
-    # If you change this, re-verify on your recordings — they don't all agree.
-    NEUROKIT_RPEAK_METHOD = 'neurokit'
-    # Fallback detector parameters, used only if NeuroKit2 fails on the input.
-    # The fallback is a prominence-based two-pass algorithm; lower fractions
-    # are more sensitive but more vulnerable to noise.
-    ECG_PEAK_PROMINENCE_FRACTION = 0.5
-    ECG_CANDIDATE_PROMINENCE_STD_FRAC = 0.5
-    # =========================================================
-    # RMSSD WINDOW LENGTH (one knob, used by both derivation paths)
-    # =========================================================
-    # How many seconds of recent RR intervals (adaptive path) or trailing
-    # ECG (NeuroKit path, see DS2_HRV_WINDOW_SEC below) get averaged into
-    # one RMSSD value. Three common choices in the literature:
-    #
-    #   300  - Task Force 1996 / ESC classical "short-term" HRV gold
-    #          standard. Most stable estimate. Too laggy for real-time
-    #          biofeedback: a stress response takes 5 minutes to fully
-    #          surface in the number.
-    #    60  - Shaffer & Ginsberg 2017, Munoz et al. 2015 "ultra-short-
-    #          term" minimum. Reasonable real-time trade-off. With a 60 s
-    #          window the standard deviation of the RMSSD estimate is
-    #          roughly 12 ms; with a 10 s window it is roughly 56 ms.
-    #    10  - math-pipeline Step 0's original recommendation. Most
-    #          responsive, but the per-tick value is genuinely noisy.
-    #          Acceptable because downstream uses a percentage deviation,
-    #          not the absolute value.
-    #
-    # The DS2 path uses its own knob (DS2_HRV_WINDOW_SEC) so the two can
-    # diverge if needed for an A/B comparison, but the default for both
-    # is 60 s.
+    # Per the VRET Biofeedback Pipeline technical report §2-3, HR and RMSSD
+    # are derived by:
+    #     nk.ecg_clean -> nk.ecg_peaks(correct_artifacts=True)
+    #                  -> nk.ecg_rate   (HR over trailing HR_WINDOW_SEC)
+    #                  -> nk.hrv_time["HRV_RMSSD"]
+    #                                   (RMSSD over trailing RMSSD_WINDOW_SEC)
+    # Both are recomputed every HR_COMPUTE_INTERVAL_SEC and held between
+    # updates (zero-order hold). The same chain runs in both mock and live
+    # paths — there is no v1/v2 split anymore.
+
+    # Trailing ECG window fed to nk.ecg_rate for HR. PDF §3: "a memory cap,
+    # not a smoothing target — HR appears within a few seconds of beats
+    # being detected." 30 s is plenty for a stable per-window mean.
+    HR_WINDOW_SEC = 30
+
+    # Trailing ECG window fed to nk.hrv_time for RMSSD. PDF §3 chooses 60 s
+    # as the minimum where the estimator standard deviation is acceptable
+    # (~12 ms; a 10 s window gives ~56 ms — too noisy). Before 60 s of ECG
+    # has been buffered, RMSSD is emitted as NaN (PDF: "no valid live
+    # RMSSD in the first minute").
     RMSSD_WINDOW_SEC = 60
 
-    # ============================================
-    # DATA SOURCE 2 (NeuroKit2 sliding-window variant)
-    # ============================================
-    # Knobs for MockDataSource2 / RealPLUXDataSource2 only. The original
-    # detectors above are untouched, so flipping DATA_SOURCE between
-    # 'mock' and 'mock2' gives a clean A/B comparison on the same file.
-    DS2_HR_WINDOW_SEC = 30          # trailing ECG fed to nk.ecg_rate
-    # Trailing ECG fed to nk.hrv_time. Mirrors RMSSD_WINDOW_SEC above
-    # for the DS2 path. Keep both in sync unless A/B-testing a different
-    # window length between the two derivation methods.
-    DS2_HRV_WINDOW_SEC = 60
-    DS2_UPDATE_INTERVAL_SEC = 0.5   # how often to recompute (HR_COMPUTE_INTERVAL=25 @ 50 Hz)
-    DS2_MIN_PEAKS_HRV = 10          # require this many R-peaks before RMSSD is reported
-    DS2_RMSSD_MIN_MS = 5            # reject RMSSD below this as a detector failure
-    DS2_RMSSD_MAX_MS = 300          # reject RMSSD above this as a detector failure
-    DS2_PLUX_ECG_BUFFER_SEC = 65    # live PLUX buffer must exceed DS2_HRV_WINDOW_SEC
+    # How often HR and RMSSD are recomputed (per PDF §3: "HR and RMSSD are
+    # recomputed every 25 ticks (about every 0.5 s)"). Between recomputes
+    # the values are held with zero-order hold.
+    HR_COMPUTE_INTERVAL_SEC = 0.5
+
+    # Physiological plausibility band for RMSSD (PDF §4 Bug 3). Values
+    # outside this range are detector failures (the R-peak detector is
+    # missing or inventing beats on a poor-quality ECG), not real
+    # measurements. They are rejected and the previous valid value is held.
+    RMSSD_MIN_MS = 5
+    RMSSD_MAX_MS = 300
+
+    # Minimum R-peak count in the RMSSD window before nk.hrv_time is
+    # called. Below this, RMSSD stays NaN (the window is too sparse for a
+    # meaningful estimate).
+    MIN_PEAKS_HRV = 10
 
     # ============================================
     # UNITY UDP BRIDGE
@@ -304,6 +293,15 @@ class Config:
     # ============================================
     # MockDataSource auto-detects sampling rate AND channel order (ECG vs EDA)
     # from the OpenSignals header JSON — switch files freely, no other edits.
-    MOCK_DATA_FILE = "data/14_minute_test_of_myself_2026-05-26_16-47-36.txt"  # 1000Hz, 14min, EDA=col2/ECG=col3
+    MOCK_DATA_FILE = "data/paria_onmylaptop_opensignals_2026-05-25_15-13-39.txt"  # 1000Hz, 14min, EDA=col2/ECG=col3
+
+    # When False (default), MockDataSource stops publishing once the file is
+    # exhausted — the acquisition deadman fires after STREAM_TIMEOUT_SEC and
+    # the session ends cleanly with whatever was captured. Matches what a
+    # real PLUX device would do at end of recording. Set True for endless
+    # dev testing on short files, but expect the HR/HRV signal to jump
+    # discontinuously at every wrap-around (the file's end and beginning
+    # don't connect physiologically).
+    MOCK_LOOP = False
     # MOCK_DATA_FILE = "data/opensignals_2026-05-25_14-57-56.txt"            # 200Hz, 8.7min, ECG=col2/EDA=col3
     # MOCK_DATA_FILE = "data/fake_opensignals_2026-05-13_15-24-44.txt"       # 1000Hz, 42s, EDA=col2/ECG=col3

@@ -17,6 +17,7 @@ Reset, which clears the buffers and lets the next baseline start fresh.
 """
 
 import collections
+import math
 import numpy as np
 import warnings
 from config import Config
@@ -269,18 +270,34 @@ class SignalProcessor:
         """
         Applies the one-pole exponential moving average.
         y_t = α · x_t + (1 − α) · y_{t−1}
+
+        NaN handling (PDF §3 HR/HRV warm-up): the data source emits NaN for
+        HR until the R-peak detector has seen a few beats (~2 s) and for
+        HRV until the 60 s RMSSD window has filled. We handle NaN by:
+          * NaN input + EMA never initialised  →  return NaN (still warming)
+          * NaN input + EMA already initialised →  hold previous value (do
+                                                   not update state — this
+                                                   prevents a transient
+                                                   detector failure from
+                                                   contaminating the EMA)
+          * Real input + EMA never initialised  →  initialise to this value
+                                                   (avoids the ramp-from-
+                                                   zero artifact)
+          * Real input + EMA already initialised →  standard EMA blend
         """
+        if isinstance(current_value, float) and math.isnan(current_value):
+            previous_value = self.ema_state[signal_name]
+            return previous_value if previous_value is not None else float('nan')
+
         previous_value = self.ema_state[signal_name]
-        
         if previous_value is None:
-            # Initialize filter with the first sample to prevent a ramp-up artifact
+            # Initialise filter with the first valid sample so the smoothed
+            # trace doesn't ramp up from zero.
             self.ema_state[signal_name] = current_value
             return current_value
-            
-        # Compute new smoothed value
+
         smoothed_value = (alpha * current_value) + ((1.0 - alpha) * previous_value)
         self.ema_state[signal_name] = smoothed_value
-        
         return smoothed_value
 
     def _buffer_sample(self, smoothed_vector: list):
@@ -329,11 +346,35 @@ class SignalProcessor:
         print(f"\n[PROCESSOR] 120-Second Buffer Full. Executing 3-Sigma Cleaning...")
         
         for signal in ['eda', 'hr', 'hrv']:
-            arr = np.array(self.buffers[signal])
+            arr_full = np.array(self.buffers[signal], dtype=np.float64)
+
+            # NaN warm-up exclusion (PDF §3): for HR and HRV, the data source
+            # emits NaN until the R-peak detector / RMSSD window has filled.
+            # We drop NaN here so personal_averages reflect only real
+            # measurements. EDA never has NaN (it's a direct hardware signal).
+            n_nan = int(np.sum(~np.isfinite(arr_full)))
+            arr = arr_full[np.isfinite(arr_full)]
+            if n_nan > 0:
+                if len(arr) >= int(Config.PIPELINE_RATE * 5):  # ≥5 s of real samples
+                    print(f"[PROCESSOR] {signal.upper()}: dropped {n_nan} "
+                          f"warm-up samples (NaN); averaging {len(arr)} real "
+                          f"samples ({len(arr)/Config.PIPELINE_RATE:.1f} s).")
+                else:
+                    print(f"[PROCESSOR] WARN: {signal.upper()} baseline has "
+                          f"{n_nan} NaN warm-up samples and only {len(arr)} "
+                          f"real samples — baseline ran too short. For HRV, "
+                          f"you need ≥60 s of baseline after the 60 s RMSSD "
+                          f"warm-up (so ≥120 s total). Increase BASELINE_SEC "
+                          f"or re-run with the participant settled earlier.")
+                    if len(arr) == 0:
+                        # Pure-NaN buffer: avoid empty-array NaN math by
+                        # falling back to a sentinel. The detector-failure
+                        # check in main.py will surface this loudly.
+                        arr = np.array([float('nan')])
 
             # Calculate raw mean and standard deviation
-            mu = float(np.mean(arr))
-            sigma = float(np.std(arr))
+            mu = float(np.nanmean(arr)) if len(arr) > 0 else float('nan')
+            sigma = float(np.nanstd(arr)) if len(arr) > 0 else float('nan')
 
             # Guard: if the signal is perfectly flat (σ=0, e.g. electrode pinned),
             # the 3σ window collapses to a single point and nothing passes the

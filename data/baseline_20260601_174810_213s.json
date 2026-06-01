@@ -1,33 +1,33 @@
 {
   "patient": {
-    "first_name": "qw",
-    "last_name": "qwed",
-    "patient_id": "12313",
+    "first_name": "parsa",
+    "last_name": "asd",
+    "patient_id": "213s",
     "gender": "M",
     "session_date": "2026-06-01",
     "session_number": 1
   },
-  "session_timestamp": "20260601_083336",
-  "captured_at": "2026-06-01 08:35:56",
+  "session_timestamp": "20260601_174810",
+  "captured_at": "2026-06-01 17:50:16",
   "baseline_duration_sec": 120,
   "sample_rate_pipeline_hz": 50.0,
   "personal_baselines": {
-    "eda_uS": 3.386577601642066,
-    "hr_bpm": 78.09834388091404,
-    "hrv_ms": 114.71007732759546
+    "eda_uS": 8.993596650607234,
+    "hr_bpm": 86.8669841789624,
+    "hrv_ms": 41.474314833188565
   },
-  "sigma_baseline": 0.578480974094677,
+  "sigma_baseline": 0.517290056015559,
   "thresholds": {
-    "mild": 0.7191136284068687,
-    "high": 1.3265186512062794
+    "mild": 0.6655941731362255,
+    "high": 1.2087487319525627
   },
   "hrv_metrics": {},
   "artifacts_removed": {
-    "eda": 47,
+    "eda": 160,
     "hr": 0,
     "hrv": 0
   },
-  "source": "mock:data/14_minute_test_of_myself_2026-05-26_16-47-36.txt",
+  "source": "mock:data/paria_onmylaptop_opensignals_2026-05-25_15-13-39.txt",
   "pipeline_constants": {
     "ema_alpha_eda": 0.05,
     "ema_alpha_hr": 0.1,

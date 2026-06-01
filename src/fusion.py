@@ -39,8 +39,14 @@ paradigm without changes here.
 """
 
 import collections
+import math
 import numpy as np
 from config import Config
+
+
+def _is_nan(x):
+    """True iff x is exactly NaN (warm-up sentinel for HR / HRV)."""
+    return isinstance(x, float) and math.isnan(x)
 
 
 class FusionEngine:
@@ -165,28 +171,57 @@ class FusionEngine:
                 phasic_arr = np.concatenate([phasic_arr, pad])
 
         # ---- Pass 1: raw per-signal deltas + per-signal stats ----
-        hr_pct = (np.asarray(hr_arr[:n], dtype=np.float64) - avg_hr) / avg_hr * 100.0
-        hrv_pct = (avg_hrv - np.asarray(hrv_arr[:n], dtype=np.float64)) / avg_hrv * 100.0
+        # Use nanmean/nanstd because the cleaned baseline buffers can contain
+        # NaN samples from the HR/HRV warm-up period (PDF §3). The per-signal
+        # mean and sigma are computed only over real measurements.
+        hr_arr_np = np.asarray(hr_arr[:n], dtype=np.float64)
+        hrv_arr_np = np.asarray(hrv_arr[:n], dtype=np.float64)
+        hr_pct = (hr_arr_np - avg_hr) / avg_hr * 100.0           # NaN-preserving
+        hrv_pct = (avg_hrv - hrv_arr_np) / avg_hrv * 100.0        # NaN-preserving
 
-        self.eda_phasic_mean = float(np.mean(phasic_arr))
-        self.eda_phasic_sigma = max(float(np.std(phasic_arr)), Config.SIGMA_FLOOR)
-        self.hr_pct_mean = float(np.mean(hr_pct))
-        self.hr_pct_sigma = max(float(np.std(hr_pct)), Config.SIGMA_FLOOR)
-        self.hrv_pct_mean = float(np.mean(hrv_pct))
-        self.hrv_pct_sigma = max(float(np.std(hrv_pct)), Config.SIGMA_FLOOR)
+        self.eda_phasic_mean = float(np.nanmean(phasic_arr)) if phasic_arr.size else 0.0
+        self.eda_phasic_sigma = max(
+            float(np.nanstd(phasic_arr)) if phasic_arr.size else 0.0,
+            Config.SIGMA_FLOOR)
+        # If a buffer is all-NaN (degenerate baseline), nanmean returns NaN.
+        # Guard with a fallback so downstream math doesn't see NaN sigma.
+        self.hr_pct_mean = float(np.nanmean(hr_pct)) if np.any(np.isfinite(hr_pct)) else 0.0
+        self.hr_pct_sigma = max(
+            float(np.nanstd(hr_pct)) if np.any(np.isfinite(hr_pct)) else 0.0,
+            Config.SIGMA_FLOOR)
+        self.hrv_pct_mean = float(np.nanmean(hrv_pct)) if np.any(np.isfinite(hrv_pct)) else 0.0
+        self.hrv_pct_sigma = max(
+            float(np.nanstd(hrv_pct)) if np.any(np.isfinite(hrv_pct)) else 0.0,
+            Config.SIGMA_FLOOR)
 
+        n_hr_real = int(np.sum(np.isfinite(hr_pct)))
+        n_hrv_real = int(np.sum(np.isfinite(hrv_pct)))
         print(f"[FUSION] Per-signal baselines (for z-scoring):")
         print(f"         EDA phasic: mean={self.eda_phasic_mean:+.4f} uS, "
-              f"sigma={self.eda_phasic_sigma:.4f} uS")
+              f"sigma={self.eda_phasic_sigma:.4f} uS  "
+              f"(n={phasic_arr.size})")
         print(f"         HR  delta : mean={self.hr_pct_mean:+.2f}%, "
-              f"sigma={self.hr_pct_sigma:.2f}%")
+              f"sigma={self.hr_pct_sigma:.2f}%  "
+              f"(n={n_hr_real} real samples)")
         print(f"         HRV delta : mean={self.hrv_pct_mean:+.2f}%, "
-              f"sigma={self.hrv_pct_sigma:.2f}%")
+              f"sigma={self.hrv_pct_sigma:.2f}%  "
+              f"(n={n_hrv_real} real samples after 60 s warm-up)")
 
         # ---- Pass 2: z-scored S_inst series + smoothed S_t series ----
+        # NaN warm-up samples in hr_pct or hrv_pct produce NaN z-scores.
+        # Per PDF §3 we substitute the baseline mean (z = 0) for warm-up,
+        # which is what compute_deltas does live. We mirror that here using
+        # numpy's nan-aware substitution so the S_inst sweep matches.
         z_eda = (phasic_arr - self.eda_phasic_mean) / self.eda_phasic_sigma
-        z_hr = (hr_pct - self.hr_pct_mean) / self.hr_pct_sigma
-        z_hrv = (hrv_pct - self.hrv_pct_mean) / self.hrv_pct_sigma
+        z_hr = np.where(np.isfinite(hr_pct),
+                        (hr_pct - self.hr_pct_mean) / self.hr_pct_sigma,
+                        0.0)
+        z_hrv = np.where(np.isfinite(hrv_pct),
+                         (hrv_pct - self.hrv_pct_mean) / self.hrv_pct_sigma,
+                         0.0)
+        # phasic_arr should not contain NaN (raw EDA is always valid), but
+        # guard defensively in case the decomposition produced NaN at edges.
+        z_eda = np.where(np.isfinite(z_eda), z_eda, 0.0)
         s_instant_series = (Config.WEIGHT_EDA * z_eda
                             + Config.WEIGHT_HRV * z_hrv
                             + Config.WEIGHT_HR * z_hr)
@@ -213,16 +248,28 @@ class FusionEngine:
         (tonic-removed, what drives the score). HR and HRV remain percent
         deviations from baseline.
 
-        Note: channel 6 of the LSL stream (`delta_eda`) now carries phasic
-        EDA in µS, not a percent. Documented in OUTPUTS.md.
+        Warm-up handling (PDF §3): if `hr` or `hrv` is NaN (data source still
+        warming up), the corresponding delta defaults to that signal's
+        baseline mean — which z-scores to zero, contributing nothing to S_t.
+        Quote: "delta-HRV is held at 0 (HRV assumed at its baseline average)
+        so the weights stay fixed and the score keeps the same scale — no
+        faked HRV, no renormalisation, no dead first minute."
+
+        Note: channel 6 of the LSL stream (`delta_eda`) carries phasic EDA
+        in µS, not a percent. Documented in OUTPUTS.md.
         """
         eda, hr, hrv = live_vector
         base_hr = baseline_averages['hr'] or 1e-6
         base_hrv = baseline_averages['hrv'] or 1e-6
+        # Warm-up: NaN HR/HRV → delta = baseline mean (z-scores to ~0).
+        d_hr = (self.hr_pct_mean if _is_nan(hr)
+                else ((hr - base_hr) / base_hr) * 100.0)
+        d_hrv = (self.hrv_pct_mean if _is_nan(hrv)
+                 else ((base_hrv - hrv) / base_hrv) * 100.0)
         return {
             'eda': float(phasic_eda),  # phasic uS, not percent
-            'hr':  ((hr - base_hr) / base_hr) * 100.0,
-            'hrv': ((base_hrv - hrv) / base_hrv) * 100.0,
+            'hr':  d_hr,
+            'hrv': d_hrv,
         }
 
     def compute_s_instant(self, live_vector: list, phasic_eda: float,
@@ -235,6 +282,11 @@ class FusionEngine:
         Each signal is in units of its own baseline spread before the weights
         are applied, so EDA's larger raw magnitude no longer dominates by
         scale alone.
+
+        During warm-up: compute_deltas returns the baseline mean for any
+        NaN HR/HRV input, so its z-score is 0 and the signal contributes
+        nothing to S_inst. The other two weights are NOT renormalised —
+        the score keeps the same scale (PDF §3).
         """
         d = self.compute_deltas(live_vector, phasic_eda, baseline_averages)
         z_eda = (d['eda'] - self.eda_phasic_mean) / self.eda_phasic_sigma

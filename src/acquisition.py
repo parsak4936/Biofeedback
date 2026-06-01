@@ -43,6 +43,12 @@ def _is_valid_number(x: float) -> bool:
     return isinstance(x, (int, float)) and math.isfinite(x)
 
 
+def _is_nan(x: float) -> bool:
+    """True iff x is exactly NaN (PDF warm-up sentinel for HR/HRV).
+    Inf is NOT NaN — Inf is rejected as invalid, NaN is passed through."""
+    return isinstance(x, float) and math.isnan(x)
+
+
 def _within(value: float, lo: float, hi: float) -> bool:
     return lo <= value <= hi
 
@@ -59,10 +65,21 @@ class BiofeedbackAcquisition:
         self.tick_counter = 0
         self.stale_tick_counter = 0  # consecutive empty pulls
         # State variables for Zero-Order Hold (ZOH)
-        # These hold the most recent value if the stream has no new data on a given tick
-        self.latest_eda = 0.0
-        self.latest_hr = 0.0
-        self.latest_hrv = 0.0
+        # These hold the most recent value if the stream has no new data on a given tick.
+        # None until the first NEW_DATA arrives — the warmup gate (see
+        # `first_data_received` below) returns None to the caller until then
+        # so the EMA in SignalProcessor doesn't initialise from a zero
+        # sentinel and ramp up over ~1 s from a fake zero baseline.
+        self.latest_eda = None
+        self.latest_hr = None
+        self.latest_hrv = None
+        # Flips True the first time we receive a real sample from the inlet.
+        # Until then, get_synchronized_sample() returns None and main.py
+        # skips the rest of the tick (no CSV row, no LSL broadcast, no
+        # baseline accumulation). Without this gate the first ~50 ticks
+        # were "HOLD_LAST returns 0.0" which seeded the EMA at 0 and
+        # produced the visible ramp-up artifact in the session CSV.
+        self.first_data_received = False
 
         # Diagnostics counters — flow into CODE_AUDIT visibility.
         self.invalid_sample_count = 0       # NaN / Inf
@@ -175,30 +192,60 @@ class BiofeedbackAcquisition:
                 )
             new_eda, new_hr, new_hrv = float(latest[0]), float(latest[1]), float(latest[2])
 
-            # ---- Sample validation ----
-            # 1. NaN / Inf rejection: skip the bad sample, hold previous value.
-            if not (_is_valid_number(new_eda) and _is_valid_number(new_hr)
-                    and _is_valid_number(new_hrv)):
+            # ---- Per-signal validation ----
+            # EDA is the hardware-level signal: always present, always finite,
+            # always in the physiological band. Rejecting EDA means the sample
+            # is unusable and we hold the whole previous state.
+            #
+            # HR and HRV are DERIVED signals from the data source's NeuroKit2
+            # chain. NaN means "warming up, no measurement yet" per PDF §3 —
+            # acceptable, pass NaN through to processing/fusion which know
+            # how to substitute the baseline mean (delta = 0). Non-NaN
+            # out-of-range values mean the R-peak detector failed (PDF §4
+            # Bug 3 plausibility band); hold the previous valid value for
+            # that signal only.
+
+            if not _is_valid_number(new_eda):
                 self.invalid_sample_count += 1
-                status = "NAN_REJ  "
-            # 2. Physiological out-of-range rejection: same — hold previous.
-            elif not (_within(new_eda, Config.EDA_MIN_uS, Config.EDA_MAX_uS)
-                      and _within(new_hr, Config.HR_MIN_BPM, Config.HR_MAX_BPM)
-                      and _within(new_hrv, Config.HRV_MIN_MS, Config.HRV_MAX_MS)):
+                status = "NAN_REJ  "  # EDA NaN/Inf — reject whole sample
+            elif not _within(new_eda, Config.EDA_MIN_uS, Config.EDA_MAX_uS):
                 self.out_of_range_count += 1
-                status = "OOR_REJ  "
+                status = "OOR_REJ  "  # EDA out of range — reject whole sample
             else:
+                # EDA accepted. Now handle HR and HRV independently.
                 self.latest_eda = new_eda
-                self.latest_hr = new_hr
-                self.latest_hrv = new_hrv
+                self.first_data_received = True
                 status = "NEW_DATA "
+
+                # ---- HR: NaN passes through; OOR holds previous ----
+                if _is_nan(new_hr):
+                    self.latest_hr = float('nan')   # warming up
+                elif (not _is_valid_number(new_hr)
+                      or not _within(new_hr, Config.HR_MIN_BPM, Config.HR_MAX_BPM)):
+                    # Inf or out-of-range = detector failure. Hold previous.
+                    self.out_of_range_count += 1
+                else:
+                    self.latest_hr = new_hr
+
+                # ---- HRV: NaN passes through; OOR holds previous ----
+                if _is_nan(new_hrv):
+                    self.latest_hrv = float('nan')  # warming up
+                elif (not _is_valid_number(new_hrv)
+                      or not _within(new_hrv, Config.HRV_MIN_MS, Config.HRV_MAX_MS)):
+                    self.out_of_range_count += 1
+                else:
+                    self.latest_hrv = new_hrv
 
             # ---- Electrode-disconnect detection ----
             # Track variance over a rolling window; warn if a signal pins flat.
-            self._var_buffers['eda'].append(self.latest_eda)
-            self._var_buffers['hr'].append(self.latest_hr)
-            self._var_buffers['hrv'].append(self.latest_hrv)
-            self._check_disconnect()
+            # Skip NaN values (warm-up) so variance isn't biased by them.
+            if self.first_data_received:
+                self._var_buffers['eda'].append(self.latest_eda)
+                if self.latest_hr is not None and not _is_nan(self.latest_hr):
+                    self._var_buffers['hr'].append(self.latest_hr)
+                if self.latest_hrv is not None and not _is_nan(self.latest_hrv):
+                    self._var_buffers['hrv'].append(self.latest_hrv)
+                self._check_disconnect()
 
             self.stale_tick_counter = 0  # Reset the deadman's switch
         else:
@@ -214,12 +261,28 @@ class BiofeedbackAcquisition:
                     f"Check PLUX device connection and battery."
                 )
 
-        # Diagnostic Printing
+        # Warmup gate: if we have never seen a real sample, return None
+        # so main.py skips the rest of the tick. Without this the EMA in
+        # SignalProcessor would initialise from a 0.0 sentinel and the
+        # session CSV's first second would show a ramp-up artifact.
+        if not self.first_data_received:
+            self.tick_counter += 1
+            return None
+
+        # Diagnostic Printing — RAW inlet values (pre-smoothing). The
+        # smoothed values written to the session CSV and live transcript
+        # log will differ from these slightly during transients because
+        # of the EMA in SignalProcessor; in steady state they converge.
+        # NaN HR/HRV print as "--" since they're not measurements yet.
         if self.tick_counter % int(Config.PIPELINE_RATE) == 0:
+            hr_str = ("  --  " if _is_nan(self.latest_hr)
+                      else f"{self.latest_hr:>6.2f}")
+            hrv_str = ("  --  " if _is_nan(self.latest_hrv)
+                       else f"{self.latest_hrv:>6.2f}")
             print(f"[TICK {self.tick_counter:05d}] {status} | "
-                  f"EDA: {self.latest_eda:>6.2f} uS | "
-                  f"HR: {self.latest_hr:>6.2f} BPM | "
-                  f"HRV: {self.latest_hrv:>6.2f} ms")
+                  f"raw EDA: {self.latest_eda:>6.2f} uS | "
+                  f"raw HR: {hr_str} BPM | "
+                  f"raw HRV: {hrv_str} ms")
 
         self.tick_counter += 1
         # Write to audit log

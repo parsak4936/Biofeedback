@@ -79,18 +79,18 @@ class ClinicalDashboard:
             print("Make sure main.py is running.")
             raise RuntimeError(f"LSL stream not found: {str(e)}")
 
-        # Optional ECG side stream — empty chart if unavailable, that's fine.
+        # Optional ECG side stream. Lazy-attached because MockDataSource
+        # creates this outlet after the main pipeline opens its own (we
+        # resolve `Biofeedback_State` above first, then the data source
+        # does ~3-4 s of file load + R-peak detection before publishing
+        # `OpenSignals_ECG`). The dashboard previously resolved this
+        # once at init and gave up — leaving the ECG chart permanently
+        # empty. Now we try once at startup, then retry inside the
+        # update tick every ECG_RETRY_INTERVAL_SEC until it appears.
         self.ecg_inlet = None
-        try:
-            ecg_streams = resolve_byprop("name", Config.ECG_STREAM_NAME, timeout=2.0)
-            if ecg_streams:
-                self.ecg_inlet = StreamInlet(ecg_streams[0])
-                print(f"[DASHBOARD] Connected to ECG side stream "
-                      f"'{Config.ECG_STREAM_NAME}'.")
-            else:
-                print(f"[DASHBOARD] ECG side stream not present; chart will stay empty.")
-        except Exception as e:
-            print(f"[DASHBOARD] ECG side stream lookup failed ({e}); skipping.")
+        self._ecg_last_retry_time = 0.0
+        self._ecg_retry_interval_sec = 2.0
+        self._try_attach_ecg(initial=True)
 
         # ---- Control publisher (button clicks -> main.py) ----
         self.control = ControlPublisher()
@@ -702,6 +702,35 @@ class ClinicalDashboard:
 
         self.tick_counter += 1
 
+    def _try_attach_ecg(self, initial: bool = False):
+        """Best-effort resolve the OpenSignals_ECG side stream. Called once
+        at startup and then periodically from the update tick (rate-limited
+        by `_ecg_retry_interval_sec`) until it succeeds. The data source
+        publishes this outlet a few seconds after the main pipeline comes
+        up — without retry, the ECG chart stays empty for the whole run."""
+        if self.ecg_inlet is not None:
+            return
+        import time as _time
+        now = _time.time()
+        if not initial and (now - self._ecg_last_retry_time) < self._ecg_retry_interval_sec:
+            return
+        self._ecg_last_retry_time = now
+        try:
+            ecg_streams = resolve_byprop("name", Config.ECG_STREAM_NAME, timeout=0.2)
+            if ecg_streams:
+                self.ecg_inlet = StreamInlet(ecg_streams[0])
+                print(f"[DASHBOARD] Connected to ECG side stream "
+                      f"'{Config.ECG_STREAM_NAME}'."
+                      + ("" if initial else " (lazy retry succeeded)"))
+            elif initial:
+                print(f"[DASHBOARD] ECG side stream not yet present; "
+                      f"will retry every {self._ecg_retry_interval_sec:.0f}s "
+                      f"in the update loop.")
+        except Exception as e:
+            if initial:
+                print(f"[DASHBOARD] ECG side stream lookup failed ({e}); "
+                      f"will retry in the update loop.")
+
     def _update_ecg_chart(self):
         """Drain the ECG side stream and append every sample to the chart
         buffer. Called from the top of update_dashboard so ECG keeps
@@ -709,8 +738,12 @@ class ClinicalDashboard:
         samples (which would otherwise early-return out of the whole
         update and starve this chart, leaving it visibly blank during
         LIVE while the rest of the dashboard is fine)."""
+        # Lazy attach if the side stream wasn't ready when the dashboard
+        # came up — the data source takes a few seconds to publish it.
         if self.ecg_inlet is None:
-            return
+            self._try_attach_ecg()
+            if self.ecg_inlet is None:
+                return
         ecg_samples, _ = self.ecg_inlet.pull_chunk(timeout=0.0)
         if not ecg_samples:
             return

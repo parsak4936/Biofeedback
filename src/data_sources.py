@@ -1,56 +1,188 @@
 # src/data_sources.py
 """
-Data Source Abstraction Layer - Factory Pattern
+=============================================================================
+Data sources — PDF-aligned (Shayan Itami, NISC Lab · VRET Biofeedback Pipeline)
+=============================================================================
 
-This module provides a pluggable interface for different hardware sources.
-To switch from mock to real PLUX device, only change Config.DATA_SOURCE.
-All downstream code remains unchanged.
+Two classes here, both implementing the same `DataSource` interface:
+
+    MockDataSource      – replays a recorded OpenSignals .txt file
+    RealPLUXDataSource  – reads live from PLUX biosignalsplux via OpenSignals LSL
+
+Both follow the canonical processing chain from the VRET Biofeedback Pipeline
+technical report, Section 2 ("Signals and derived measures") and Section 3
+("Run-time architecture"). Quoted directly from the PDF, the chain is:
+
+    ECG raw mV
+      → nk.ecg_clean(...)                  # 0.5 Hz HP + 50/60 Hz powerline notch
+      → nk.ecg_peaks(correct_artifacts=True)
+                                           # signal_fixpeaks repairs missed/doubled beats
+      → nk.ecg_rate(...)                   # mean per-sample HR (Bpm)
+      → nk.hrv_time(...)["HRV_RMSSD"]      # RMSSD (ms) over 60 s window
+
+    EDA raw μS
+      → published as-is to the internal stream
+        (EMA smoothing for display lives in processing.py; phasic decomposition
+        for the score lives in processing.py too — see PDF §7 Cause 1)
+
+The PDF design principle, restated: every number is computed by a validated
+library call (NeuroKit2 for the biosignal math, pylsl for transport) rather
+than hand-rolled signal processing. There is no fallback path in this module
+because the PDF explicitly rejected the fallback as unreliable (PDF §4 Bug 5).
+If NeuroKit2 raises, HR/HRV stay at their last valid value.
+
+-----------------------------------------------------------------------------
+Why HR and HRV are not available instantly  (PDF §3)
+-----------------------------------------------------------------------------
+HR derives from heartbeats. The R-peak detector needs to see several beats
+before nk.ecg_rate can return a value; at a resting rate around 80 BPM that
+is a few seconds. Until then, HR is emitted as NaN.
+
+RMSSD is a root-mean-square of *successive beat-to-beat differences*. A short
+window is statistically noisy — a 10 s window gives an estimator standard
+deviation around 56 ms; a 60 s window narrows that to roughly 12 ms. The PDF
+chooses 60 s. Before 60 s of ECG has been buffered, RMSSD is emitted as NaN.
+
+NaN is the modular-pipeline equivalent of the PDF's `None`. The acquisition
+layer recognises NaN HRV (with otherwise-valid EDA/HR) as "warming up" and
+passes it downstream; the fusion engine substitutes the baseline mean so the
+score's HRV term contributes zero deviation during warm-up — no faked HRV,
+no renormalisation, no dead first minute. This matches PDF §3 exactly.
+
+-----------------------------------------------------------------------------
+Channel mapping  (PDF §4 Bug 1 and Bug 4)
+-----------------------------------------------------------------------------
+EDA and ECG are identified by their channel LABEL ("EDA" / "ECG", case-
+insensitive) read from the LSL stream metadata or the OpenSignals .txt
+header. If labels are missing or unrecognised, we fall back to the PDF-
+corrected fixed mapping:
+
+    3-channel stream  →  ch0 = digital, ch1 = EDA, ch2 = ECG
+    2-channel stream  →  ch0 = EDA,     ch1 = ECG
+
+The PDF's Bug 5 sanity check (beat-plausibility test) — confirming that the
+channel mapped to ECG actually produces physiological R-peaks — lives in
+the main pipeline as a once-per-session validation, not here. This module
+just publishes what the labels say.
+
+-----------------------------------------------------------------------------
+Architecture (modular-pipeline-specific, not in the PDF)
+-----------------------------------------------------------------------------
+The PDF describes a single-process procedural server. Our modular pipeline
+splits this into a streamer subprocess (this module) and a main pipeline
+subprocess (acquisition + fusion). For the split to work end-to-end, BOTH
+data source classes publish their derived 3-channel stream
+(EDA µS, HR BPM, HRV ms) on `Config.STREAM_NAME` — the internal stream
+that acquisition.py subscribes to.
+
+That means the live PLUX path subscribes to PLUX's own raw-ADC LSL stream,
+does the same NeuroKit2 derivation chain MockDataSource uses, and republishes
+the derived 3-channel stream under our internal name. Flipping
+`Config.DATA_SOURCE` from 'mock' to 'real_plux' is then a one-line change
+that nothing downstream notices.
+
+-----------------------------------------------------------------------------
+How HR/HRV recompute cadence works
+-----------------------------------------------------------------------------
+Per PDF §3 "Window design": HR and RMSSD are recomputed every 25 ticks at
+50 Hz, i.e. every 0.5 s. Between recomputes the values are held (zero-order
+hold). MockDataSource pre-derives the entire HR/HRV series at file load by
+simulating this same recompute-and-hold pattern offline, so the mock path
+behaves identically to the live path on a per-sample basis. The live path
+runs the same logic incrementally on a rolling ECG buffer.
+
+=============================================================================
 """
 
 import collections
 import json
-import numpy as np
-import time
 import os
+import time
 import warnings
 from abc import ABC, abstractmethod
-from pylsl import StreamInfo, StreamOutlet
-from scipy.signal import butter, filtfilt, find_peaks
+
+import numpy as np
+from pylsl import StreamInfo, StreamOutlet, StreamInlet, resolve_stream
+
 from config import Config
 
-# NeuroKit2 is the team-preferred reference library for biosignal processing.
-# We use it for R-peak detection. Our adaptive prominence detector is kept as
-# a fallback in case NeuroKit2 raises on a degenerate input.
-try:
-    import neurokit2 as nk
-    _NEUROKIT_AVAILABLE = True
-except ImportError:
-    _NEUROKIT_AVAILABLE = False
+# NeuroKit2 is required. The PDF rejected the prominence-based fallback as
+# unreliable (it picks up the T-wave as a second beat on a noisy ECG), so
+# we don't carry a fallback here. If NeuroKit2 is missing the import fails
+# loudly at startup, which is what we want.
+import neurokit2 as nk
+
+
+# =============================================================================
+# PLUX hardware constants and transfer functions
+# =============================================================================
+# These come straight from the PLUX biosignalsplux datasheet. The hub samples
+# each electrode with a 16-bit ADC referenced to 3.0 V; the per-sensor
+# constants below convert the raw integer reading into a physical unit.
+# Documented in SIGNALS_AND_DATA.md for cross-reference.
+
+_PLUX_ADC_FULL_SCALE = 65536         # 16-bit ADC: 0..65535
+_PLUX_REF_VOLTAGE_V = 3.0            # ADC reference voltage
+_PLUX_EDA_CONSTANT = 0.132           # EDA sensor transducer constant
+_PLUX_ECG_GAIN = 1100                # ECG instrumentation-amplifier gain
+
+
+def adc_to_eda_uS(adc):
+    """PLUX EDA transfer function.
+
+        EDA (µS) = (ADC / 65536) × 3.0 / 0.132
+
+    Returns skin conductance in microsiemens. EDA is unipolar (always ≥ 0),
+    so no recentering step.
+    """
+    return (adc / _PLUX_ADC_FULL_SCALE) * _PLUX_REF_VOLTAGE_V / _PLUX_EDA_CONSTANT
+
+
+def adc_to_ecg_mV(adc):
+    """PLUX ECG transfer function.
+
+        ECG (mV) = ((ADC / 65536) - 0.5) × 3.0 / 1100 × 1000
+
+    Returns electrocardiogram voltage in millivolts. ECG is bipolar (swings
+    both directions around zero) so the `- 0.5` recenters the fraction so the
+    baseline sits at zero and the R-peak spikes come out as positive numbers.
+    The trailing `× 1000` converts volts to millivolts.
+    """
+    return ((adc / _PLUX_ADC_FULL_SCALE) - 0.5) * _PLUX_REF_VOLTAGE_V / _PLUX_ECG_GAIN * 1000.0
+
+
+# =============================================================================
+# OpenSignals .txt header parser
+# =============================================================================
+# OpenSignals writes a 3-line metadata header on top of every recording:
+#
+#     # OpenSignals Text File Format. Version 1
+#     # {"<MAC>": {... "sampling rate": 1000, "sensor": ["EDA","ECG"], ...}}
+#     # EndOfHeader
+#
+# We parse the JSON middle line to discover:
+#   - sampling rate (200 Hz or 1000 Hz depending on the recording config)
+#   - which physical column holds which sensor (the order varies between
+#     recordings — hardcoding either would silently break the other)
 
 
 def parse_opensignals_header(file_path: str) -> dict:
     """
     Read an OpenSignals .txt file's JSON header and return key metadata:
-      {
-        'fs_hz': float,                # sampling rate
-        'sensor_order': [str, ...],    # e.g. ['ECG', 'EDA'] in file column order
-        'column_index': {'ECG': int, 'EDA': int},  # absolute column in data matrix
-        'columns': [str, ...],         # raw column names from header
-      }
 
-    The header looks like:
-      # OpenSignals Text File Format. Version 1
-      # {"<MAC>": {... "sampling rate": 200, "sensor": ["ECG","EDA"],
-      #            "column": ["nSeq","DI","CH1","CH2"], ...}}
-      # EndOfHeader
+        {
+          'fs_hz':         float,            # sampling rate
+          'sensor_order':  [str, ...],       # e.g. ['ECG', 'EDA']
+          'column_index':  {'ECG': int, 'EDA': int},
+          'columns':       [str, ...],       # raw column names from header
+        }
     """
     with open(file_path, 'r', encoding='utf-8') as f:
-        lines = [next(f) for _ in range(3)]
+        header_lines = [next(f) for _ in range(3)]
 
-    json_line = lines[1].lstrip('#').strip()
+    json_line = header_lines[1].lstrip('#').strip()
     meta = json.loads(json_line)
-    # First (only) device key
-    device_meta = next(iter(meta.values()))
+    device_meta = next(iter(meta.values()))  # first (only) device key
 
     sensors = device_meta['sensor']           # e.g. ['ECG', 'EDA']
     columns = device_meta['column']           # e.g. ['nSeq','DI','CH1','CH2']
@@ -61,8 +193,7 @@ def parse_opensignals_header(file_path: str) -> dict:
     sensor_pos = 0
     for col_idx, col_name in enumerate(columns):
         if col_name.startswith('CH'):
-            sensor_name = sensors[sensor_pos]
-            column_index[sensor_name] = col_idx
+            column_index[sensors[sensor_pos]] = col_idx
             sensor_pos += 1
 
     return {
@@ -73,429 +204,220 @@ def parse_opensignals_header(file_path: str) -> dict:
     }
 
 
-def _detect_r_peaks(ecg_filt: np.ndarray, distance: int) -> np.ndarray:
+# =============================================================================
+# Channel-by-label resolution  (PDF §4 Bug 1)
+# =============================================================================
+
+def _resolve_channels_by_label(labels, n_channels):
     """
-    Adaptive, two-pass R-peak detection on an already-bandpassed ECG signal.
+    Identify EDA and ECG channels by their LSL channel label (case-
+    insensitive substring match). Falls back to the PDF-corrected fixed
+    order if labels are missing or unrecognised.
 
-    Why two passes: a fixed amplitude threshold breaks across recordings —
-    one person's R-peaks may be 0.1 mV, another's 1.0 mV, and a recording with
-    occasional motion artifacts inflates any percentile-based threshold so the
-    real beats get missed. Instead we:
-      1. Loosely gather candidate peaks using a low prominence floor.
-      2. Take the median prominence of those candidates as the typical R-peak
-         size for THIS recording.
-      3. Keep peaks whose prominence is at least a fraction of that median.
-
-    Detecting on prominence (not raw height) ignores slow baseline wander.
-    `distance` is the refractory period in samples (blocks T-wave re-triggers).
+    Returns:
+        (eda_idx, ecg_idx, source)
+        where `source` is 'labels' or 'fallback' for the startup log line.
     """
-    std = float(np.std(ecg_filt))
-    if std <= 0:
-        return np.array([], dtype=np.int64)
+    eda_idx = ecg_idx = None
+    for idx, label in enumerate(labels or []):
+        lab = (label or "").strip().upper()
+        if "EDA" in lab and eda_idx is None:
+            eda_idx = idx
+        if "ECG" in lab and ecg_idx is None:
+            ecg_idx = idx
 
-    # Pass 1 — loose candidates.
-    floor = Config.ECG_CANDIDATE_PROMINENCE_STD_FRAC * std
-    cand, props = find_peaks(ecg_filt, prominence=floor, distance=distance)
+    if eda_idx is not None and ecg_idx is not None:
+        return eda_idx, ecg_idx, "labels"
 
-    if len(cand) >= 5:
-        ref_prom = float(np.median(props['prominences']))
-        prominence = Config.ECG_PEAK_PROMINENCE_FRACTION * ref_prom
-    else:
-        # Not enough candidates to estimate; fall back to the loose floor.
-        prominence = floor
-
-    peaks, _ = find_peaks(ecg_filt, prominence=prominence, distance=distance)
-    return peaks
+    # PDF §4 Bug 4 fallback mapping.
+    if n_channels == 2:
+        return 0, 1, "fallback (2-ch: ch0=EDA, ch1=ECG)"
+    return 1, 2, "fallback (3-ch: ch0=digital, ch1=EDA, ch2=ECG)"
 
 
-def _rmssd_from_rr(rr_ms: np.ndarray) -> float:
-    """
-    RMSSD for a small window of consecutive RR intervals.
-
-    Mathematically this is sqrt(mean(diff(rr)^2)). NeuroKit2's `hrv_rmssd`
-    computes the same value from peak indices; we'd have to reconstruct peak
-    indices from RR intervals to call it, which is wasteful inside the
-    per-beat loop. The cleaner approach is to use the NeuroKit2 helper at
-    summary time (whole-baseline metrics) and use this lightweight identical
-    formula for the rolling per-beat computation.
-    """
-    if len(rr_ms) < 2:
-        return Config.MOCK_HRV_BASE
-    diffs = np.diff(rr_ms)
-    return float(np.sqrt(np.mean(diffs ** 2)))
-
-
-def compute_hrv_summary(peaks: np.ndarray, fs_hz: float) -> dict:
-    """
-    Whole-recording HRV summary using NeuroKit2's hrv_time function.
-    Returns RMSSD plus bonus time-domain metrics (SDNN, pNN50, MeanNN, MedianNN).
-    Used at the end of baseline calibration; not called per tick.
-    """
-    if not _NEUROKIT_AVAILABLE or len(peaks) < 4:
-        # Fallback: minimal computation matching what we'd get from NeuroKit2
-        if len(peaks) < 2:
-            return {"RMSSD": 0.0, "SDNN": 0.0, "MeanNN": 0.0, "MedianNN": 0.0, "pNN50": 0.0}
-        rr = np.diff(peaks) * (1000.0 / fs_hz)
-        return {
-            "RMSSD":    _rmssd_from_rr(rr),
-            "SDNN":     float(np.std(rr, ddof=1)) if len(rr) >= 2 else 0.0,
-            "MeanNN":   float(np.mean(rr)),
-            "MedianNN": float(np.median(rr)),
-            "pNN50":    float(np.mean(np.abs(np.diff(rr)) > 50) * 100) if len(rr) >= 2 else 0.0,
-        }
-    try:
-        with warnings.catch_warnings():
-            warnings.simplefilter('ignore')
-            df = nk.hrv_time(peaks, sampling_rate=fs_hz, show=False)
-        return {
-            "RMSSD":    float(df['HRV_RMSSD'].iloc[0]),
-            "SDNN":     float(df['HRV_SDNN'].iloc[0]),
-            "MeanNN":   float(df['HRV_MeanNN'].iloc[0]),
-            "MedianNN": float(df['HRV_MedianNN'].iloc[0]),
-            "pNN50":    float(df['HRV_pNN50'].iloc[0]),
-        }
-    except Exception as e:
-        print(f"[HRV] NeuroKit2 hrv_time failed ({e}); using fallback.")
-        return compute_hrv_summary(peaks, fs_hz)  # unreachable; we handled !available above
-
-
-def derive_hr_hrv_from_ecg(ecg_mv: np.ndarray, fs_hz: float) -> tuple:
-    """
-    HR + RMSSD derivation for the `mock` and `real_plux` paths, computed
-    exclusively through NeuroKit2 library calls. Matches the design
-    principle stated in the VRET Biofeedback Pipeline technical report,
-    Section 1: "every number is computed by a validated library call
-    (NeuroKit2 for the biosignal math, pylsl for transport) rather than
-    by hand-rolled signal processing."
-
-    Chain (the canonical NeuroKit order, per the report Bug 2 + Bug 3):
-        nk.ecg_clean
-        -> nk.ecg_peaks(correct_artifacts=True)   # signal_fixpeaks internally
-        -> nk.ecg_rate(peaks, ..., desired_length=n)         for per-sample HR
-        -> nk.hrv_time(peaks_window, ...)["HRV_RMSSD"]       for rolling RMSSD
-
-    Per-beat output semantics (distinct from `derive_hr_hrv_from_ecg_nk`,
-    which is the 30 s / 60 s sliding-mean variant for `mock2` /
-    `real_plux2`):
-      - HR: per-sample series from nk.ecg_rate (monotone-cubic
-        interpolation between detected beats).
-      - RMSSD: nk.hrv_time on the trailing RMSSD_WINDOW_SEC of beats,
-        evaluated at each beat and held with zero-order hold between
-        beats. Default window 60 s (ultra-short-term HRV minimum).
-
-    Physiological plausibility band on RMSSD (report Bug 3): values
-    outside DS2_RMSSD_MIN_MS..DS2_RMSSD_MAX_MS are detector failures,
-    not measurements — they are rejected, and the previous valid value
-    is held instead of polluting the series.
-
-    Fallback: the prominence-based two-pass detector `_detect_r_peaks`
-    and the hand-rolled formulas are kept ONLY for the case where
-    NeuroKit2 itself raises (extremely short or pathological input) or
-    is not installed. In any normal recording the fallback never runs.
-    """
-    n = len(ecg_mv)
-    hr_series = np.full(n, Config.MOCK_HR_BASE, dtype=np.float32)
-    hrv_series = np.full(n, Config.MOCK_HRV_BASE, dtype=np.float32)
-
-    if n < int(fs_hz):
-        # Too short for any of the library calls to behave well.
-        return hr_series, hrv_series, np.array([], dtype=np.int64)
-
-    # ============ Primary path: NeuroKit2 only ============
-    if _NEUROKIT_AVAILABLE:
-        try:
-            with warnings.catch_warnings():
-                warnings.simplefilter('ignore')
-                cleaned = nk.ecg_clean(ecg_mv, sampling_rate=fs_hz)
-                # Report Bug 2 + Bug 3: clean BEFORE peaks; use ecg_peaks
-                # (which wraps ecg_findpeaks + signal_fixpeaks when
-                # correct_artifacts=True) not ecg_findpeaks alone.
-                _, info = nk.ecg_peaks(
-                    cleaned, sampling_rate=fs_hz,
-                    method=Config.NEUROKIT_RPEAK_METHOD,
-                    correct_artifacts=True,
-                )
-            peaks = np.asarray(info["ECG_R_Peaks"], dtype=np.int64)
-        except Exception as e:
-            print(f"[ECG] NeuroKit2 chain failed ({e}); falling back to "
-                  f"prominence detector + hand-rolled HR/RMSSD.")
-            peaks = None
-
-        if peaks is not None and len(peaks) >= 3:
-            # ---- HR: nk.ecg_rate, per-sample series for the full file ----
-            try:
-                with warnings.catch_warnings():
-                    warnings.simplefilter('ignore')
-                    rate = nk.ecg_rate(
-                        peaks, sampling_rate=fs_hz, desired_length=n,
-                    )
-                rate = np.asarray(rate, dtype=np.float32)
-                # NeuroKit can return NaN at the boundaries (before the
-                # first peak / after the last). Hold the seed default
-                # there so the pipeline never sees NaN.
-                hr_series = np.where(np.isfinite(rate),
-                                     rate,
-                                     Config.MOCK_HR_BASE).astype(np.float32)
-            except Exception as e:
-                print(f"[ECG] nk.ecg_rate failed ({e}); HR holds defaults.")
-
-            # ---- RMSSD: nk.hrv_time over a trailing window of beats ----
-            median_rr_ms = float(np.median(np.diff(peaks)) * 1000.0 / fs_hz)
-            window_n_beats = max(
-                4, int(Config.RMSSD_WINDOW_SEC * 1000.0 / median_rr_ms)
-            )
-            last_rmssd = Config.MOCK_HRV_BASE
-            for i in range(len(peaks) - 1):
-                start = peaks[i]
-                end = peaks[i + 1]
-                lo = max(0, i + 1 - window_n_beats)
-                peaks_window = peaks[lo:i + 1]
-                if len(peaks_window) >= 4:
-                    try:
-                        with warnings.catch_warnings():
-                            warnings.simplefilter('ignore')
-                            rmssd = float(nk.hrv_time(
-                                peaks_window, sampling_rate=fs_hz,
-                            )["HRV_RMSSD"].iloc[0])
-                        # Report Bug 3 plausibility band.
-                        if (np.isfinite(rmssd)
-                                and Config.DS2_RMSSD_MIN_MS <= rmssd
-                                <= Config.DS2_RMSSD_MAX_MS):
-                            last_rmssd = rmssd
-                    except Exception:
-                        pass
-                hrv_series[start:end] = last_rmssd
-            # Tail: hold the last valid RMSSD past the final beat.
-            last = peaks[-1]
-            hrv_series[last:] = last_rmssd
-
-            return hr_series, hrv_series, peaks
-
-    # ============ Fallback: prominence detector + hand-rolled math ============
-    # Only reached when NeuroKit is missing or raised on the input.
-    nyq = 0.5 * fs_hz
-    b, a = butter(2,
-                  [Config.ECG_BANDPASS_LOW_HZ / nyq,
-                   Config.ECG_BANDPASS_HIGH_HZ / nyq],
-                  btype='band')
-    ecg_filt = filtfilt(b, a, ecg_mv)
-    distance = int(Config.ECG_MIN_RR_MS * fs_hz / 1000)
-    peaks = _detect_r_peaks(ecg_filt, distance)
-
-    if len(peaks) < 3:
-        return hr_series, hrv_series, peaks
-
-    rr_ms = np.diff(peaks) * (1000.0 / fs_hz)
-    median_rr = float(np.median(rr_ms))
-    rr_mask = np.abs(rr_ms - median_rr) <= 0.5 * median_rr
-    rr_ms_clean = rr_ms.copy()
-    rr_ms_clean[~rr_mask] = median_rr
-    hr_per_beat = 60_000.0 / rr_ms_clean
-    window_n = max(2, int(Config.RMSSD_WINDOW_SEC * 1000 / median_rr))
-    for i in range(len(peaks) - 1):
-        hr_series[peaks[i]:peaks[i + 1]] = hr_per_beat[i]
-        window_lo = max(0, i + 1 - window_n)
-        window_rr = rr_ms_clean[window_lo:i + 1]
-        if len(window_rr) >= 2:
-            hrv_series[peaks[i]:peaks[i + 1]] = _rmssd_from_rr(window_rr)
-    last = peaks[-1]
-    hr_series[last:] = hr_series[last - 1] if last > 0 else Config.MOCK_HR_BASE
-    hrv_series[last:] = hrv_series[last - 1] if last > 0 else Config.MOCK_HRV_BASE
-    return hr_series, hrv_series, peaks
-
-
-def resolve_plux_channels(inlet, n_channels: int) -> tuple:
-    """
-    Discover which LSL channel index carries ECG and which carries EDA on
-    a live PLUX / OpenSignals stream, returning (eda_idx, ecg_idx).
-
-    Strategy:
-      1. Pull the stream's channel metadata via inlet.info().desc() and
-         look at the per-channel "label" field. If a channel's label
-         contains "EDA" or "ECG" (case-insensitive), use that index.
-      2. If labels are missing or unrecognised (older OpenSignals builds,
-         or a device that doesn't publish channel descriptors), fall back
-         to Config.REAL_PLUX_EDA_CHANNEL / REAL_PLUX_ECG_CHANNEL.
-
-    The label path is the safe default: if the operator reconfigures the
-    OpenSignals sensor layout (e.g. swaps which physical input is ECG
-    vs EDA), the pipeline picks it up automatically. A swap was the bug
-    that produced impossible RMSSD readings in earlier integration
-    attempts; auto-discovery makes it impossible to repeat by accident.
-    """
+def _read_lsl_channel_labels(inlet, timeout_sec=2.0):
+    """Read the per-channel `label` field from an LSL inlet's metadata.
+    Returns a list of upper-cased label strings, or [] on failure."""
     labels = []
     try:
-        full_info = inlet.info(timeout=2.0)
-        ch = full_info.desc().child("channels").child("channel")
+        full = inlet.info(timeout=timeout_sec)
+        ch = full.desc().child("channels").child("channel")
         while not ch.empty():
-            label = (ch.child_value("label") or "").strip().upper()
-            labels.append(label)
+            labels.append((ch.child_value("label") or "").strip().upper())
             ch = ch.next_sibling()
     except Exception:
         labels = []
-
-    eda_idx = ecg_idx = None
-    if labels:
-        for idx, lab in enumerate(labels):
-            if "EDA" in lab and eda_idx is None:
-                eda_idx = idx
-            if "ECG" in lab and ecg_idx is None:
-                ecg_idx = idx
-
-    if eda_idx is None or ecg_idx is None:
-        # Fall back to whatever Config says, but clamp to the actual
-        # channel count so a misconfigured Config doesn't crash here.
-        fb_eda = min(int(Config.REAL_PLUX_EDA_CHANNEL), n_channels - 1)
-        fb_ecg = min(int(Config.REAL_PLUX_ECG_CHANNEL), n_channels - 1)
-        eda_idx = eda_idx if eda_idx is not None else fb_eda
-        ecg_idx = ecg_idx if ecg_idx is not None else fb_ecg
-        print(f"[DATA SOURCE] channel labels missing or partial "
-              f"({labels or 'none'}); using fixed-index fallback "
-              f"EDA=ch{eda_idx}, ECG=ch{ecg_idx}.")
-    else:
-        print(f"[DATA SOURCE] channels resolved by label -> "
-              f"EDA=ch{eda_idx}, ECG=ch{ecg_idx} (labels: {labels}).")
-    return eda_idx, ecg_idx
+    return labels
 
 
-def derive_hr_hrv_from_ecg_nk(ecg_mv: np.ndarray, fs_hz: float) -> tuple:
+# =============================================================================
+# HR / RMSSD recompute (canonical NeuroKit2 chain — PDF §2)
+# =============================================================================
+# Both data sources call this on a trailing window of ECG samples (raw mV).
+# Returns (hr_bpm, rmssd_ms); either can be NaN to mean "not measurable yet".
+# This is the SINGLE place where the chain lives — no duplication between
+# mock and live paths.
+
+def _compute_hr_rmssd(ecg_window: np.ndarray, fs_hz: float,
+                      have_full_hrv_window: bool):
     """
-    HR/HRV derivation following the colleague's vret_server_v2 chain.
+    Run the PDF chain on a trailing ECG window:
 
-    One full-file pass through nk.ecg_clean + nk.ecg_peaks(correct_artifacts=True)
-    to locate R-peaks. Two sliding windows then walk the recording:
-      * HR    = 60 / mean(RR) over the trailing DS2_HR_WINDOW_SEC of beats.
-                Mathematically equivalent to mean(nk.ecg_rate) for full
-                windows (the colleague's mean-over-window HR).
-      * RMSSD = sqrt(mean(diff(RR)^2)) over the trailing DS2_HRV_WINDOW_SEC.
-                Identical formula to nk.hrv_time(...)["HRV_RMSSD"].
+        nk.ecg_clean  →  nk.ecg_peaks(correct_artifacts=True)
+                      →  nk.ecg_rate          (HR)
+                      →  nk.hrv_time["HRV_RMSSD"]   (RMSSD)
 
-    Values are recomputed every DS2_UPDATE_INTERVAL_SEC and held (ZOH)
-    between updates, matching the colleague's HR_COMPUTE_INTERVAL cadence.
-    RMSSD outside DS2_RMSSD_MIN_MS..DS2_RMSSD_MAX_MS is rejected as a
-    detector failure rather than reported as a real reading.
+    Parameters
+    ----------
+    ecg_window : raw ECG voltage samples (mV), length = up to HR_WINDOW_SEC×fs
+                 for HR, or RMSSD_WINDOW_SEC×fs for RMSSD. Caller decides
+                 which window length to pass.
+    fs_hz      : sampling rate of the ECG window.
+    have_full_hrv_window : True only when the caller has a full
+                 RMSSD_WINDOW_SEC of ECG buffered. Below that, RMSSD is NaN
+                 by design (PDF §3: "no valid live RMSSD in the first minute").
 
-    Returns (hr_series, hrv_series, peaks) — same shape as
-    derive_hr_hrv_from_ecg so MockDataSource2 can drop it in.
+    Returns
+    -------
+    (hr_bpm, rmssd_ms) — both float; either or both can be NaN.
+
+    The RMSSD plausibility band (PDF §4 Bug 3): values outside
+    [PDF_RMSSD_MIN_MS, PDF_RMSSD_MAX_MS] are rejected as detector failures
+    rather than reported as measurements. The Bug 3 fix is captured by
+    `correct_artifacts=True` on nk.ecg_peaks, which invokes
+    nk.signal_fixpeaks internally to repair missed/doubled beats.
     """
-    n = len(ecg_mv)
-    hr_series = np.full(n, Config.MOCK_HR_BASE, dtype=np.float32)
-    hrv_series = np.full(n, Config.MOCK_HRV_BASE, dtype=np.float32)
+    hr = float('nan')
+    rmssd = float('nan')
 
-    if n < int(fs_hz) or not _NEUROKIT_AVAILABLE:
-        return hr_series, hrv_series, np.array([], dtype=np.int64)
+    if ecg_window.size < int(fs_hz):
+        # Need at least one second of ECG before NeuroKit behaves at all.
+        return hr, rmssd
 
-    # Single full-file pass via the colleague's clean + peaks chain.
     try:
         with warnings.catch_warnings():
             warnings.simplefilter('ignore')
-            cleaned = nk.ecg_clean(ecg_mv, sampling_rate=fs_hz)
-            _, info = nk.ecg_peaks(cleaned, sampling_rate=fs_hz,
-                                   correct_artifacts=True)
-        all_peaks = np.asarray(info["ECG_R_Peaks"], dtype=np.int64)
-    except Exception as e:
-        print(f"[DS2] ecg_clean/ecg_peaks failed ({e}); HR/HRV unavailable.")
-        return hr_series, hrv_series, np.array([], dtype=np.int64)
+            cleaned = nk.ecg_clean(ecg_window, sampling_rate=fs_hz)
+            signals, info = nk.ecg_peaks(
+                cleaned, sampling_rate=fs_hz, correct_artifacts=True,
+            )
+    except Exception:
+        # NeuroKit raised — leave both as NaN, caller holds last valid.
+        return hr, rmssd
 
-    if len(all_peaks) < 2:
-        return hr_series, hrv_series, all_peaks
+    n_peaks = len(info["ECG_R_Peaks"])
 
-    hr_win = int(Config.DS2_HR_WINDOW_SEC * fs_hz)
-    hrv_win = int(Config.DS2_HRV_WINDOW_SEC * fs_hz)
-    stride = max(1, int(Config.DS2_UPDATE_INTERVAL_SEC * fs_hz))
+    # ---- HR via nk.ecg_rate (mean across the window) ----
+    if n_peaks >= 2:
+        try:
+            rate = nk.ecg_rate(signals, sampling_rate=fs_hz)
+            hr_val = float(np.nanmean(rate))
+            if np.isfinite(hr_val):
+                hr = hr_val
+        except Exception:
+            pass
 
-    current_hr = Config.MOCK_HR_BASE
-    current_hrv = Config.MOCK_HRV_BASE
-    last_end = 0
+    # ---- RMSSD via nk.hrv_time, but only when the 60 s window has filled ----
+    # PDF §3: "There is simply no valid live RMSSD in the first minute".
+    # Until the caller has a full RMSSD_WINDOW_SEC of ECG, RMSSD stays NaN.
+    if have_full_hrv_window and n_peaks >= Config.MIN_PEAKS_HRV:
+        try:
+            r = float(nk.hrv_time(signals, sampling_rate=fs_hz)["HRV_RMSSD"].iloc[0])
+            # PDF §4 Bug 3 plausibility band — outside this band, the
+            # detector has failed; don't report it as a measurement.
+            if np.isfinite(r) and Config.RMSSD_MIN_MS <= r <= Config.RMSSD_MAX_MS:
+                rmssd = r
+        except Exception:
+            pass
 
-    for end in range(stride, n + 1, stride):
-        # HR over trailing DS2_HR_WINDOW_SEC of ECG.
-        hr_peaks = all_peaks[(all_peaks >= end - hr_win) & (all_peaks < end)]
-        if len(hr_peaks) >= 2:
-            rr = np.diff(hr_peaks) * (1000.0 / fs_hz)
-            mean_rr = float(np.mean(rr))
-            if mean_rr > 0:
-                hr_val = 60_000.0 / mean_rr
-                if np.isfinite(hr_val):
-                    current_hr = hr_val
+    return hr, rmssd
 
-        # RMSSD only once the longer window has filled.
-        if end >= hrv_win:
-            hrv_peaks = all_peaks[(all_peaks >= end - hrv_win)
-                                  & (all_peaks < end)]
-            if len(hrv_peaks) >= Config.DS2_MIN_PEAKS_HRV:
-                rr = np.diff(hrv_peaks) * (1000.0 / fs_hz)
-                if len(rr) >= 2:
-                    rmssd = float(np.sqrt(np.mean(np.diff(rr) ** 2)))
-                    if (np.isfinite(rmssd)
-                            and Config.DS2_RMSSD_MIN_MS <= rmssd
-                            <= Config.DS2_RMSSD_MAX_MS):
-                        current_hrv = rmssd
 
-        hr_series[last_end:end] = current_hr
-        hrv_series[last_end:end] = current_hrv
-        last_end = end
-
-    if last_end < n:
-        hr_series[last_end:n] = current_hr
-        hrv_series[last_end:n] = current_hrv
-
-    return hr_series, hrv_series, all_peaks
-
+# =============================================================================
+# Abstract base class
+# =============================================================================
 
 class DataSource(ABC):
-    """Abstract base class for all data sources."""
-    
+    """Common interface for mock and real data sources."""
+
     @abstractmethod
     def get_next_sample(self) -> tuple:
         """
-        Returns (eda, hr, hrv) as a tuple of floats.
-        For mock: reads from file
-        For real: reads from hardware device
+        Returns one (eda_uS, hr_bpm, rmssd_ms) tuple.
+        hr_bpm or rmssd_ms may be NaN to mean "warming up / no valid
+        measurement yet" — downstream code handles NaN explicitly.
         """
         pass
-    
+
     @abstractmethod
     def cleanup(self):
-        """Gracefully close resources."""
+        """Gracefully release resources (file handles, sockets)."""
         pass
 
+
+# =============================================================================
+# MockDataSource — replays a recorded file
+# =============================================================================
 
 class MockDataSource(DataSource):
     """
-    Streams synthetic data from fake_opensignals file at 1000Hz.
-    Used for development and testing without real hardware.
+    Replays an OpenSignals .txt recording at its native sample rate.
+
+    What it does at construction
+    ----------------------------
+    1. Locates and reads the file named in Config.MOCK_DATA_FILE.
+    2. Parses the JSON header → sampling rate, sensor order, column indices.
+    3. Converts the raw ADC columns into physical units:
+         - EDA channel → microsiemens via adc_to_eda_uS
+         - ECG channel → millivolts  via adc_to_ecg_mV
+    4. Pre-derives the per-sample HR and HRV time series offline by
+       SIMULATING THE SAME RECOMPUTE-AND-HOLD CADENCE the live PLUX path
+       uses (HR_COMPUTE_INTERVAL_SEC = 0.5 s, HR_WINDOW_SEC = 30 s,
+       RMSSD_WINDOW_SEC = 60 s). The result is identical to what would
+       happen if you streamed the file through the live path in real time,
+       but it's much cheaper: nk.ecg_clean + nk.ecg_peaks runs ~2×/second
+       of recording rather than 1000×/second.
+    5. Opens two LSL outlets:
+         - Config.STREAM_NAME       → derived 3-channel (EDA, HR, HRV)
+         - Config.ECG_STREAM_NAME   → raw ECG voltage for the dashboard
+
+    What it does per call to get_next_sample
+    ----------------------------------------
+    6. Looks up the next pre-derived (eda, hr, hrv) tuple by sample index.
+    7. Pushes the tuple on the derived outlet, and the raw ECG sample on
+       the side outlet (for the dashboard's waveform chart).
+    8. Sleeps the per-sample period so the stream paces at the file's
+       native rate. End-of-file is handled per Config.MOCK_LOOP.
+
+    Channel mapping
+    ---------------
+    Read from the file header by sensor name ("EDA", "ECG"). The file
+    header is authoritative — recordings exist with both ECG-first and
+    EDA-first column orders, so hardcoding either would silently break
+    the other.
+
+    HR/HRV warm-up
+    --------------
+    Because the pre-derivation simulates the same windowing the live path
+    uses, the first ~60 s of HR/HRV in the file are NaN (PDF §3). The
+    baseline in main.py only uses non-NaN samples for the per-signal
+    averages, so this is correct by design.
     """
 
-    # Subclasses (e.g. MockDataSource2) override these to pick a different
-    # HR/HRV derivation chain without copy-pasting the rest of __init__.
-    SOURCE_ID = 'mock_hardware'
-    ECG_SOURCE_ID = 'mock_hardware_ecg'
-    DERIVATION_LABEL = "adaptive R-peak detection (NeuroKit2 primary, prominence fallback)"
-
-    def _derive_hr_hrv(self, ecg_mv: np.ndarray, fs_hz: float) -> tuple:
-        """Default derivation. Overridden by MockDataSource2."""
-        return derive_hr_hrv_from_ecg(ecg_mv, fs_hz)
-
     def __init__(self):
-        print(f"[DATA SOURCE] Initializing {self.__class__.__name__}...")
+        print(f"[DATA SOURCE] Initializing MockDataSource (PDF-aligned)...")
 
-        # Load the mock data file
-        current_dir = os.path.dirname(os.path.abspath(__file__))
-        project_root = os.path.dirname(current_dir)
+        # Locate the file relative to project root.
+        project_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
         data_path = os.path.join(project_root, Config.MOCK_DATA_FILE)
-
         if not os.path.exists(data_path):
             raise FileNotFoundError(
                 f"Mock data file not found: {data_path}\n"
-                f"Ensure {Config.MOCK_DATA_FILE} exists in project root."
+                f"Set Config.MOCK_DATA_FILE to an existing OpenSignals .txt "
+                f"recording in the project's data/ folder."
             )
 
-        # Parse the OpenSignals header to discover sampling rate and which
-        # column carries ECG vs EDA. Different exports have different orderings:
-        #   fake_opensignals_2026-05-13_*.txt: 1000 Hz, sensor=[EDA, ECG]
-        #   opensignals_2026-05-25_*.txt    :  200 Hz, sensor=[ECG, EDA]
-        # Hardcoding either would silently break the other — so we read both.
+        # Parse the header to learn fs and channel layout.
         header = parse_opensignals_header(data_path)
         self.fs_hz = header['fs_hz']
         col_eda = header['column_index'].get('EDA')
@@ -506,220 +428,422 @@ class MockDataSource(DataSource):
                 f"Found sensors: {header['sensor_order']}"
             )
 
-        # Load the numeric data. Some OpenSignals exports terminate with a
-        # truncated trailing row, so we use genfromtxt with invalid_raise=False
-        # to skip malformed lines instead of crashing.
-        cols_to_read = tuple(range(len(header['columns'])))
+        # Load the numeric data. Some exports terminate with a truncated
+        # final row; invalid_raise=False skips malformed lines instead of
+        # crashing the load.
+        n_cols = len(header['columns'])
         data = np.genfromtxt(
-            data_path, skip_header=3, usecols=cols_to_read,
-            invalid_raise=False
+            data_path, skip_header=3, usecols=tuple(range(n_cols)),
+            invalid_raise=False,
         )
         # Belt-and-braces: drop any rows that ended up with NaN.
         data = data[np.all(np.isfinite(data), axis=1)]
         self.rows = data.shape[0]
+        duration_s = self.rows / self.fs_hz
 
-        # PLUX hardware conversions (transducer spec sheet):
-        #   EDA (μS) = (raw / 65536) * 3 / 0.132
-        #   ECG (mV) = ((raw / 65536) - 0.5) * 3 / 1100 * 1000
-        self.eda_uS = (data[:, col_eda] / 65536) * 3.0 / 0.132
-        self.ecg_mV = ((data[:, col_ecg] / 65536) - 0.5) * 3.0 / 1100 * 1000
+        # ADC → physical units, vectorised.
+        self.eda_uS = adc_to_eda_uS(data[:, col_eda])
+        self.ecg_mV = adc_to_ecg_mV(data[:, col_ecg])
 
-        duration_sec = self.rows / self.fs_hz
-        print(f"[DATA SOURCE] File: {os.path.basename(data_path)}")
-        print(f"[DATA SOURCE]   fs={self.fs_hz:.0f} Hz  | "
-              f"EDA col {col_eda}  | ECG col {col_ecg}  | "
-              f"{self.rows} samples ({duration_sec:.1f} s)")
+        print(f"[DATA SOURCE]   file = {os.path.basename(data_path)}")
+        print(f"[DATA SOURCE]   fs   = {self.fs_hz:.0f} Hz")
+        print(f"[DATA SOURCE]   EDA  = column {col_eda}, ECG = column {col_ecg}")
+        print(f"[DATA SOURCE]   {self.rows} samples ({duration_s:.1f} s)")
 
-        # Derive HR (BPM) and HRV/RMSSD (ms) from the ECG trace once at load
-        # time. The actual derivation chain is selected by subclass — see
-        # MockDataSource2._derive_hr_hrv for the colleague's NeuroKit chain.
-        print(f"[DATA SOURCE] Deriving HR and HRV via {self.DERIVATION_LABEL}...")
-        self.hr_series, self.hrv_series, r_peaks = self._derive_hr_hrv(
-            self.ecg_mV, fs_hz=self.fs_hz
+        # Pre-derive HR and HRV using the same streaming algorithm the live
+        # PDF path uses. See _pre_derive_hr_hrv for the simulation logic.
+        print(f"[DATA SOURCE]   Pre-deriving HR + RMSSD via NeuroKit2 "
+              f"(simulating PDF streaming chain)...")
+        t0 = time.time()
+        self.hr_series, self.hrv_series = _pre_derive_hr_hrv(
+            self.ecg_mV, self.fs_hz,
         )
-        avg_bpm = 60.0 * len(r_peaks) / duration_sec if duration_sec > 0 else 0.0
-        print(f"[DATA SOURCE]   {len(r_peaks)} R-peaks detected (~{avg_bpm:.1f} BPM avg)")
+        n_real_hr = int(np.sum(np.isfinite(self.hr_series)))
+        n_real_hrv = int(np.sum(np.isfinite(self.hrv_series)))
+        elapsed = time.time() - t0
+        print(f"[DATA SOURCE]   HR valid in {n_real_hr}/{self.rows} samples, "
+              f"RMSSD valid in {n_real_hrv}/{self.rows}.")
+        print(f"[DATA SOURCE]   Pre-derivation took {elapsed:.1f} s.")
 
-        # Index for cycling through data
+        # Indices and pacing.
+        # We pace against wall-clock with time.perf_counter() rather than
+        # sleeping `1/fs_hz` per sample, because Windows' time.sleep has a
+        # ~15 ms granularity. Sleeping 1 ms per sample on Windows actually
+        # sleeps ~15 ms → the file plays back at ~65 Hz instead of 1000 Hz,
+        # and the 60 s HRV warm-up never finishes within a 120 s baseline.
+        # Catch-up: each get_next_sample() call pushes as many samples as
+        # wall-clock has advanced since the last call, then sleeps briefly
+        # so we don't burn CPU.
         self.current_index = 0
-        # Per-sample sleep, so the streamer paces at the file's native rate.
-        self.sample_period = 1.0 / self.fs_hz
+        self._stream_start_time = None      # set on the first get_next_sample()
+        self._eof_announced = False
 
-        # Main 3-channel stream: [EDA μS, HR BPM, HRV ms]
+        # ---- LSL outlets ----
+        # Derived 3-channel stream (EDA µS, HR BPM, HRV ms). Acquisition.py
+        # subscribes to this. NaN values flow through to mark warm-up.
         self.info = StreamInfo(
             name=Config.STREAM_NAME,
             type=Config.STREAM_TYPE,
             channel_count=3,
             nominal_srate=self.fs_hz,
             channel_format='float32',
-            source_id=self.SOURCE_ID
+            source_id='mock_hardware',
         )
         self.outlet = StreamOutlet(self.info)
 
-        # Side ECG stream — raw mV trace at native rate, for the dashboard's
-        # waveform chart. Separate stream so the main 3-channel pipeline is
-        # untouched. Real PLUX would publish its own ECG channel similarly.
+        # Side stream: raw ECG voltage for the dashboard's waveform chart.
+        # Doesn't interact with the math pipeline.
         self.ecg_info = StreamInfo(
             name=Config.ECG_STREAM_NAME,
             type=Config.ECG_STREAM_TYPE,
             channel_count=1,
             nominal_srate=self.fs_hz,
             channel_format='float32',
-            source_id=self.ECG_SOURCE_ID
+            source_id='mock_hardware_ecg',
         )
         self.ecg_outlet = StreamOutlet(self.ecg_info)
 
-        print(f"[DATA SOURCE] MOCK: outlet ready on LSL "
-              f"'{Config.STREAM_NAME}' at {self.fs_hz:.0f} Hz "
-              f"(+ side stream '{Config.ECG_STREAM_NAME}' for ECG)")
+        print(f"[DATA SOURCE]   Outlet ready on LSL '{Config.STREAM_NAME}' "
+              f"({self.fs_hz:.0f} Hz) + side stream '{Config.ECG_STREAM_NAME}'.")
 
-        # Wait for the acquisition consumer to subscribe before we start
-        # pushing samples. This is the reproducibility fix: without it, the
-        # streamer races ahead while the launcher's 2-second sleep runs, and
-        # acquisition's inlet ends up with a variable-size head buffer that
-        # depends on OS scheduling. With the wait, every run starts from
-        # file index 0 deterministically.
-        print("[DATA SOURCE] MOCK: waiting for acquisition consumer...")
+        # Wait for acquisition.py to subscribe before pushing samples — this
+        # is the reproducibility fix. Without it the streamer races ahead
+        # during subprocess startup and the file's first samples are
+        # consumed before acquisition is listening.
+        print("[DATA SOURCE]   Waiting for acquisition consumer...")
         t_start = time.time()
         while not self.outlet.have_consumers():
             time.sleep(0.05)
             if time.time() - t_start > Config.STREAMER_CONSUMER_WAIT_SEC:
-                print(f"[DATA SOURCE] MOCK: no consumer after "
-                      f"{Config.STREAMER_CONSUMER_WAIT_SEC}s, starting anyway.")
+                print(f"[DATA SOURCE]   No consumer after "
+                      f"{Config.STREAMER_CONSUMER_WAIT_SEC}s; starting anyway.")
                 break
-        print(f"[DATA SOURCE] MOCK: consumer attached, beginning stream at sample 0.")
-    
+        print(f"[DATA SOURCE]   Consumer attached, streaming from sample 0.")
+
     def get_next_sample(self) -> tuple:
-        """Returns next EDA/HR/HRV derived from the mock OpenSignals file."""
+        """
+        Push as many pre-derived (eda, hr, hrv) samples as the wall clock
+        says should have been published by now. Returns the most recent
+        sample pushed (or held if at end of file).
+
+        Why batch-push instead of one sample per call: Windows `time.sleep`
+        has ~15 ms granularity, so sleeping 1 ms per sample never delivers
+        the 1000 Hz native file rate (the file plays back ~15× too slow
+        and the 60 s HRV warm-up never finishes within a 120 s baseline).
+        We instead track wall-clock with time.perf_counter() and push
+        enough samples each call to keep up with `fs_hz × elapsed_time`.
+        """
+        now = time.perf_counter()
+        if self._stream_start_time is None:
+            self._stream_start_time = now
+
+        # End-of-file handling (PDF: stop publishing once the recording
+        # ends, so acquisition's deadman fires and the session ends
+        # cleanly; honour MOCK_LOOP for endless dev testing).
         if self.current_index >= self.rows:
-            self.current_index = 0  # Loop back to start
+            if Config.MOCK_LOOP:
+                self.current_index = 0
+                self._stream_start_time = now  # reset wall-clock baseline
+            else:
+                if not self._eof_announced:
+                    print(f"[DATA SOURCE] MOCK: end of file reached "
+                          f"({self.rows} samples). Halting stream — "
+                          f"acquisition deadman will fire in "
+                          f"{Config.STREAM_TIMEOUT_SEC:.0f}s.")
+                    self._eof_announced = True
+                time.sleep(0.005)  # don't burn CPU on the post-EOF hold
+                # Hold the last sample. Acquisition will see no NEW samples
+                # arriving (we stop pushing) and time out.
+                last = self.rows - 1
+                return (float(self.eda_uS[last]),
+                        float(self.hr_series[last]),
+                        float(self.hrv_series[last]))
 
-        i = self.current_index
-        eda = float(self.eda_uS[i])
-        hr = float(self.hr_series[i])
-        hrv = float(self.hrv_series[i])
-        ecg = float(self.ecg_mV[i])
-        sample = [eda, hr, hrv]
+        # How far into the file should we be by now? `target_index` is the
+        # sample we'd be at if pacing were perfect. We push everything
+        # from `current_index` up to (but not past) `target_index`.
+        elapsed = now - self._stream_start_time
+        target_index = min(int(elapsed * self.fs_hz), self.rows)
 
-        self.outlet.push_sample(sample)
-        # Push the raw ECG mV value on the side stream for the dashboard's
-        # waveform chart. Doesn't affect the main pipeline.
-        self.ecg_outlet.push_sample([ecg])
-        self.current_index += 1
+        # Catch up: push the batch. At 1000 Hz with ~15 ms loop granularity
+        # on Windows, this typically pushes ~15 samples per call.
+        while self.current_index < target_index:
+            i = self.current_index
+            self.outlet.push_sample([
+                float(self.eda_uS[i]),
+                float(self.hr_series[i]),     # NaN during HR warm-up
+                float(self.hrv_series[i]),    # NaN during HRV warm-up
+            ])
+            self.ecg_outlet.push_sample([float(self.ecg_mV[i])])
+            self.current_index += 1
 
-        # Pace at the file's native sample rate so the rest of the pipeline
-        # sees realistic timing.
-        time.sleep(self.sample_period)
+        # Brief sleep so we yield to the OS between batches without
+        # busy-spinning. ~15 ms on Windows in practice (which is exactly
+        # the batch size at 1000 Hz file rate, ~15 samples — no drift).
+        time.sleep(0.001)
 
-        return (eda, hr, hrv)
-    
+        # Return the most recently published sample for the streamer loop.
+        i = max(0, self.current_index - 1)
+        return (float(self.eda_uS[i]),
+                float(self.hr_series[i]),
+                float(self.hrv_series[i]))
+
     def cleanup(self):
         print("[DATA SOURCE] MOCK: Streaming terminated.")
 
 
+def _pre_derive_hr_hrv(ecg_mv: np.ndarray, fs_hz: float):
+    """
+    Offline simulation of the live streaming HR/RMSSD chain.
+
+    Strategy: run `nk.ecg_clean` + `nk.ecg_peaks(correct_artifacts=True)`
+    ONCE over the whole file to get a global peak index array, then slice
+    that array per window to compute HR / RMSSD at each recompute step.
+    Numerically identical to per-window peak detection (the windows are
+    independent), but ~10× faster on a 6-minute file because it avoids
+    re-running the expensive cleaning + peak-detection per window.
+
+    The simulated cadence matches the live PLUX path exactly:
+      * Recompute step  : HR_COMPUTE_INTERVAL_SEC × fs_hz samples
+      * HR window       : HR_WINDOW_SEC × fs_hz samples
+      * RMSSD window    : RMSSD_WINDOW_SEC × fs_hz samples
+      * Between recomputes: zero-order hold
+
+    Per PDF §3, the first ~60 s of HRV are NaN because the 60 s RMSSD
+    window hasn't filled yet. HR comes online within a few seconds of
+    the first detected R-peak. Both warm-ups are applied identically in
+    mock and live paths.
+
+    Inputs
+    ------
+    ecg_mv : raw ECG voltage in mV (already ADC-converted), shape (N,).
+    fs_hz  : sampling rate.
+
+    Returns
+    -------
+    (hr_series, hrv_series) — both float32 arrays of length N. NaN means
+    "not measurable in this window".
+    """
+    n = len(ecg_mv)
+    hr_series = np.full(n, np.nan, dtype=np.float32)
+    hrv_series = np.full(n, np.nan, dtype=np.float32)
+
+    if n < int(fs_hz):
+        return hr_series, hrv_series
+
+    # ---- ONE full-file pass for cleaning + peak detection ----
+    # This is the expensive part. Doing it once instead of per-window
+    # cuts startup time from ~30 s to ~3 s on the 367 s file.
+    try:
+        with warnings.catch_warnings():
+            warnings.simplefilter('ignore')
+            cleaned = nk.ecg_clean(ecg_mv, sampling_rate=fs_hz)
+            _, info = nk.ecg_peaks(
+                cleaned, sampling_rate=fs_hz, correct_artifacts=True,
+            )
+        all_peaks = np.asarray(info["ECG_R_Peaks"], dtype=np.int64)
+    except Exception as e:
+        print(f"[DATA SOURCE] Pre-derivation failed at nk.ecg_peaks ({e}); "
+              f"HR/HRV will be NaN throughout.")
+        return hr_series, hrv_series
+
+    if len(all_peaks) < 2:
+        return hr_series, hrv_series
+
+    hr_window_n = int(Config.HR_WINDOW_SEC * fs_hz)
+    hrv_window_n = int(Config.RMSSD_WINDOW_SEC * fs_hz)
+    step = max(1, int(Config.HR_COMPUTE_INTERVAL_SEC * fs_hz))
+
+    current_hr = float('nan')
+    current_rmssd = float('nan')
+
+    # ---- Walk the file at HR_COMPUTE_INTERVAL_SEC cadence ----
+    # At each step, slice the global peaks array to extract peaks in the
+    # trailing window, then call the per-window library functions on the
+    # slice (nk.ecg_rate / nk.hrv_time accept a peak-index array directly).
+    last_end = 0
+    for end in range(step, n + 1, step):
+        # HR over the trailing HR_WINDOW_SEC of ECG.
+        hr_lo = max(0, end - hr_window_n)
+        hr_peaks = all_peaks[(all_peaks >= hr_lo) & (all_peaks < end)]
+        if len(hr_peaks) >= 2:
+            try:
+                with warnings.catch_warnings():
+                    warnings.simplefilter('ignore')
+                    rate = nk.ecg_rate(hr_peaks, sampling_rate=fs_hz)
+                hr_val = float(np.nanmean(rate))
+                if np.isfinite(hr_val):
+                    current_hr = hr_val
+            except Exception:
+                pass
+
+        # RMSSD over the trailing RMSSD_WINDOW_SEC — only valid once the
+        # full window has filled (PDF §3 warm-up).
+        if end >= hrv_window_n:
+            hrv_lo = end - hrv_window_n
+            hrv_peaks = all_peaks[(all_peaks >= hrv_lo) & (all_peaks < end)]
+            if len(hrv_peaks) >= Config.MIN_PEAKS_HRV:
+                try:
+                    with warnings.catch_warnings():
+                        warnings.simplefilter('ignore')
+                        rmssd = float(nk.hrv_time(
+                            hrv_peaks, sampling_rate=fs_hz,
+                        )["HRV_RMSSD"].iloc[0])
+                    if (np.isfinite(rmssd)
+                            and Config.RMSSD_MIN_MS <= rmssd
+                            <= Config.RMSSD_MAX_MS):
+                        current_rmssd = rmssd
+                except Exception:
+                    pass
+
+        # Fill the per-sample series for this step interval (ZOH).
+        hr_series[last_end:end] = current_hr
+        hrv_series[last_end:end] = current_rmssd
+        last_end = end
+
+    # Fill the tail if `n` isn't a multiple of `step`.
+    if last_end < n:
+        hr_series[last_end:n] = current_hr
+        hrv_series[last_end:n] = current_rmssd
+
+    return hr_series, hrv_series
+
+
+# =============================================================================
+# RealPLUXDataSource — live from the device
+# =============================================================================
+
 class RealPLUXDataSource(DataSource):
     """
-    Connects to real PLUX OpenSignals hardware via LSL and derives
-    (EDA uS, HR BPM, RMSSD ms) from the raw ADC channels in real time.
+    Subscribes to PLUX's `OpenSignals` LSL stream, applies the same
+    canonical chain MockDataSource uses, and REPUBLISHES the derived
+    3-channel stream on `Config.STREAM_NAME` so acquisition.py reads
+    exactly the same shape regardless of mock or real mode.
 
-    OpenSignals broadcasts RAW ADC values (CH1, CH2, ...) at the device's
-    sampling rate. This class is responsible for:
-      1. ADC -> physical units (uS, mV) using PLUX hardware formulas.
-      2. Real-time R-peak detection via the NeuroKit2 chain on a sliding
-         ECG buffer (REAL_PLUX_ECG_BUFFER_SEC, default 5 s).
-      3. HR via nk.ecg_rate (per-sample series, mean returned each tick).
-      4. RMSSD via nk.hrv_time over a rolling RR buffer sized for
-         RMSSD_WINDOW_SEC.
-      5. Physiological plausibility band on RMSSD
-         (DS2_RMSSD_MIN_MS..DS2_RMSSD_MAX_MS) per the technical-report Bug 3.
+    Two LSL streams are involved:
 
-    Design principle (per the VRET technical report, Section 1): every
-    number is computed by a NeuroKit2 library call rather than by
-    hand-rolled signal processing. The prominence detector and
-    sqrt(mean(diff(rr)^2)) are kept only as the fallback for the case
-    where NeuroKit2 is unavailable or raises on the input.
+        Upstream (PLUX → us):  Config.PLUX_LSL_NAME   (raw ADC, 2-3 channels)
+        Downstream (us → acq): Config.STREAM_NAME     (derived EDA/HR/HRV)
 
-    Prerequisites:
-    - PLUX device powered on and paired.
-    - OpenSignals software running and streaming to LSL.
-    - LSL stream named Config.STREAM_NAME available on the network.
-    - Channel labels EDA/ECG on the stream, OR Config.REAL_PLUX_*_CHANNEL
-      indices set as the fallback (see resolve_plux_channels).
+    Channel mapping is resolved by label (case-insensitive); the PDF-
+    corrected fixed order is the fallback. Beat-plausibility (PDF Bug 5)
+    is the responsibility of the main pipeline, not this module.
+
+    Per-sample loop
+    ---------------
+    1. Pull whatever ADC samples have accumulated in the inlet (zero-block).
+    2. Convert each raw ADC sample to physical units (EDA µS, ECG mV).
+    3. Append the ECG sample to a rolling buffer
+       (RMSSD_WINDOW_SEC + a few seconds of margin).
+    4. Every HR_COMPUTE_INTERVAL_SEC, recompute HR + RMSSD via the chain
+       (same _compute_hr_rmssd used by the mock pre-derivation).
+    5. Push the latest (EDA µS, HR BPM, RMSSD ms) tuple on our derived
+       outlet, with NaN for any signal not yet measurable.
+    6. Push the raw ECG mV on the side stream.
+
+    Bluetooth-dropout watchdog
+    --------------------------
+    PLUX streams over Bluetooth and drops occasionally. If we keep
+    returning held values forever, acquisition's deadman (which reads
+    from OUR outlet, not the PLUX inlet) would never trip. We track
+    wall-clock time since the last fresh PLUX sample and raise
+    ConnectionError after Config.STREAM_TIMEOUT_SEC of silence — matching
+    how the acquisition-side deadman fails the session.
     """
 
     def __init__(self):
-        print("[DATA SOURCE] Initializing REAL PLUX Data Source...")
-        from pylsl import resolve_stream, StreamInlet
+        print("[DATA SOURCE] Initializing RealPLUXDataSource (PDF-aligned)...")
 
-        print(f"[DATA SOURCE] Scanning network for LSL stream: {Config.STREAM_NAME}...")
-        streams = resolve_stream("name", Config.STREAM_NAME)
-        if not streams:
+        # ---- Connect to PLUX's raw-ADC LSL stream ----
+        print(f"[DATA SOURCE]   Scanning for upstream PLUX LSL: "
+              f"'{Config.PLUX_LSL_NAME}'...")
+        upstream = resolve_stream("name", Config.PLUX_LSL_NAME)
+        if not upstream:
             raise RuntimeError(
-                f"PLUX hardware stream '{Config.STREAM_NAME}' not found.\n"
-                f"  1. Is the PLUX device powered on and paired (Bluetooth)?\n"
-                f"  2. Is OpenSignals software running and recording?\n"
-                f"  3. Is 'Lab Streaming Layer' enabled in OpenSignals preferences?"
+                f"PLUX LSL stream '{Config.PLUX_LSL_NAME}' not found.\n"
+                f"  1. Is the PLUX device powered on and paired?\n"
+                f"  2. Is OpenSignals running AND recording (red button)?\n"
+                f"  3. Is 'Lab Streaming Layer' enabled in OpenSignals "
+                f"prefs, with the stream named '{Config.PLUX_LSL_NAME}'?"
             )
 
-        self.inlet = StreamInlet(streams[0])
+        self.inlet = StreamInlet(upstream[0])
         info = self.inlet.info()
         self.fs_hz = float(info.nominal_srate()) or 1000.0
-        nchan = info.channel_count()
-        print(f"[DATA SOURCE] Connected to '{Config.STREAM_NAME}': "
-              f"{nchan} channels @ {self.fs_hz:.0f} Hz")
+        n_channels = info.channel_count()
 
-        # Auto-discover which channel is EDA and which is ECG from the
-        # LSL metadata. Falls back to Config indices if labels missing.
-        # Storing on self so get_next_sample can use them.
-        self.eda_ch, self.ecg_ch = resolve_plux_channels(self.inlet, nchan)
-
-        # ---- Streaming R-peak detector state ----
-        # Rolling buffer of recent ECG mV samples (5 s by default).
-        buf_len = int(Config.REAL_PLUX_ECG_BUFFER_SEC * self.fs_hz)
-        self._ecg_buf = collections.deque(maxlen=buf_len)
-        self._sample_index = 0          # absolute count since session start
-        self._last_peak_index = -10**9  # so the first peak always qualifies
-        # Rolling RR buffer for RMSSD: sized to roughly
-        # RMSSD_WINDOW_SEC seconds of beats (~2 beats/s at adult resting).
-        # nk.hrv_time will run on these reconstructed peaks each update.
-        self._rr_buffer = collections.deque(
-            maxlen=max(8, int(Config.RMSSD_WINDOW_SEC * 2))
+        labels = _read_lsl_channel_labels(self.inlet)
+        self.eda_ch, self.ecg_ch, source = _resolve_channels_by_label(
+            labels, n_channels,
         )
+        print(f"[DATA SOURCE]   PLUX: {n_channels} channels @ "
+              f"{self.fs_hz:.0f} Hz")
+        print(f"[DATA SOURCE]   Channel mapping ({source}): "
+              f"EDA=ch{self.eda_ch}, ECG=ch{self.ecg_ch} "
+              f"(labels: {labels or 'none'})")
 
-        # Hold values between R-peaks (ZOH); seed with sane defaults.
-        self.latest_hr = Config.MOCK_HR_BASE
-        self.latest_hrv = Config.MOCK_HRV_BASE
+        # ---- Open our downstream "derived" outlet ----
+        # Same shape and channel order as MockDataSource so acquisition.py
+        # doesn't care whether it's live or replay. NaN flows through for
+        # the HR/HRV warm-up period.
+        self.out_info = StreamInfo(
+            name=Config.STREAM_NAME,
+            type=Config.STREAM_TYPE,
+            channel_count=3,
+            nominal_srate=self.fs_hz,
+            channel_format='float32',
+            source_id='plux_hardware_derived',
+        )
+        self.outlet = StreamOutlet(self.out_info)
+
+        self.ecg_out_info = StreamInfo(
+            name=Config.ECG_STREAM_NAME,
+            type=Config.ECG_STREAM_TYPE,
+            channel_count=1,
+            nominal_srate=self.fs_hz,
+            channel_format='float32',
+            source_id='plux_hardware_ecg',
+        )
+        self.ecg_outlet = StreamOutlet(self.ecg_out_info)
+
+        # ---- Rolling buffer for ECG (60 s + 5 s margin = full RMSSD window) ----
+        buffer_len = int((Config.RMSSD_WINDOW_SEC + 5) * self.fs_hz)
+        self._ecg_buffer = collections.deque(maxlen=buffer_len)
+        self._sample_index = 0  # absolute count since session start
+        self._recompute_step = max(1, int(Config.HR_COMPUTE_INTERVAL_SEC * self.fs_hz))
+
+        # Latest values held between recomputes (ZOH). NaN until first
+        # successful compute (HR within ~3 s, RMSSD after 60 s).
         self.latest_eda = 0.0
+        self.latest_hr = float('nan')
+        self.latest_rmssd = float('nan')
 
-        # Bluetooth-dropout watchdog. The PLUX hub streams via Bluetooth,
-        # which drops out occasionally. If we keep returning held values
-        # forever, downstream consumers can't tell the stream has died —
-        # acquisition.py's deadman switch reads from our OUTLET, not the
-        # PLUX inlet, so it would never trip. We track wall-clock time
-        # since the last real PLUX sample and surface the gap loudly.
+        # Bluetooth-dropout watchdog state.
         self._last_fresh_sample_time = time.time()
         self._watchdog_warned = False
 
-        # Pre-compute the bandpass filter once.
-        nyq = 0.5 * self.fs_hz
-        self._bp_b, self._bp_a = butter(
-            2, [Config.ECG_BANDPASS_LOW_HZ / nyq,
-                Config.ECG_BANDPASS_HIGH_HZ / nyq], btype='band'
-        )
-        self._refractory_samples = int(Config.ECG_MIN_RR_MS * self.fs_hz / 1000)
+        # Wait for acquisition consumer before publishing (reproducibility).
+        print(f"[DATA SOURCE]   Outlet ready on LSL '{Config.STREAM_NAME}' "
+              f"({self.fs_hz:.0f} Hz).")
+        print("[DATA SOURCE]   Waiting for acquisition consumer...")
+        t_start = time.time()
+        while not self.outlet.have_consumers():
+            time.sleep(0.05)
+            if time.time() - t_start > Config.STREAMER_CONSUMER_WAIT_SEC:
+                print(f"[DATA SOURCE]   No consumer after "
+                      f"{Config.STREAMER_CONSUMER_WAIT_SEC}s; starting anyway.")
+                break
+        print("[DATA SOURCE]   Consumer attached, beginning stream.")
 
     def get_next_sample(self) -> tuple:
         """
-        Pull the most recent ADC sample, convert, run incremental R-peak
-        detection, return (eda_uS, hr_bpm, hrv_ms).
+        Pull whatever new ADC samples are available from PLUX, process them,
+        and push the latest derived tuple to the downstream outlet.
         """
-        # Drain any backlog and use the latest sample (mirrors the same fix
-        # we made in acquisition.py — protects against inlet pile-up).
         samples, _ = self.inlet.pull_chunk(timeout=0.0)
+
+        # ---- Bluetooth watchdog ----
         if not samples:
-            # Watchdog: surface a sustained PLUX silence. Two thresholds:
-            #   * REAL_PLUX_WATCHDOG_WARN_SEC: print one warning.
-            #   * STREAM_TIMEOUT_SEC: raise, ending the session cleanly.
             silent_for = time.time() - self._last_fresh_sample_time
             if (silent_for > Config.REAL_PLUX_WATCHDOG_WARN_SEC
                     and not self._watchdog_warned):
@@ -731,368 +855,125 @@ class RealPLUXDataSource(DataSource):
             if silent_for > Config.STREAM_TIMEOUT_SEC:
                 raise ConnectionError(
                     f"[DATA SOURCE] PLUX inlet silent for {silent_for:.1f}s "
-                    f"(threshold {Config.STREAM_TIMEOUT_SEC}s). Check "
+                    f"(threshold {Config.STREAM_TIMEOUT_SEC}s). Check that "
                     f"OpenSignals is still recording and the device is paired."
                 )
-            return (self.latest_eda, self.latest_hr, self.latest_hrv)
+            # No new data — republish the last derived sample so the
+            # downstream stream stays alive at roughly the same rate.
+            self.outlet.push_sample(
+                [self.latest_eda, self.latest_hr, self.latest_rmssd]
+            )
+            return self.latest_eda, self.latest_hr, self.latest_rmssd
+
         self._last_fresh_sample_time = time.time()
         self._watchdog_warned = False
 
-        # Process every backlogged sample so the ECG buffer is dense (we'd
-        # miss R-peaks if we only kept the last one). Cheap loop in practice.
+        # ---- Per-sample processing for everything in the chunk ----
         for s in samples:
-            ecg_adc = s[self.ecg_ch]
-            eda_adc = s[self.eda_ch]
-
-            # PLUX hardware conversions (same formulas as MockDataSource).
-            eda_uS = (eda_adc / 65536.0) * 3.0 / 0.132
-            ecg_mV = ((ecg_adc / 65536.0) - 0.5) * 3.0 / 1100.0 * 1000.0
+            eda_uS = adc_to_eda_uS(s[self.eda_ch])
+            ecg_mV = adc_to_ecg_mV(s[self.ecg_ch])
 
             self.latest_eda = float(eda_uS)
-            self._ecg_buf.append(float(ecg_mV))
+            self._ecg_buffer.append(float(ecg_mV))
             self._sample_index += 1
 
-            # Run R-peak detector roughly 5× per second; cheap and avoids
-            # running find_peaks on every single sample.
-            if self._sample_index % max(1, int(self.fs_hz // 5)) == 0:
-                self._detect_recent_peaks()
+            # Push raw ECG to side outlet (every sample, for dashboard).
+            self.ecg_outlet.push_sample([float(ecg_mV)])
 
-        return (self.latest_eda, self.latest_hr, self.latest_hrv)
+            # Periodic HR/RMSSD recompute.
+            if self._sample_index % self._recompute_step == 0:
+                self._recompute_hr_hrv()
 
-    def _detect_recent_peaks(self):
-        """
-        Run the NeuroKit2 chain on the rolling ECG buffer to find R-peaks,
-        then update self.latest_hr via nk.ecg_rate and self.latest_hrv via
-        nk.hrv_time over the rolling RR buffer.
+            # Push derived 3-channel sample on every input sample so the
+            # downstream stream is dense (acquisition then drains it to
+            # the latest tick at 50 Hz).
+            self.outlet.push_sample(
+                [self.latest_eda, self.latest_hr, self.latest_rmssd]
+            )
 
-        Called roughly 5 Hz from get_next_sample. The library calls do all
-        the math: nk.ecg_clean (mains + baseline-wander filtering),
-        nk.ecg_peaks (R-peak detection with correct_artifacts=True so
-        signal_fixpeaks corrects missed / doubled beats internally),
-        nk.ecg_rate (per-sample HR), nk.hrv_time (HRV_RMSSD on the
-        rolling RR window). Nothing here is hand-rolled.
+        return self.latest_eda, self.latest_hr, self.latest_rmssd
 
-        If NeuroKit2 is unavailable or raises on the input, the fallback
-        is the original prominence-based detector + sqrt(mean(diff(rr)^2)).
-        """
-        if len(self._ecg_buf) < int(self.fs_hz):
-            return  # need >=1 s
+    def _recompute_hr_hrv(self):
+        """Run the canonical chain on the rolling ECG buffer."""
+        if len(self._ecg_buffer) < int(self.fs_hz):
+            return  # need at least 1 s of ECG
+        arr = np.asarray(self._ecg_buffer, dtype=float)
 
-        if not _NEUROKIT_AVAILABLE:
-            self._detect_recent_peaks_fallback()
-            return
+        # HR window: up to HR_WINDOW_SEC trailing samples.
+        hr_window_n = int(Config.HR_WINDOW_SEC * self.fs_hz)
+        hr_slice = arr[-hr_window_n:] if len(arr) > hr_window_n else arr
 
-        arr = np.asarray(self._ecg_buf, dtype=float)
-        try:
-            with warnings.catch_warnings():
-                warnings.simplefilter('ignore')
-                cleaned = nk.ecg_clean(arr, sampling_rate=self.fs_hz)
-                _, info = nk.ecg_peaks(
-                    cleaned, sampling_rate=self.fs_hz,
-                    method=Config.NEUROKIT_RPEAK_METHOD,
-                    correct_artifacts=True,
-                )
-            peaks_rel = np.asarray(info["ECG_R_Peaks"], dtype=np.int64)
-        except Exception:
-            # NeuroKit raised on this buffer (rare). Try the fallback.
-            self._detect_recent_peaks_fallback()
-            return
+        # RMSSD window: needs the full RMSSD_WINDOW_SEC.
+        hrv_window_n = int(Config.RMSSD_WINDOW_SEC * self.fs_hz)
+        have_full_hrv = len(arr) >= hrv_window_n
+        hrv_slice = arr[-hrv_window_n:] if have_full_hrv else arr
 
-        if len(peaks_rel) == 0:
-            return
+        hr_val, _ = _compute_hr_rmssd(hr_slice, self.fs_hz,
+                                       have_full_hrv_window=False)
+        if np.isfinite(hr_val):
+            self.latest_hr = hr_val
 
-        # ---- Track new peaks against the absolute sample index so RR
-        # intervals are correct across consecutive calls. ----
-        buf_start_abs = self._sample_index - len(arr)
-        peaks_abs = peaks_rel + buf_start_abs
-        new_peaks = peaks_abs[peaks_abs > self._last_peak_index]
-        for p_abs in new_peaks:
-            if self._last_peak_index < 0:
-                self._last_peak_index = int(p_abs)
-                continue
-            rr_ms = (int(p_abs) - self._last_peak_index) * 1000.0 / self.fs_hz
-            self._last_peak_index = int(p_abs)
-            # nk.ecg_peaks(correct_artifacts=True) already handled most
-            # missed / doubled beats, but a cheap physiological clamp
-            # protects against the rare survivor (RR < refractory or
-            # > 2500 ms = below 24 BPM).
-            if rr_ms < Config.ECG_MIN_RR_MS or rr_ms > 2500:
-                continue
-            self._rr_buffer.append(rr_ms)
-
-        # ---- HR via nk.ecg_rate ----
-        if len(peaks_rel) >= 2:
-            try:
-                with warnings.catch_warnings():
-                    warnings.simplefilter('ignore')
-                    rate = nk.ecg_rate(peaks_rel, sampling_rate=self.fs_hz)
-                hr_val = float(np.nanmean(rate))
-                if np.isfinite(hr_val):
-                    self.latest_hr = hr_val
-            except Exception:
-                pass
-
-        # ---- RMSSD via nk.hrv_time over the rolling RR buffer ----
-        # Reconstruct synthetic peak indices from the RR intervals so
-        # nk.hrv_time can consume them. nk.hrv_time only needs the deltas
-        # between peaks, so any consistent index sequence yields the same
-        # RMSSD.
-        if len(self._rr_buffer) >= max(4, Config.DS2_MIN_PEAKS_HRV):
-            try:
-                rr_arr = np.asarray(self._rr_buffer, dtype=float)
-                synth_peaks = np.concatenate(
-                    ([0.0], np.cumsum(rr_arr) * self.fs_hz / 1000.0)
-                ).astype(np.int64)
-                with warnings.catch_warnings():
-                    warnings.simplefilter('ignore')
-                    rmssd = float(nk.hrv_time(
-                        synth_peaks, sampling_rate=self.fs_hz,
-                    )["HRV_RMSSD"].iloc[0])
-                if (np.isfinite(rmssd)
-                        and Config.DS2_RMSSD_MIN_MS <= rmssd
-                        <= Config.DS2_RMSSD_MAX_MS):
-                    self.latest_hrv = rmssd
-            except Exception:
-                pass
-
-    def _detect_recent_peaks_fallback(self):
-        """Original prominence detector + sqrt(mean(diff(rr)^2)) RMSSD.
-        Only runs when NeuroKit2 is unavailable or raises on the buffer."""
-        arr = np.asarray(self._ecg_buf)
-        try:
-            filt = filtfilt(self._bp_b, self._bp_a, arr)
-        except ValueError:
-            return
-        peaks_rel = _detect_r_peaks(filt, self._refractory_samples)
-        if len(peaks_rel) == 0:
-            return
-        buf_start_abs = self._sample_index - len(arr)
-        peaks_abs = peaks_rel + buf_start_abs
-        new_peaks = peaks_abs[peaks_abs > self._last_peak_index]
-        for p_abs in new_peaks:
-            if self._last_peak_index < 0:
-                self._last_peak_index = int(p_abs)
-                continue
-            rr_ms = (int(p_abs) - self._last_peak_index) * 1000.0 / self.fs_hz
-            self._last_peak_index = int(p_abs)
-            if rr_ms < Config.ECG_MIN_RR_MS or rr_ms > 2500:
-                continue
-            self._rr_buffer.append(rr_ms)
-            self.latest_hr = 60_000.0 / rr_ms
-            if len(self._rr_buffer) >= 2:
-                rr_arr = np.asarray(self._rr_buffer)
-                self.latest_hrv = float(np.sqrt(np.mean(np.diff(rr_arr) ** 2)))
+        if have_full_hrv:
+            _, rmssd_val = _compute_hr_rmssd(hrv_slice, self.fs_hz,
+                                              have_full_hrv_window=True)
+            if np.isfinite(rmssd_val):
+                self.latest_rmssd = rmssd_val
 
     def cleanup(self):
         print("[DATA SOURCE] REAL: Hardware connection closed.")
 
 
-class MockDataSource2(MockDataSource):
-    """
-    Same recording, same LSL contract, same downstream pipeline — only the
-    HR/HRV derivation is swapped for the colleague's vret_server_v2 chain
-    (nk.ecg_clean -> ecg_peaks -> ecg_rate / hrv_time, sliding windows).
-    Drop-in A/B comparison: flip Config.DATA_SOURCE between 'mock' and
-    'mock2' on the same MOCK_DATA_FILE.
-    """
-    SOURCE_ID = 'mock_hardware_v2'
-    ECG_SOURCE_ID = 'mock_hardware_ecg_v2'
-    DERIVATION_LABEL = (f"NeuroKit2 sliding windows "
-                        f"(HR={Config.DS2_HR_WINDOW_SEC}s, "
-                        f"RMSSD={Config.DS2_HRV_WINDOW_SEC}s, "
-                        f"colleague's vret_server_v2 chain)")
-
-    def _derive_hr_hrv(self, ecg_mv: np.ndarray, fs_hz: float) -> tuple:
-        return derive_hr_hrv_from_ecg_nk(ecg_mv, fs_hz)
-
-
-class RealPLUXDataSource2(DataSource):
-    """
-    Live PLUX variant using the colleague's vret_server_v2 chain.
-
-    Maintains a rolling DS2_PLUX_ECG_BUFFER_SEC-second ECG buffer. Every
-    DS2_UPDATE_INTERVAL_SEC, runs nk.ecg_clean + nk.ecg_peaks on the
-    trailing slice, then nk.ecg_rate (mean over the HR window) for HR and
-    nk.hrv_time["HRV_RMSSD"] for RMSSD. RMSSD outside DS2_RMSSD_MIN/MAX_MS
-    is rejected as a detector failure.
-    """
-
-    def __init__(self):
-        print("[DATA SOURCE] Initializing REAL PLUX (v2 - NeuroKit2 windows)...")
-        from pylsl import resolve_stream, StreamInlet
-
-        print(f"[DATA SOURCE] Scanning network for LSL stream: {Config.STREAM_NAME}...")
-        streams = resolve_stream("name", Config.STREAM_NAME)
-        if not streams:
-            raise RuntimeError(
-                f"PLUX hardware stream '{Config.STREAM_NAME}' not found.\n"
-                f"  1. Is the PLUX device powered on and paired (Bluetooth)?\n"
-                f"  2. Is OpenSignals software running and recording?\n"
-                f"  3. Is 'Lab Streaming Layer' enabled in OpenSignals preferences?"
-            )
-
-        self.inlet = StreamInlet(streams[0])
-        info = self.inlet.info()
-        self.fs_hz = float(info.nominal_srate()) or 1000.0
-        nchan = info.channel_count()
-        print(f"[DATA SOURCE] Connected to '{Config.STREAM_NAME}': "
-              f"{nchan} channels @ {self.fs_hz:.0f} Hz")
-
-        # Auto-discover EDA/ECG indices from the LSL channel labels.
-        self.eda_ch, self.ecg_ch = resolve_plux_channels(self.inlet, nchan)
-
-        if not _NEUROKIT_AVAILABLE:
-            raise RuntimeError(
-                "RealPLUXDataSource2 requires neurokit2 (it is the whole point "
-                "of the v2 variant). Install it or use 'real_plux' instead."
-            )
-
-        buf_len = int(Config.DS2_PLUX_ECG_BUFFER_SEC * self.fs_hz)
-        self._ecg_buf = collections.deque(maxlen=buf_len)
-        self._sample_index = 0
-        self._stride_samples = max(1, int(Config.DS2_UPDATE_INTERVAL_SEC * self.fs_hz))
-        self._hr_win_samples = int(Config.DS2_HR_WINDOW_SEC * self.fs_hz)
-        self._hrv_win_samples = int(Config.DS2_HRV_WINDOW_SEC * self.fs_hz)
-
-        self.latest_hr = Config.MOCK_HR_BASE
-        self.latest_hrv = Config.MOCK_HRV_BASE
-        self.latest_eda = 0.0
-
-        # Same Bluetooth-dropout watchdog as RealPLUXDataSource. See its
-        # constructor for the rationale.
-        self._last_fresh_sample_time = time.time()
-        self._watchdog_warned = False
-
-    def get_next_sample(self) -> tuple:
-        samples, _ = self.inlet.pull_chunk(timeout=0.0)
-        if not samples:
-            silent_for = time.time() - self._last_fresh_sample_time
-            if (silent_for > Config.REAL_PLUX_WATCHDOG_WARN_SEC
-                    and not self._watchdog_warned):
-                print(f"[DATA SOURCE] WARN: no PLUX samples for "
-                      f"{silent_for:.1f}s — Bluetooth dropout likely. "
-                      f"Holding last value; will raise at "
-                      f"{Config.STREAM_TIMEOUT_SEC}s.")
-                self._watchdog_warned = True
-            if silent_for > Config.STREAM_TIMEOUT_SEC:
-                raise ConnectionError(
-                    f"[DATA SOURCE] PLUX inlet silent for {silent_for:.1f}s "
-                    f"(threshold {Config.STREAM_TIMEOUT_SEC}s). Check "
-                    f"OpenSignals is still recording and the device is paired."
-                )
-            return (self.latest_eda, self.latest_hr, self.latest_hrv)
-        self._last_fresh_sample_time = time.time()
-        self._watchdog_warned = False
-
-        for s in samples:
-            ecg_adc = s[self.ecg_ch]
-            eda_adc = s[self.eda_ch]
-            # PLUX hardware conversions (same formulas as MockDataSource).
-            eda_uS = (eda_adc / 65536.0) * 3.0 / 0.132
-            ecg_mV = ((ecg_adc / 65536.0) - 0.5) * 3.0 / 1100.0 * 1000.0
-
-            self.latest_eda = float(eda_uS)
-            self._ecg_buf.append(float(ecg_mV))
-            self._sample_index += 1
-
-            if self._sample_index % self._stride_samples == 0:
-                self._recompute_hr_hrv()
-
-        return (self.latest_eda, self.latest_hr, self.latest_hrv)
-
-    def _recompute_hr_hrv(self):
-        """Run the colleague's chain on the rolling ECG buffer. Quiet on
-        failure — last values are held."""
-        if len(self._ecg_buf) < int(self.fs_hz):
-            return  # need >=1 s of data before nk.ecg_peaks is meaningful
-
-        arr = np.asarray(self._ecg_buf, dtype=float)
-
-        # HR: trailing HR window
-        try:
-            with warnings.catch_warnings():
-                warnings.simplefilter('ignore')
-                hr_slice = arr[-self._hr_win_samples:] if len(arr) > self._hr_win_samples else arr
-                cleaned = nk.ecg_clean(hr_slice, sampling_rate=self.fs_hz)
-                peaks_df, info_hr = nk.ecg_peaks(
-                    cleaned, sampling_rate=self.fs_hz, correct_artifacts=True)
-                if len(info_hr["ECG_R_Peaks"]) >= 2:
-                    rate = nk.ecg_rate(peaks_df, sampling_rate=self.fs_hz)
-                    hr_val = float(np.nanmean(rate))
-                    if np.isfinite(hr_val):
-                        self.latest_hr = hr_val
-        except Exception:
-            pass
-
-        # RMSSD: trailing HRV window (longer; only once the buffer has filled)
-        if len(arr) >= self._hrv_win_samples:
-            try:
-                with warnings.catch_warnings():
-                    warnings.simplefilter('ignore')
-                    hrv_slice = arr[-self._hrv_win_samples:]
-                    cleaned = nk.ecg_clean(hrv_slice, sampling_rate=self.fs_hz)
-                    peaks_df, info_hrv = nk.ecg_peaks(
-                        cleaned, sampling_rate=self.fs_hz, correct_artifacts=True)
-                    if len(info_hrv["ECG_R_Peaks"]) >= Config.DS2_MIN_PEAKS_HRV:
-                        rmssd = float(nk.hrv_time(
-                            peaks_df, sampling_rate=self.fs_hz
-                        )["HRV_RMSSD"].iloc[0])
-                        if (np.isfinite(rmssd)
-                                and Config.DS2_RMSSD_MIN_MS <= rmssd
-                                <= Config.DS2_RMSSD_MAX_MS):
-                            self.latest_hrv = rmssd
-            except Exception:
-                pass
-
-    def cleanup(self):
-        print("[DATA SOURCE] REAL (v2): Hardware connection closed.")
-
+# =============================================================================
+# Factory
+# =============================================================================
 
 class DataSourceFactory:
-    """Factory for creating appropriate data source based on config."""
+    """
+    Picks the data source from Config.DATA_SOURCE. Two valid options:
+
+        'mock'       → MockDataSource (replays Config.MOCK_DATA_FILE)
+        'real_plux'  → RealPLUXDataSource (live from PLUX via OpenSignals LSL)
+
+    The previous 'mock2' / 'real_plux2' variants are gone — both code paths
+    now use the same canonical NeuroKit2 chain from PDF §2, so there is no
+    A/B to maintain.
+    """
 
     @staticmethod
     def create() -> DataSource:
-        """
-        Creates a data source instance based on Config.DATA_SOURCE setting.
-
-        Returns:
-            DataSource: Configured mock or real hardware source
-
-        Raises:
-            ValueError: If DATA_SOURCE is invalid
-        """
-        source_type = Config.DATA_SOURCE.lower()
-
-        if source_type == 'mock':
+        choice = Config.DATA_SOURCE.lower()
+        if choice == 'mock':
             return MockDataSource()
-        elif source_type == 'mock2':
-            return MockDataSource2()
-        elif source_type == 'real_plux':
+        if choice == 'real_plux':
             return RealPLUXDataSource()
-        elif source_type == 'real_plux2':
-            return RealPLUXDataSource2()
-        else:
+        # Soft-handle the now-removed v2 variants so old configs don't
+        # silently fall through to a ValueError without explanation.
+        if choice in ('mock2', 'real_plux2'):
             raise ValueError(
-                f"Invalid DATA_SOURCE: '{Config.DATA_SOURCE}'\n"
-                f"Valid options: 'mock', 'mock2', 'real_plux', 'real_plux2'"
+                f"Config.DATA_SOURCE = '{Config.DATA_SOURCE}' is no longer "
+                f"valid. The v1/v2 split was removed; both modes now use "
+                f"the same canonical NeuroKit2 chain. Use '{choice[:-1]}' "
+                f"instead (i.e. drop the trailing '2')."
             )
+        raise ValueError(
+            f"Invalid Config.DATA_SOURCE: '{Config.DATA_SOURCE}'. "
+            f"Valid options: 'mock', 'real_plux'."
+        )
 
+
+# =============================================================================
+# Standalone smoke test
+# =============================================================================
 
 if __name__ == "__main__":
-    # Quick test of the factory pattern
-    print("\n=== DATA SOURCE FACTORY TEST ===\n")
-    
+    print("\n=== data_sources.py standalone smoke test ===\n")
     try:
-        source = DataSourceFactory.create()
-        print(f"\n✓ Successfully created {source.__class__.__name__}")
-        
-        # Get a sample
-        sample = source.get_next_sample()
-        print(f"Sample retrieved: EDA={sample[0]:.2f}, HR={sample[1]:.2f}, HRV={sample[2]:.2f}")
-        
-        source.cleanup()
-        print("✓ Cleanup successful")
-        
+        src = DataSourceFactory.create()
+        eda, hr, hrv = src.get_next_sample()
+        print(f"\nFirst sample: EDA={eda:.3f} µS  "
+              f"HR={'NaN' if not np.isfinite(hr) else f'{hr:.1f} BPM'}  "
+              f"HRV={'NaN (warm-up)' if not np.isfinite(hrv) else f'{hrv:.1f} ms'}")
+        src.cleanup()
+        print("\n✓ Data source created and produced one sample.")
     except Exception as e:
-        print(f"✗ Error: {str(e)}")
+        print(f"\n✗ {type(e).__name__}: {e}")

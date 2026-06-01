@@ -119,6 +119,14 @@ def run_pipeline():
     baseline_elapsed_frozen = 0.0
     live_started_at = None
     live_elapsed_frozen = 0.0
+    # Wall-clock timestamp of the last live-transcript line. The transcript
+    # is gated on wall time, not tick-count: at sub-50-Hz effective rates
+    # (Windows time.sleep slop, expensive per-tick work) a tick-modulo gate
+    # produces 1.4-2 s between lines, drifting out of phase with the UDP
+    # bridge's 1 s wall-clock throttle and making it look like duplicate
+    # 'increase' commands are emitted per "second" of log. Wall-clock here
+    # keeps both cadences in sync.
+    last_live_log_at = 0.0
 
     def _baseline_elapsed_now():
         if state == SessionState.BASELINE and baseline_started_at is not None:
@@ -318,6 +326,13 @@ def run_pipeline():
 
             # ---- Phase B: pull the latest sample (always, regardless of state) ----
             raw_vector = acq.get_synchronized_sample()
+            # Warmup gate: acquisition returns None until the first NEW_DATA
+            # arrives. Sleep one tick and continue so the EMA in
+            # SignalProcessor never sees the 0.0 sentinel and the session
+            # CSV never logs the ramp-from-zero artifact.
+            if raw_vector is None:
+                time.sleep(tick_duration)
+                continue
             session.record_raw_sample(raw_vector[0], raw_vector[1], raw_vector[2])
 
             # ---- Phase C: smooth (EMA needs continuity) ----
@@ -352,32 +367,25 @@ def run_pipeline():
                 # Auto-finish: when ready (by either path above), compute
                 # thresholds, write the baseline JSON, transition.
                 if ready_now and not baseline_locked:
-                    # Detector-failure sentinel check: when the data source
-                    # cannot find R-peaks (loose electrode, fully muted ECG)
-                    # it returns the MOCK_HR_BASE / MOCK_HRV_BASE seed
-                    # values for every sample. A baseline locked on those
-                    # is unusable — print a loud warning so the operator
-                    # restores contact and re-baselines before going live.
+                    # Detector-failure check: in the new PDF-aligned data
+                    # source there are no seed sentinels — HR/HRV are NaN
+                    # during warm-up and processing.py drops NaN before
+                    # averaging. If the cleaned baseline buffers are
+                    # entirely NaN (i.e. nanmean returned NaN), the R-peak
+                    # detector never produced a valid beat during the whole
+                    # baseline — almost certainly a loose ECG electrode.
                     import numpy as _np
-                    _hr_buf = proc.cleaned_baseline_buffers.get('hr')
-                    _hrv_buf = proc.cleaned_baseline_buffers.get('hrv')
-                    if _hr_buf is not None and len(_hr_buf) > 0:
-                        _hr_var = float(_np.std(_hr_buf))
-                        _hrv_var = float(_np.std(_hrv_buf)) if _hrv_buf is not None else 0.0
-                        _hr_mean = float(_np.mean(_hr_buf))
-                        _hrv_mean = float(_np.mean(_hrv_buf)) if _hrv_buf is not None else 0.0
-                        # Sentinel pattern: variance ~0 AND value at the seed default.
-                        if (_hr_var < 1e-3 and abs(_hr_mean - Config.MOCK_HR_BASE) < 0.01
-                                and _hrv_var < 1e-3 and abs(_hrv_mean - Config.MOCK_HRV_BASE) < 0.01):
-                            print("\n" + "!" * 60)
-                            print("!! [MAIN] WARN: baseline locked on detector-failure")
-                            print(f"!! defaults (HR={_hr_mean:.1f} BPM, HRV={_hrv_mean:.1f} ms,")
-                            print("!! both pinned). The R-peak detector found no usable")
-                            print("!! beats during baseline — likely loose ECG electrode")
-                            print("!! contact. Restore contact and click Start Baseline")
-                            print("!! again before going live, or the live phase will be")
-                            print("!! measuring against meaningless reference values.")
-                            print("!" * 60 + "\n")
+                    _hr_avg = proc.personal_averages.get('hr', float('nan'))
+                    _hrv_avg = proc.personal_averages.get('hrv', float('nan'))
+                    if (not _np.isfinite(_hr_avg)) or (not _np.isfinite(_hrv_avg)):
+                        print("\n" + "!" * 60)
+                        print("!! [MAIN] WARN: baseline produced no valid HR or HRV")
+                        print(f"!! samples (avg_hr={_hr_avg}, avg_hrv={_hrv_avg}).")
+                        print("!! The R-peak detector found no usable beats during the")
+                        print("!! whole baseline — likely a loose ECG electrode or a")
+                        print("!! noise-flooded ECG channel. Restore contact and click")
+                        print("!! Start Baseline again before going live.")
+                        print("!" * 60 + "\n")
 
                     mean_b, sigma_b = fusion.calculate_baseline_sigma(
                         proc.cleaned_baseline_buffers,
@@ -425,12 +433,12 @@ def run_pipeline():
                 # increase/decrease was emitted.
                 unity.send_state(state_label, s_t=s_t)
 
-                # Human-readable per-second LIVE line. Format mirrors the
-                # vret_server_v2 reference output so research / clinical
-                # review can compare runs across both pipelines easily.
-                # Tick counter on the acquisition module is at PIPELINE_RATE
-                # so modulo gives roughly 1 line per second.
-                if int(acq.tick_counter) % int(Config.PIPELINE_RATE) == 0:
+                # Human-readable LIVE line, gated on WALL CLOCK (not tick
+                # modulo) so the cadence matches UNITY_COMMAND_INTERVAL_SEC
+                # and you see exactly one log line per UDP throttle window.
+                _now = time.time()
+                if _now - last_live_log_at >= Config.UNITY_COMMAND_INTERVAL_SEC:
+                    last_live_log_at = _now
                     session.log_live_line(
                         f"[LIVE] "
                         f"EDA={smoothed_vector[0]:.3f}uS  "
