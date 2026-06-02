@@ -110,8 +110,8 @@ class Config:
     # diagnostic.csv: the forensic raw + smoothed + status trace.
     #                 Same default; crank up if debugging a transient
     #                 detector glitch that you need finer than 1 s on.
-    SAMPLES_CSV_RATE_HZ = 1.0
-    DIAGNOSTIC_CSV_RATE_HZ = 1.0
+    SAMPLES_CSV_RATE_HZ = 50
+    DIAGNOSTIC_CSV_RATE_HZ = 50
 
     # ============================================
     # PIPELINE MATH & BASELINE PARAMETERS

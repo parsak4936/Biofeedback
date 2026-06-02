@@ -1,27 +1,27 @@
 {
   "patient": {
-    "first_name": "Shayan",
-    "last_name": "FifthFile",
+    "first_name": "shayan",
+    "last_name": "filefifth",
     "patient_id": "123",
     "gender": "F",
     "session_date": "2026-06-02",
     "session_number": 1
   },
-  "session_folder": "Shayan_FifthFile_Session1_2026-06-02_F",
-  "session_timestamp": "20260602_221343",
+  "session_folder": "shayan_filefifth_Session1_2026-06-02_F",
+  "session_timestamp": "20260602_222420",
   "baseline": {
-    "captured_at": "2026-06-02 22:15:58",
+    "captured_at": "2026-06-02 22:26:27",
     "baseline_duration_sec": 120,
     "sample_rate_pipeline_hz": 50.0,
     "personal_baselines": {
-      "eda_uS": 3.8434809501994383,
-      "hr_bpm": 90.95639029343515,
-      "hrv_ms": 38.76566507964755
+      "eda_uS": 3.772201329260774,
+      "hr_bpm": 90.78314842612056,
+      "hrv_ms": 39.25896478492699
     },
-    "sigma_baseline": 0.6471596049133508,
+    "sigma_baseline": 0.6126406342224351,
     "thresholds": {
-      "mild": 0.8256748361835683,
-      "high": 1.5051924213425867
+      "mild": 0.7812542274305155,
+      "high": 1.4245268933640725
     },
     "hrv_metrics": {},
     "artifacts_removed": {
