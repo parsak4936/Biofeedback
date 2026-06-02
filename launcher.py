@@ -65,16 +65,46 @@ def launch_system():
 
     # Per-session folder. All outputs for this launch go inside it so the
     # data/ directory stays organised (one folder per session instead of 7
-    # flat files). The folder name is sortable both chronologically and by
-    # patient: `session_<YYYYMMDD>_<HHMMSS>_<patient_id>_s<n>`.
+    # flat files). Folder name is patient-first so sessions group naturally
+    # in a file browser sorted by name:
+    #     <first>_<last>_Session<n>_<YYYY-MM-DD>_<gender>
+    # e.g.  Alice_Rossi_Session1_2026-06-02_F
+    # If a folder with that exact name already exists (two runs of the same
+    # session number on the same day for the same patient — rare), we
+    # append the wall-clock time as a tiebreaker so nothing gets clobbered.
     project_root = os.path.dirname(os.path.abspath(__file__))
     data_dir = os.path.join(project_root, 'data')
     os.makedirs(data_dir, exist_ok=True)
 
     from datetime import datetime as _dt
     _session_ts = _dt.now().strftime("%Y%m%d_%H%M%S")
-    session_folder_name = (f"session_{_session_ts}_"
-                           f"{patient['patient_id']}_s{patient['session_number']}")
+
+    def _safe(s: str) -> str:
+        """Filesystem-safe version of `s`: keep alphanumerics + hyphen,
+        replace anything else with '_', collapse repeats, trim edges."""
+        out = ''.join(c if (c.isalnum() or c == '-') else '_' for c in str(s))
+        while '__' in out:
+            out = out.replace('__', '_')
+        return out.strip('_')
+
+    _fn = _safe(patient.get('first_name', 'X')) or 'X'
+    _ln = _safe(patient.get('last_name', ''))
+    _sn = patient.get('session_number', 1)
+    _date = _safe(patient.get('session_date', _dt.now().strftime('%Y-%m-%d')))
+    _gd = _safe(patient.get('gender', '')) or 'X'
+
+    # Build name. If last_name is empty, skip it cleanly (no double underscore).
+    _parts = [_fn]
+    if _ln:
+        _parts.append(_ln)
+    _parts.extend([f"Session{_sn}", _date, _gd])
+    session_folder_name = "_".join(_parts)
+
+    # Collision safety: same patient + same session number + same day = same
+    # folder name. Append HHMMSS only if needed.
+    _candidate = os.path.join(data_dir, session_folder_name)
+    if os.path.exists(_candidate):
+        session_folder_name = f"{session_folder_name}_{_session_ts.split('_')[1]}"
     session_folder = os.path.join(data_dir, session_folder_name)
     os.makedirs(session_folder, exist_ok=True)
 
@@ -100,6 +130,45 @@ def launch_system():
     print(f"[LAUNCHER] Patient: {patient_info}")
     print(f"[LAUNCHER] Session {patient['session_number']} on {patient['session_date']}")
     print(f"[LAUNCHER] Intake record: {os.path.basename(patient_json_path)}\n")
+
+    # ============================================
+    # PRE-FLIGHT CHECKS
+    # ============================================
+    # Fail loudly here, BEFORE spawning subprocesses, so a misconfiguration
+    # surfaces in the operator's terminal instead of crashing silently in
+    # the streamer subprocess (its error output gets drowned out by LSL
+    # initialisation chatter, and main.py then hangs forever in
+    # `resolve_stream("Biofeedback_Raw")` waiting for an outlet that will
+    # never appear).
+    sys.path.insert(0, src_dir)  # also lets us import config below
+    from config import Config
+
+    if Config.DATA_SOURCE in ('mock', 'mock2'):
+        mock_path = os.path.join(project_root, Config.MOCK_DATA_FILE)
+        if not os.path.isfile(mock_path):
+            print("=" * 70)
+            print("[LAUNCHER] CONFIGURATION ERROR — cannot start.")
+            print("=" * 70)
+            print(f"  Config.MOCK_DATA_FILE = {Config.MOCK_DATA_FILE!r}")
+            print(f"  Resolves to:           {mock_path}")
+            print(f"  This file does not exist.")
+            print()
+            print(f"  Available files in data/:")
+            data_files = sorted(
+                f for f in os.listdir(data_dir)
+                if os.path.isfile(os.path.join(data_dir, f))
+                and f.endswith('.txt')
+            )
+            if data_files:
+                for fn in data_files:
+                    print(f"    data/{fn}")
+            else:
+                print(f"    (no .txt recordings found in data/)")
+            print()
+            print(f"  Fix: edit src/config.py and set MOCK_DATA_FILE to one of")
+            print(f"  the paths above (with a leading 'data/' and the .txt extension).")
+            print("=" * 70)
+            return 1
 
     # src_dir is already on sys.path (set above for the intake import).
     config_file = os.path.join(src_dir, 'config.py')

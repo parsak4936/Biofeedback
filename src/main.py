@@ -474,18 +474,30 @@ def run_pipeline():
             )
 
             # ---- Phase F: CSV writes (samples.csv + diagnostic.csv) ----
-            # samples.csv is the canonical 50 Hz clinical record. During LIVE
-            # the row carries fusion outputs; during other states the deltas
-            # are 0 and the state stays at the default. diagnostic.csv carries
-            # the per-tick raw (from acquisition) + smoothed (from processing)
-            # pair plus the acquisition status code, written via session here
-            # so all files live in the session folder.
+            # samples.csv is the clinical record — only write during the
+            # phases where it carries meaningful clinical data:
+            #   BASELINE: the signal trace that produced the personal
+            #             averages and sigmas. Stress fields are 0 by
+            #             definition (math doesn't run yet).
+            #   LIVE:     full fusion outputs (deltas, S_t, state, score).
+            # In IDLE / BASELINE_DONE / STOPPED we don't write — those
+            # rows used to land with phase=STOPPED, state='unknown', and
+            # all stress fields = 0 until the operator answered the
+            # close-window prompt (~100 zero rows per session). Diagnostic
+            # writes continue in every phase so the forensic record is
+            # complete (decimated to DIAGNOSTIC_CSV_RATE_HZ in session_manager).
             if state == SessionState.LIVE:
                 session.log_sample(smoothed_vector[0], smoothed_vector[1], smoothed_vector[2],
                                    deltas['eda'], deltas['hr'], deltas['hrv'],
                                    s_inst, s_t, state_label, dashboard)
-            else:
-                session.log_sample(smoothed_vector[0], smoothed_vector[1], smoothed_vector[2])
+            elif state == SessionState.BASELINE:
+                # `state` column is "baseline" during the calibration phase
+                # (not the default "unknown"), so post-hoc tools and
+                # downstream consumers can shade / filter the baseline band
+                # by name. Stress fields stay zero — fusion isn't running yet.
+                session.log_sample(smoothed_vector[0], smoothed_vector[1], smoothed_vector[2],
+                                   state="baseline")
+            # else (IDLE / BASELINE_DONE / STOPPED): no samples.csv row.
 
             session.log_diagnostic_row(
                 status=acq.last_status,

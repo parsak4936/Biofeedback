@@ -45,12 +45,13 @@ class SignalProcessor:
     fusion layer to consume.
     """
     def __init__(self):
-        # EMA State (holds previous smoothed values: y_{t-1})
-        self.ema_state = {
-            'eda': None,
-            'hr': None,
-            'hrv': None
-        }
+        # No smoothing layer. Per the PDF (vret_server.py: "EDA is
+        # intentionally NOT smoothed"; HR and RMSSD are ZOH-held by the
+        # data source). The previous EMA-with-alpha=1.0 pass-through was
+        # removed in this commit — process_sample now forwards the input
+        # vector unchanged. Baseline buffers still accumulate raw values
+        # during BASELINE so personal_averages and the per-signal stats
+        # can be computed at the 120 s lock.
 
         # Baseline Buffers
         self.buffers = {
@@ -121,7 +122,6 @@ class SignalProcessor:
         Reset on the baseline panel — we want the next baseline_start to
         begin from a completely clean state, not pick up where we stopped.
         """
-        self.ema_state = {'eda': None, 'hr': None, 'hrv': None}
         # Recreate the baseline buffers (they get nulled out after the
         # first successful computation, so they may not be lists right now).
         self.buffers = {'eda': [], 'hr': [], 'hrv': []}
@@ -140,50 +140,53 @@ class SignalProcessor:
     def process_sample(self, raw_vector: list) -> tuple:
         """
         Main entry point for each 50Hz tick.
-        1. Smooths the raw vector.
-        2. Maintains the rolling RAW EDA window and recomputes phasic EDA
-           periodically.
-        3. Routes to baseline buffers if baseline is incomplete.
+
+        Per the PDF (vret_server.py): no smoothing on any of the three
+        signals. EDA is published raw and decomposed into phasic on a
+        rolling window; HR and RMSSD are already held by the data source
+        between recomputes (zero-order hold), so an EMA on top would
+        over-smooth them. The function just does the bookkeeping that
+        needs to happen at the tick rate:
+
+          1. Append the raw EDA sample to the rolling decomposition
+             window; trigger nk.eda_phasic every EDA_PHASIC_UPDATE_INTERVAL_SEC.
+          2. During BASELINE, accumulate raw samples into baseline buffers
+             so personal averages + per-signal stats can be computed at
+             the 120 s lock.
+          3. Return the same vector that came in, plus the baseline-done
+             flag. Caller treats the result as the "post-processing"
+             signal vector even though processing is a pass-through.
 
         Returns:
-            tuple: (smoothed_vector, is_baseline_complete)
+            tuple: (signal_vector, is_baseline_complete)
         """
         raw_eda, raw_hr, raw_hrv = raw_vector
 
-        # 1. Apply EMA Smoothing
-        smooth_eda = self._apply_ema('eda', raw_eda, Config.EMA_ALPHA_EDA)
-        smooth_hr = self._apply_ema('hr', raw_hr, Config.EMA_ALPHA_HR)
-        smooth_hrv = self._apply_ema('hrv', raw_hrv, Config.EMA_ALPHA_HRV)
+        # Pass-through. (Variable kept for the same name as the caller's
+        # `smoothed_vector` so downstream code reads naturally.)
+        signal_vector = [raw_eda, raw_hr, raw_hrv]
 
-        smoothed_vector = [smooth_eda, smooth_hr, smooth_hrv]
-
-        # 2. Phasic EDA pipeline (PDF §7 Cause 1). We append the RAW
-        # (un-smoothed) EDA value to the rolling window — nk.eda_phasic
-        # wants its own EDA, not our EMA-smoothed display version. The
-        # decomposition is expensive enough that we only recompute every
-        # EDA_PHASIC_UPDATE_INTERVAL_SEC seconds; the phasic value is
-        # held between recomputes (ZOH).
+        # 1. Phasic EDA pipeline (PDF §7 Cause 1). Append RAW EDA to the
+        # rolling window fed to nk.eda_phasic. Decomposition is expensive
+        # so we only recompute every EDA_PHASIC_UPDATE_INTERVAL_SEC; the
+        # current phasic value is held between recomputes (ZOH).
         self._raw_eda_window.append(float(raw_eda))
         self._tick_counter += 1
         if (self._tick_counter % self._phasic_update_interval_n == 0
                 and len(self._raw_eda_window) >= int(Config.PIPELINE_RATE) * 5):
             self._update_phasic_eda()
 
-        # 3. Handle Baseline Phase
-        # accumulate_baseline is controlled by the state machine in main.py;
-        # it's True only while state == BASELINE. baseline_complete still
-        # short-circuits so the 120 s lock fires once and only once.
+        # 2. Handle Baseline Phase. accumulate_baseline is True only while
+        # the state machine is in BASELINE; baseline_complete short-circuits
+        # so the 120 s lock fires exactly once.
         if self.accumulate_baseline and not self.baseline_complete:
-            self._buffer_sample(smoothed_vector)
-            # Capture the current phasic value per-tick so fusion can compute
-            # the phasic mean + sigma at baseline lock. Held value is fine
-            # for the ~25 ticks between decompositions; the values are then
-            # averaged by fusion anyway.
+            self._buffer_sample(signal_vector)
+            # Capture the current phasic value per-tick so fusion can derive
+            # phasic mean + sigma at lock. Held value is fine between the
+            # ~25 ticks separating decompositions.
             self.phasic_baseline_buffer.append(self.current_phasic_eda)
 
-        # Per-tick CSV write moved to main.py via session.log_diagnostic_row()
-        # — the combined diagnostic.csv now lives in the session folder.
-        return smoothed_vector, self.baseline_complete
+        return signal_vector, self.baseline_complete
 
     def _update_phasic_eda(self):
         """

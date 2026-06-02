@@ -61,20 +61,31 @@ matplotlib.rcParams.update({
 def find_sessions(data_dir: str):
     """
     Return all session folders in data_dir, newest first.
-    Each entry is the absolute path to a `session_*` folder containing
-    metadata.json and samples.csv. Legacy flat session_*.csv files (from
-    before the folder consolidation) are also returned for back-compat.
+
+    A "session folder" is identified structurally — by the presence of a
+    metadata.json file inside it — rather than by a name prefix. This way
+    the launcher can name folders however it wants (currently:
+    `<first>_<last>_Session<n>_<date>_<gender>`) without this code
+    needing to know the convention.
+
+    Legacy support: flat `session_*.csv` files from the pre-folder layout
+    are also returned. The legacy `session_<ts>_<patient>` folders (also
+    pre the patient-first rename) are picked up automatically by the
+    metadata.json check, so they remain reviewable.
     """
     if not os.path.isdir(data_dir):
         return []
     entries = []
     for name in os.listdir(data_dir):
         full = os.path.join(data_dir, name)
-        if name.startswith('session_') and os.path.isdir(full):
-            entries.append(full)
+        if os.path.isdir(full):
+            # Any folder containing metadata.json is a session folder,
+            # regardless of name format.
+            if os.path.exists(os.path.join(full, 'metadata.json')):
+                entries.append(full)
         elif name.startswith('session_') and name.endswith('.csv') and os.path.isfile(full):
-            # Legacy flat layout — still loadable but the baseline JSON sits
-            # elsewhere; resolve_csv_path() handles both shapes.
+            # Legacy flat layout — still loadable; resolve_csv_path()
+            # and load_baseline_json() handle the old shape.
             entries.append(full)
     entries.sort(key=os.path.getmtime, reverse=True)
     return entries
@@ -208,7 +219,15 @@ def summarize(df: pd.DataFrame, baseline_meta: dict = None) -> dict:
     live_df = df[df['phase'] == 'LIVE'] if 'phase' in df.columns else df
     state_counts = (live_df['state'].value_counts().to_dict()
                     if 'state' in live_df.columns else {})
-    pipeline_rate = 50.0  # Hz; matches Config.PIPELINE_RATE
+    # samples.csv now writes at SAMPLES_CSV_RATE_HZ (default 1 Hz), not
+    # at the 50 Hz pipeline rate. Divide row counts by the WRITE rate
+    # to recover seconds. Defaults to 1.0 so the math still works if
+    # Config is unavailable (e.g. running on a copied CSV elsewhere).
+    try:
+        from config import Config as _Cfg
+        pipeline_rate = float(_Cfg.SAMPLES_CSV_RATE_HZ)
+    except Exception:
+        pipeline_rate = 1.0
 
     def seconds(state):
         return state_counts.get(state, 0) / pipeline_rate
@@ -278,7 +297,21 @@ def render(df: pd.DataFrame, summary: dict, csv_path: str,
         fontsize=11, fontweight='bold', color='#ffffff'
     )
 
-    t = df.index.values / 50.0  # convert sample index to seconds
+    # X-axis = elapsed time in seconds.
+    # samples.csv now writes at Config.SAMPLES_CSV_RATE_HZ (default 1 Hz)
+    # with `sample_n` as the first column (1-indexed). One row per write
+    # interval, so seconds = sample_n / rate. If the column is missing
+    # (e.g. opening a legacy CSV that still had a timestamp), fall back
+    # to row index / nominal 50 Hz so old recordings still chart.
+    try:
+        from config import Config as _Cfg
+        _csv_rate = float(_Cfg.SAMPLES_CSV_RATE_HZ)
+    except Exception:
+        _csv_rate = 1.0
+    if 'sample_n' in df.columns:
+        t = df['sample_n'].values / max(_csv_rate, 1e-6)
+    else:
+        t = df.index.values / 50.0  # legacy fallback
 
     # --- S_t with state bands ---
     ax = axes[0]
@@ -288,7 +321,9 @@ def render(df: pd.DataFrame, summary: dict, csv_path: str,
     # as the live dashboard so a clinician's eye can move between the two
     # tools without re-learning the colour code.
     state_colors = {'calm': '#1f3a1f', 'stressed': '#3a3a1f',
-                    'ultra_stressed': '#3a1f1f', 'unknown': '#222222'}
+                    'ultra_stressed': '#3a1f1f',
+                    'baseline': '#1f2a3a',     # dim blue: calibration band
+                    'unknown': '#222222'}
     prev_state = None
     seg_start = 0
     for i, state in enumerate(df['state']):

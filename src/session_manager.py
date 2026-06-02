@@ -94,9 +94,14 @@ def _load_metadata_from_env() -> dict:
 class SessionManager:
     """Centralised session state + per-tick file writing."""
 
-    # samples.csv header — 21 columns. Unchanged from the pre-folder layout
-    # so anything that already reads the canonical 50 Hz record keeps working.
-    _SAMPLES_HEADER = ("timestamp,phase,"
+    # samples.csv header — first column is `sample_n` (a 1-indexed row
+    # counter), not a wall-clock timestamp. Each call to log_sample()
+    # increments an internal call counter; rows are written every
+    # `_samples_write_every_n` calls (50 calls at 50 Hz pipeline rate
+    # = one written row per second). The sample_n column gives a clean
+    # monotonic index for plotting / aligning across files without the
+    # visual clutter of timestamps.
+    _SAMPLES_HEADER = ("sample_n,phase,"
                        "patient_first_name,patient_last_name,patient_id,"
                        "gender,session_date,session_number,"
                        "eda,hr,hrv,"
@@ -104,13 +109,11 @@ class SessionManager:
                        "s_instant,s_t,state,dashboard_score,"
                        "artifacts_eda,artifacts_hr,artifacts_hrv\n")
 
-    # diagnostic.csv header — one row per tick, written by main.py via
-    # log_diagnostic_row(). Combines what used to be two separate files
-    # (acquisition_log + processing_log). Since the EMA is now α=1.0
-    # (pass-through, per the PDF — see config.py), `smooth_*` columns
-    # equal `raw_*` in normal runs; they're kept for forensic continuity
-    # if smoothing is ever re-enabled.
-    _DIAGNOSTIC_HEADER = ("timestamp,phase,status,"
+    # diagnostic.csv header — `tick_n` is a 1-indexed counter of rows
+    # actually written (not pipeline ticks; rows are decimated per
+    # Config.DIAGNOSTIC_CSV_RATE_HZ). Pipeline frequency itself is
+    # unchanged (50 Hz); only the disk-write rate is throttled.
+    _DIAGNOSTIC_HEADER = ("tick_n,phase,status,"
                           "raw_eda,raw_hr,raw_hrv,"
                           "smooth_eda,smooth_hr,smooth_hrv\n")
 
@@ -145,8 +148,26 @@ class SessionManager:
             self.session_start_datetime.strftime("%Y%m%d_%H%M%S"),
         )
 
-        # Counter for LIVE_RESTART file rotation (samples.csv → samples_002.csv).
-        self._live_run_counter = 1
+        # Counter-based decimation for log_sample() and log_diagnostic_row().
+        # We write one row every Nth call where
+        #     N = PIPELINE_RATE / target_rate.
+        # At 50 Hz pipeline / 1 Hz target → write every 50 calls → ~1 row/sec.
+        # Pipeline frequency is unchanged; only the disk write is throttled.
+        #
+        # Two counters per file:
+        #   _<file>_call_count : every call to log_*() increments this.
+        #     Used for the modulo gate (skip if not at the threshold).
+        #   _<file>_row_n      : increments only when a row is actually
+        #     written. Goes into the sample_n / tick_n column for a clean
+        #     monotonic index in the file.
+        self._samples_write_every_n = max(
+            1, round(Config.PIPELINE_RATE / max(Config.SAMPLES_CSV_RATE_HZ, 1e-6)))
+        self._diagnostic_write_every_n = max(
+            1, round(Config.PIPELINE_RATE / max(Config.DIAGNOSTIC_CSV_RATE_HZ, 1e-6)))
+        self._samples_call_count = 0
+        self._diagnostic_call_count = 0
+        self._samples_row_n = 0
+        self._diagnostic_row_n = 0
 
         # Phase tracking, signal history, stress history — unchanged shape so
         # everything that reads these (dashboard summary, session_review)
@@ -234,36 +255,29 @@ class SessionManager:
 
     def rotate_session_csv(self):
         """
-        Called when the operator clicks Start Live a SECOND time after a
-        Stop. Inside the per-session folder we don't change folders — we
-        rotate samples.csv to samples_002.csv / samples_003.csv etc. so
-        each live run lands in a distinct file (diagnostic.csv keeps
-        accumulating across all runs in the same launch).
-        """
-        self._live_run_counter += 1
-        new_name = f"samples_{self._live_run_counter:03d}.csv"
-        self.samples_path = os.path.join(self.session_folder, new_name)
-        self.output_file_path = self.samples_path
-        self._open_samples(write_header=True)
-        # Reset stress history so print_session_summary reflects only the
-        # session that is about to begin.
-        self.stress_history = {
-            's_instant': [], 's_t': [], 'state': [], 'dashboard_score': [],
-        }
-        print(f"[SESSION] Rotated samples CSV: {new_name}")
+        Called when the operator clicks Start Live a second time after a
+        Stop. Per user policy: DELETE the previous live run's samples
+        and start fresh. We truncate samples.csv (rewrite the header),
+        clear in-memory stress history, and reset the decimation counter
+        + sample_n counter so the new run starts at sample_n=1.
 
-    def flush_live_data(self):
-        """
-        Drop in-memory live-phase stress history and rewrite samples.csv
-        from scratch with only its header. Called on LIVE_RESTART so the
-        operator's next live run isn't contaminated by the previous one.
-        Baseline (in metadata.json) is left untouched.
+        Diagnostic.csv (the forensic raw-signal trace) is NOT truncated
+        — it accumulates across the whole launch for post-hoc debugging.
+        The baseline (in metadata.json) is untouched: it's still valid.
         """
         self.stress_history = {
             's_instant': [], 's_t': [], 'state': [], 'dashboard_score': [],
         }
         self._open_samples(write_header=True)
-        print("[SESSION] flush_live_data: stress history and samples CSV reset.")
+        # Reset both counters so the new run starts at sample_n=1 and the
+        # decimation gate fires on its first call.
+        self._samples_call_count = 0
+        self._samples_row_n = 0
+        print("[SESSION] Live restart: previous samples.csv discarded, "
+              "fresh recording starting.")
+
+    # Alias retained for any caller that still uses the old name.
+    flush_live_data = rotate_session_csv
 
     # ---------- per-tick writes ---------------------------------------------
 
@@ -271,13 +285,30 @@ class SessionManager:
                    delta_eda: float = 0.0, delta_hr: float = 0.0, delta_hrv: float = 0.0,
                    s_instant: float = None, s_t: float = None,
                    state: str = None, dashboard_score: float = None):
-        """Append one row to samples.csv (held handle, single fwrite)."""
+        """
+        Append one row to samples.csv (held handle, single fwrite).
+
+        Counter-based decimation: called every pipeline tick, but only
+        every `_samples_write_every_n`-th call actually writes a row.
+        At 50 Hz pipeline / 1 Hz target → one row per 50 calls →
+        ~1 row/sec on disk. The pipeline math, the LSL stream, and the
+        dashboard are unaffected — they all keep running at 50 Hz.
+
+        First column is `sample_n` (1-indexed row counter), not a
+        timestamp. Per user request: the CSV should be readable without
+        a noisy time column, and a counter is enough to align rows
+        across files and reason about elapsed time (sample_n / rate).
+        """
         if self._samples_handle is None:
             return
-        timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S.%f")[:-3]
+        self._samples_call_count += 1
+        if self._samples_call_count % self._samples_write_every_n != 0:
+            return  # decimated — skip this tick
+        self._samples_row_n += 1
+
         p = self.patient
         self._samples_handle.write(
-            f"{timestamp},{self.phase},"
+            f"{self._samples_row_n},{self.phase},"
             f"{p['first_name']},{p['last_name']},{p['patient_id']},"
             f"{p['gender']},{p['session_date']},{p['session_number']},"
             f"{eda:.4f},{hr:.4f},{hrv:.4f},"
@@ -296,10 +327,14 @@ class SessionManager:
                             smooth_eda: float, smooth_hr: float, smooth_hrv: float):
         """
         Append one row to diagnostic.csv. Called by main.py once per tick
-        with both the raw (from acquisition) and smoothed (from processing)
-        values + the acquisition status code (NEW_DATA / HOLD_LAST / etc.).
-        Replaces the per-module acquisition_log + processing_log files
-        from the old flat layout.
+        with the raw (from acquisition) and smoothed (from processing)
+        values plus the acquisition status code (NEW_DATA / HOLD_LAST /
+        etc.).
+
+        Counter-based decimation, identical scheme to log_sample. Pipeline
+        runs at 50 Hz; this file writes ~1 row/sec on disk (configurable
+        via Config.DIAGNOSTIC_CSV_RATE_HZ). First column is `tick_n`,
+        a 1-indexed counter of rows written.
 
         NaN-friendly: any of the float args can be NaN (HR/HRV warm-up
         sentinels per PDF §3). We write "nan" — pandas / Excel both
@@ -307,7 +342,10 @@ class SessionManager:
         """
         if self._diagnostic_handle is None:
             return
-        timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S.%f")[:-3]
+        self._diagnostic_call_count += 1
+        if self._diagnostic_call_count % self._diagnostic_write_every_n != 0:
+            return  # decimated — skip this tick
+        self._diagnostic_row_n += 1
 
         def _f(x):
             try:
@@ -316,7 +354,7 @@ class SessionManager:
                 return "nan"
 
         self._diagnostic_handle.write(
-            f"{timestamp},{self.phase},{status},"
+            f"{self._diagnostic_row_n},{self.phase},{status},"
             f"{_f(raw_eda)},{_f(raw_hr)},{_f(raw_hrv)},"
             f"{_f(smooth_eda)},{_f(smooth_hr)},{_f(smooth_hrv)}\n"
         )

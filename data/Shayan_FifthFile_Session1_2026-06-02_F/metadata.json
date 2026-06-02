@@ -1,35 +1,35 @@
 {
   "patient": {
-    "first_name": "parsa",
-    "last_name": "kazemi",
-    "patient_id": "2311",
+    "first_name": "Shayan",
+    "last_name": "FifthFile",
+    "patient_id": "123",
     "gender": "F",
     "session_date": "2026-06-02",
     "session_number": 1
   },
-  "session_folder": "session_20260602_143807_2311_s1",
-  "session_timestamp": "20260602_143807",
+  "session_folder": "Shayan_FifthFile_Session1_2026-06-02_F",
+  "session_timestamp": "20260602_221343",
   "baseline": {
-    "captured_at": "2026-06-02 14:40:16",
+    "captured_at": "2026-06-02 22:15:58",
     "baseline_duration_sec": 120,
     "sample_rate_pipeline_hz": 50.0,
     "personal_baselines": {
-      "eda_uS": 9.033963054380695,
-      "hr_bpm": 86.43897251981157,
-      "hrv_ms": 34.11844162580868
+      "eda_uS": 3.8434809501994383,
+      "hr_bpm": 90.95639029343515,
+      "hrv_ms": 38.76566507964755
     },
-    "sigma_baseline": 0.5902038553471751,
+    "sigma_baseline": 0.6471596049133508,
     "thresholds": {
-      "mild": 0.7616274774700054,
-      "high": 1.3813415255845394
+      "mild": 0.8256748361835683,
+      "high": 1.5051924213425867
     },
     "hrv_metrics": {},
     "artifacts_removed": {
-      "eda": 213,
+      "eda": 0,
       "hr": 0,
       "hrv": 0
     },
-    "source": "mock:data/paria_onmylaptop_opensignals_2026-05-25_15-13-39.txt",
+    "source": "mock:data/5_2026-05-29_14-52-05.txt",
     "pipeline_constants": {
       "ema_alpha_eda": 1.0,
       "ema_alpha_hr": 1.0,

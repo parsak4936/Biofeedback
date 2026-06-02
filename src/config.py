@@ -94,6 +94,26 @@ class Config:
     #  no per-signal seed defaults are needed.)
 
     # ============================================
+    # SESSION FILE OUTPUT RATES
+    # ============================================
+    # The LSL Biofeedback_State stream and the per-tick math run at
+    # PIPELINE_RATE (50 Hz). The CSV files we write to disk don't need
+    # to be that dense — physiology doesn't genuinely change faster
+    # than ~1 Hz (HR is per beat, RMSSD updates every 0.5 s, EDA tonic
+    # is seconds-scale, EDA phasic SCRs last 1-5 s, S_t is a 1-second
+    # rolling mean). 50 Hz writes produce 30 000 rows per 10-minute
+    # session for no clinical benefit. Both files decimate to the
+    # rates below by skipping per-tick writes when less than 1/rate
+    # wall-clock seconds have elapsed since the last write.
+    #
+    # samples.csv:    the clinical record. 1 Hz is plenty.
+    # diagnostic.csv: the forensic raw + smoothed + status trace.
+    #                 Same default; crank up if debugging a transient
+    #                 detector glitch that you need finer than 1 s on.
+    SAMPLES_CSV_RATE_HZ = 1.0
+    DIAGNOSTIC_CSV_RATE_HZ = 1.0
+
+    # ============================================
     # PIPELINE MATH & BASELINE PARAMETERS
     # ============================================
     # EMA smoothing — DISABLED per PDF.
@@ -348,8 +368,9 @@ class Config:
     # ============================================
     # MockDataSource auto-detects sampling rate AND channel order (ECG vs EDA)
     # from the OpenSignals header JSON — switch files freely, no other edits.
-    MOCK_DATA_FILE = "data/paria_onmylaptop_opensignals_2026-05-25_15-13-39.txt"  # 1000Hz, 14min, EDA=col2/ECG=col3
-
+    MOCK_DATA_FILE = "data/5_2026-05-29_14-52-05.txt"  # 1000Hz, 6.1min, ECG=col2/EDA=col3
+  # MOCK_DATA_FILE = "data/opensignals_2026-05-25_14-57-56.txt"            # 200Hz, 8.7min, ECG=col2/EDA=col3
+    # MOCK_DATA_FILE = "data/fake_opensignals_2026-05-13_15-24-44.txt"       # 1000Hz, 42s, EDA=col2/ECG=col3
     # When False (default), MockDataSource stops publishing once the file is
     # exhausted — the acquisition deadman fires after STREAM_TIMEOUT_SEC and
     # the session ends cleanly with whatever was captured. Matches what a
@@ -358,5 +379,4 @@ class Config:
     # discontinuously at every wrap-around (the file's end and beginning
     # don't connect physiologically).
     MOCK_LOOP = False
-    # MOCK_DATA_FILE = "data/opensignals_2026-05-25_14-57-56.txt"            # 200Hz, 8.7min, ECG=col2/EDA=col3
-    # MOCK_DATA_FILE = "data/fake_opensignals_2026-05-13_15-24-44.txt"       # 1000Hz, 42s, EDA=col2/ECG=col3
+  
