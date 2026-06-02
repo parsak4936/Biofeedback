@@ -63,17 +63,36 @@ def launch_system():
         print("[LAUNCHER] Intake cancelled by operator. Nothing to do.")
         return 0
 
-    # Persist the collected info to a sidecar JSON in data/, and pass the path
-    # to the subprocesses via env var so every component sees the same record.
+    # Per-session folder. All outputs for this launch go inside it so the
+    # data/ directory stays organised (one folder per session instead of 7
+    # flat files). The folder name is sortable both chronologically and by
+    # patient: `session_<YYYYMMDD>_<HHMMSS>_<patient_id>_s<n>`.
     project_root = os.path.dirname(os.path.abspath(__file__))
     data_dir = os.path.join(project_root, 'data')
     os.makedirs(data_dir, exist_ok=True)
-    patient_json_path = os.path.join(
-        data_dir,
-        f"patient_{patient['patient_id']}_{patient['session_date']}_s{patient['session_number']}.json"
-    )
-    with open(patient_json_path, 'w', encoding='utf-8') as f:
-        json.dump(patient, f, indent=2)
+
+    from datetime import datetime as _dt
+    _session_ts = _dt.now().strftime("%Y%m%d_%H%M%S")
+    session_folder_name = (f"session_{_session_ts}_"
+                           f"{patient['patient_id']}_s{patient['session_number']}")
+    session_folder = os.path.join(data_dir, session_folder_name)
+    os.makedirs(session_folder, exist_ok=True)
+
+    # metadata.json combines what used to be patient_*.json + baseline_*.json
+    # in the old flat layout. We write the intake portion now; session_manager
+    # appends the frozen-baseline portion at the 120 s lock.
+    metadata_path = os.path.join(session_folder, 'metadata.json')
+    metadata = {
+        'patient': patient,
+        'session_folder': session_folder_name,
+        'session_timestamp': _session_ts,
+        'baseline': None,  # filled in by session_manager.write_baseline_capture()
+    }
+    with open(metadata_path, 'w', encoding='utf-8') as f:
+        json.dump(metadata, f, indent=2)
+    # Keep this name for backwards compat with anything reading the env var;
+    # it now points at the in-folder metadata.json instead of a flat file.
+    patient_json_path = metadata_path
 
     patient_name = patient['first_name']
     patient_id = patient['patient_id']
@@ -128,10 +147,12 @@ def launch_system():
         print("[LAUNCHER]     The pipeline will wait for you to click")
         print("[LAUNCHER]     'Start Baseline' on the dashboard.\n")
         
-        # Pass patient info to subprocesses. The PATIENT_INTAKE_JSON path is
-        # the canonical source (full record); the legacy NAME/ID env vars are
-        # kept for backwards compatibility with anything that still reads them.
+        # Pass patient info to subprocesses. SESSION_FOLDER is the canonical
+        # path every subprocess writes inside. The PATIENT_INTAKE_JSON path
+        # is kept for backwards compat (now points at metadata.json inside
+        # the session folder); the legacy NAME/ID env vars are also kept.
         env = os.environ.copy()
+        env['SESSION_FOLDER'] = session_folder
         env['PATIENT_INTAKE_JSON'] = patient_json_path
         env['PATIENT_NAME'] = patient_name
         env['PATIENT_ID'] = patient_id

@@ -96,10 +96,19 @@ class Config:
     # ============================================
     # PIPELINE MATH & BASELINE PARAMETERS
     # ============================================
-    # EMA smoothing per math-pipeline Step 1. Lower alpha = stronger smoothing.
-    EMA_ALPHA_EDA = 0.05
-    EMA_ALPHA_HR = 0.10
-    EMA_ALPHA_HRV = 0.05
+    # EMA smoothing — DISABLED per PDF.
+    # Per vret_server.py: "EDA is intentionally NOT smoothed. It is an
+    # inherently slow signal, and its real processing is the phasic
+    # decomposition (compute_phasic_eda) used by the score. A display-only
+    # EMA was previously applied but contributed nothing to S_t and was
+    # visually indistinguishable from raw, so it has been removed. Raw EDA
+    # is shown directly."
+    # HR and RMSSD are likewise emitted as recompute-and-hold (ZOH between
+    # 0.5 s recomputes), so an EMA on top would over-smooth them. Setting
+    # alpha = 1.0 makes the EMA layer a pass-through (output = input).
+    EMA_ALPHA_EDA = 1.0     # pass-through (no smoothing — PDF)
+    EMA_ALPHA_HR = 1.0      # pass-through (already ZOH-held by data source)
+    EMA_ALPHA_HRV = 1.0     # pass-through (already ZOH-held by data source)
 
     BASELINE_SEC = 120  # math-pipeline Step 2
 
@@ -142,6 +151,52 @@ class Config:
     # z-score Inf. Surfaces as a much smaller (but finite) z, instead of
     # poisoning the whole live phase.
     SIGMA_FLOOR = 1e-6
+
+    # ============================================
+    # PER-SIGNAL PHYSIOLOGICAL SIGMA FLOORS (vret_server.py guardrail)
+    # ============================================
+    # The z-score divides a live deviation by the signal's baseline spread
+    # (sigma). If a short or unusually flat baseline yields an implausibly
+    # tiny sigma, a trivial live change becomes a huge z-score and the
+    # score false-alarms (a 1% HR wobble was reading "ultra-stressed"
+    # before these floors were added). These floors refuse to believe a
+    # resting signal varies less than its real physiological minimum, so
+    # they only bite on broken / flukey baselines and leave normal ones
+    # untouched. Tune these once more real recordings are available.
+    HR_SIGMA_FLOOR_PCT = 2.0      # resting HR spread is realistically ≥ ~2%
+    HRV_SIGMA_FLOOR_PCT = 5.0     # resting RMSSD deviation spread ≥ ~5%
+    EDA_PHASIC_SIGMA_FLOOR = 0.02 # phasic-EDA spread floor in µS
+
+    # Physiological ceiling for an instantaneous phasic-EDA value (µS).
+    # Real phasic skin-conductance responses are tenths of a µS; even a
+    # large startle SCR rarely exceeds ~1 µS. Larger magnitudes are filter
+    # ringing from a resampler edge artifact in the phasic decomposition
+    # (the resampler intermittently appends a spurious ~0 final sample;
+    # nk's zero-phase filter then rings backward across the tail, reaching
+    # 4-15 µS in rare ticks). We do NOT try to repair the decomposition
+    # (heuristic repair risks misfiring on real data); we simply reject an
+    # implausible reading so a known-garbage value never reaches the score.
+    EDA_PHASIC_MAX_US = 1.0
+
+    # ============================================
+    # RR-INTERVAL ARTIFACT GATE (vret_server.py Malik 20% rule)
+    # ============================================
+    # NeuroKit's Kubios correction (correct_artifacts=True) runs first and
+    # RECONSTRUCTS missed beats by interpolation — which keeps the heart-rate
+    # trace smooth but leaves interpolated intervals in the series, and those
+    # still inflate a time-domain RMSSD. For RMSSD specifically we therefore
+    # additionally apply the Malik / Task Force (1996) rule below: reject a
+    # beat whose RR change relative to the previous RR exceeds the threshold.
+    # A relative rule is sounder than an absolute-ms one because the
+    # tolerable beat-to-beat change scales with heart rate.
+    #
+    # Reference: Malik M. et al. / Task Force of ESC and NASPE (1996), Heart
+    # rate variability: standards of measurement. Eur Heart J 17(3):354-381.
+    # Applied identically to baseline and live RMSSD so the two are measured
+    # the same way.
+    RR_MIN_MS = 300                    # 200 BPM ceiling
+    RR_MAX_MS = 1500                   # 40 BPM floor
+    RR_MAX_RELATIVE_CHANGE = 0.20      # Malik 20% rule
 
     # ============================================
     # SAMPLE VALIDATION (physiological sanity bounds)

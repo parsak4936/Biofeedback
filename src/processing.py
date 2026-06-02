@@ -21,9 +21,6 @@ import math
 import numpy as np
 import warnings
 from config import Config
-import csv
-import datetime
-import os
 
 # NeuroKit2 is the reference library for EDA decomposition (PDF §7 Cause 1).
 # Falls back to a no-op if unavailable so the rest of the pipeline keeps
@@ -104,50 +101,12 @@ class SignalProcessor:
         self.phasic_baseline_buffer = []
         self.cleaned_phasic_buffer = None
 
-        self.log_path = None
-        self.log_file = None
-        self.csv_writer = None
-        self._open_log()
-
-    def _open_log(self):
-        """(Re-)open the processing audit log with a fresh timestamp."""
-        current_dir = os.path.dirname(os.path.abspath(__file__))
-        project_root = os.path.dirname(current_dir)
-        data_dir = os.path.join(project_root, 'data')
-        session_time = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
-        filename = f'processing_log_{session_time}.csv'
-        os.makedirs(data_dir, exist_ok=True)
-
-        self.log_path = os.path.join(data_dir, filename)
-        self.log_file = open(self.log_path, mode='w', newline='')
-        self.csv_writer = csv.writer(self.log_file)
-        self.csv_writer.writerow(['timestamp', 'phase', 'smooth_eda', 'smooth_hr', 'smooth_hrv'])
-
-    def discard_log(self, final: bool = False):
-        """Close and delete the current processing log.
-
-        Default (final=False): immediately open a fresh log so the next
-        baseline attempt has somewhere to write — used on Stop-during-
-        baseline so the next Start finds a clean slate.
-
-        final=True: do NOT re-open. Used by the shutdown path; otherwise
-        we'd recreate the very file the operator just asked to discard."""
-        path = self.log_path
-        try:
-            if self.log_file is not None:
-                self.log_file.flush()
-                self.log_file.close()
-                self.log_file = None
-        except Exception:
-            pass
-        try:
-            if path and os.path.exists(path):
-                os.remove(path)
-                print(f"[PROCESSOR] Discarded partial log: {os.path.basename(path)}")
-        except OSError as e:
-            print(f"[PROCESSOR] WARN: could not delete log {path}: {e}")
-        if not final:
-            self._open_log()
+        # The per-tick processing_log_*.csv that used to live here was
+        # merged with the per-tick acquisition_log_*.csv into a single
+        # diagnostic.csv inside the session folder. main.py now writes
+        # the combined row via session.log_diagnostic_row() and uses
+        # session.discard_diagnostic_log() for the partial-baseline
+        # discard path. SignalProcessor no longer owns a file handle.
 
     def set_phase(self, phase: str):
         """Set the label written to the processing audit log (IDLE / BASELINE /
@@ -222,15 +181,8 @@ class SignalProcessor:
             # averaged by fusion anyway.
             self.phasic_baseline_buffer.append(self.current_phasic_eda)
 
-        # Write to audit log every tick regardless of state, with the actual
-        # session phase set by main.py via set_phase(). The pre-fix label was
-        # derived from baseline_complete and showed "BASELINE" during IDLE +
-        # "LIVE" during BASELINE_DONE/STOPPED, which confused post-hoc review.
-        current_time = datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S.%f')[:-3]
-        self.csv_writer.writerow([
-            current_time, self.current_phase,
-            round(smooth_eda, 4), round(smooth_hr, 4), round(smooth_hrv, 4)
-        ])
+        # Per-tick CSV write moved to main.py via session.log_diagnostic_row()
+        # — the combined diagnostic.csv now lives in the session folder.
         return smoothed_vector, self.baseline_complete
 
     def _update_phasic_eda(self):
@@ -239,10 +191,18 @@ class SignalProcessor:
         most recent phasic value. Updated at EDA_PHASIC_UPDATE_INTERVAL_SEC
         cadence; held between updates.
 
-        Mirrors compute_phasic_eda() in vret_server_v2.py: resample to
-        EDA_DECOMP_RATE_HZ, clean, run nk.eda_phasic, take the last
-        EDA_Phasic sample. Returns silently on failure (the last good value
-        is held).
+        Mirrors compute_phasic_eda() in vret_server.py:
+          1. Resample to EDA_DECOMP_RATE_HZ (10 Hz; plenty for SCRs).
+          2. nk.eda_clean.
+          3. nk.eda_phasic; take the LAST EDA_Phasic sample.
+          4. Plausibility ceiling: real phasic SCRs are tenths of a µS;
+             |phasic| > EDA_PHASIC_MAX_US is filter ringing from a
+             resampler edge artifact, not arousal. Reject (set to 0.0)
+             so the garbage never reaches the score. This caps the blast
+             radius of a rare (~0.5% of ticks) decomposition glitch.
+
+        Returns silently on Exception (the last good value is held — better
+        than synthesising a zero on a transient failure).
         """
         if not _NEUROKIT_AVAILABLE:
             return
@@ -259,8 +219,24 @@ class SignalProcessor:
                 phasic = nk.eda_phasic(
                     ds, sampling_rate=Config.EDA_DECOMP_RATE_HZ,
                 )["EDA_Phasic"].values
-            if phasic.size > 0:
-                self.current_phasic_eda = float(phasic[-1])
+            if phasic.size == 0:
+                return
+            val = float(phasic[-1])
+            # Plausibility ceiling (vret_server.py): reject filter-ringing
+            # artifacts from the resampler edge. Real SCRs stay well below 1 µS.
+            if not math.isfinite(val) or abs(val) > Config.EDA_PHASIC_MAX_US:
+                # Don't update — hold the last good value (or 0.0 initial).
+                # Optionally surface it for visibility; throttle to avoid
+                # spamming during a sustained artifact window.
+                self._phasic_reject_count = getattr(self, '_phasic_reject_count', 0) + 1
+                if self._phasic_reject_count == 1 or self._phasic_reject_count % 20 == 0:
+                    print(f"[PROCESSOR] EDA-CLAMP: implausible phasic "
+                          f"{val:+.2f} µS rejected "
+                          f"(> {Config.EDA_PHASIC_MAX_US} µS = decomposition "
+                          f"artifact, not a real SCR). Count: "
+                          f"{self._phasic_reject_count}.")
+                return
+            self.current_phasic_eda = val
         except Exception:
             # Decomposition failed on this window — quietly hold the last
             # good value rather than poisoning S_t with a synthetic zero.

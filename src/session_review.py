@@ -5,20 +5,30 @@ session_review.py
 Offline replay + summary for any past Biofeedback session.
 
 Usage:
-    python src/session_review.py            # interactive picker
-    python src/session_review.py <path>     # open a specific CSV
+    python src/session_review.py                       # interactive picker
+    python src/session_review.py <session-folder>      # open a specific folder
+    python src/session_review.py <path-to-samples.csv> # also accepts a CSV path
+
+File layout this expects (the post-folder consolidation layout):
+    data/
+    └── session_<YYYYMMDD>_<HHMMSS>_<patient_id>_s<n>/
+        ├── metadata.json   (intake + baseline)
+        ├── samples.csv     (the 50 Hz clinical record)
+        ├── unity_udp.csv
+        └── diagnostic.csv
 
 Behavior:
-    1. Lists every data/session_*.csv (newest first).
-    2. After you pick one (or pass a path), opens a matplotlib window with:
+    1. Lists every data/session_*/ folder (newest first).
+    2. After you pick one, opens a matplotlib window with:
          - S_t over time with threshold bands shaded (calm / stressed / ultra)
          - Smoothed EDA, HR, HRV alongside
          - Time-in-state summary panel
-         - Session metadata (patient, mode, duration, artifacts)
+         - Session metadata (patient, baseline values, thresholds, artifacts)
     3. Prints a one-line summary suitable for clinical notes.
 
-This is the "Monitoring and Analysis -> Data Logger" view from the framework
-diagram — a way to audit any past participant's session without re-running it.
+If a session folder has multiple samples_*.csv files (from LIVE_RESTART within
+one launch), the canonical samples.csv is opened. Pass a specific samples_NNN.csv
+path to review a particular re-run.
 """
 
 import glob
@@ -49,29 +59,72 @@ matplotlib.rcParams.update({
 
 
 def find_sessions(data_dir: str):
-    """Return all session CSVs in data_dir, newest first."""
+    """
+    Return all session folders in data_dir, newest first.
+    Each entry is the absolute path to a `session_*` folder containing
+    metadata.json and samples.csv. Legacy flat session_*.csv files (from
+    before the folder consolidation) are also returned for back-compat.
+    """
     if not os.path.isdir(data_dir):
         return []
-    files = [
-        os.path.join(data_dir, f)
-        for f in os.listdir(data_dir)
-        if f.startswith('session_') and f.endswith('.csv')
-    ]
-    files.sort(key=os.path.getmtime, reverse=True)
-    return files
+    entries = []
+    for name in os.listdir(data_dir):
+        full = os.path.join(data_dir, name)
+        if name.startswith('session_') and os.path.isdir(full):
+            entries.append(full)
+        elif name.startswith('session_') and name.endswith('.csv') and os.path.isfile(full):
+            # Legacy flat layout — still loadable but the baseline JSON sits
+            # elsewhere; resolve_csv_path() handles both shapes.
+            entries.append(full)
+    entries.sort(key=os.path.getmtime, reverse=True)
+    return entries
+
+
+def resolve_csv_path(entry: str) -> str:
+    """
+    Given a session folder OR a CSV path, return the path to the
+    samples.csv inside the folder (or the CSV path itself if a CSV was
+    passed directly). For legacy flat session_*.csv files, the path
+    passes through unchanged.
+    """
+    if os.path.isdir(entry):
+        samples = os.path.join(entry, 'samples.csv')
+        if os.path.exists(samples):
+            return samples
+        # Fall back to the most recent samples_*.csv (LIVE_RESTART case).
+        candidates = sorted(
+            [f for f in os.listdir(entry)
+             if f.startswith('samples') and f.endswith('.csv')],
+            reverse=True,
+        )
+        if candidates:
+            return os.path.join(entry, candidates[0])
+        raise FileNotFoundError(f"No samples.csv in {entry}")
+    return entry  # already a CSV path (folder or legacy flat)
 
 
 def interactive_pick(sessions):
-    """Show numbered list, return the chosen path."""
+    """Show numbered list, return the chosen path (CSV inside a folder)."""
     if not sessions:
-        print("[REVIEW] No session_*.csv files found in data/.")
+        print("[REVIEW] No session folders found in data/.")
         sys.exit(1)
     print("\nAvailable sessions (newest first):\n")
-    for idx, path in enumerate(sessions, 1):
-        mtime = datetime.fromtimestamp(os.path.getmtime(path))
-        size_kb = os.path.getsize(path) / 1024
-        print(f"  [{idx:2d}] {os.path.basename(path):50s}  "
-              f"{mtime:%Y-%m-%d %H:%M}  {size_kb:>7.1f} KB")
+    for idx, entry in enumerate(sessions, 1):
+        mtime = datetime.fromtimestamp(os.path.getmtime(entry))
+        if os.path.isdir(entry):
+            kind = 'folder'
+            try:
+                size_kb = sum(
+                    os.path.getsize(os.path.join(entry, f))
+                    for f in os.listdir(entry)
+                ) / 1024
+            except OSError:
+                size_kb = 0.0
+        else:
+            kind = 'flat'
+            size_kb = os.path.getsize(entry) / 1024
+        print(f"  [{idx:2d}] {os.path.basename(entry):50s}  "
+              f"{mtime:%Y-%m-%d %H:%M}  {size_kb:>7.1f} KB  ({kind})")
     print()
     while True:
         choice = input(f"Pick a session [1-{len(sessions)}] (or q to quit): ").strip()
@@ -80,7 +133,7 @@ def interactive_pick(sessions):
         try:
             i = int(choice)
             if 1 <= i <= len(sessions):
-                return sessions[i - 1]
+                return resolve_csv_path(sessions[i - 1])
         except ValueError:
             pass
         print(f"  Invalid input. Enter a number 1-{len(sessions)}.")
@@ -97,11 +150,36 @@ def _safe(col, default=None):
 
 
 def load_baseline_json(csv_path: str):
-    """Find the baseline_*.json that matches this session CSV's timestamp
-    + patient id, if one exists in the same data/ folder. The CSV filename
-    looks like  session_<ts>_<first>_<id>.csv  and the baseline JSON looks
-    like  baseline_<ts>_<id>.json  — same timestamp, same id. Returns the
-    parsed dict, or None if no match found."""
+    """
+    Load the baseline portion of a session.
+
+    New folder layout: the CSV lives at  data/session_<...>/samples.csv ;
+    the baseline lives inside  data/session_<...>/metadata.json  under the
+    "baseline" key.
+
+    Legacy flat layout: the CSV lives at  data/session_<ts>_<...>.csv  and
+    the baseline lives at  data/baseline_<ts>_<id>.json — still supported
+    here for back-compat with old recordings.
+
+    Returns a dict in the same shape the rest of session_review.py expects
+    (personal_baselines, thresholds, sigma_baseline, source, etc.), or
+    None if no baseline data is available.
+    """
+    folder = os.path.dirname(csv_path)
+    # ---- New folder layout: metadata.json inside the session folder ----
+    metadata_path = os.path.join(folder, 'metadata.json')
+    if os.path.exists(metadata_path):
+        try:
+            with open(metadata_path, 'r', encoding='utf-8') as f:
+                meta = json.load(f)
+            baseline = meta.get('baseline')
+            if baseline:
+                # Already in the same shape the renderer expects.
+                return baseline
+        except Exception:
+            pass
+
+    # ---- Legacy flat layout: baseline_<ts>_<id>.json in data/ ----
     base = os.path.basename(csv_path)
     if not base.startswith('session_'):
         return None
@@ -110,8 +188,7 @@ def load_baseline_json(csv_path: str):
         return None
     ts = '_'.join(parts[:2])      # 'YYYYMMDD_HHMMSS'
     pid = parts[-1]               # last token is patient id
-    pattern = os.path.join(os.path.dirname(csv_path),
-                           f"baseline_{ts}_{pid}.json")
+    pattern = os.path.join(folder, f"baseline_{ts}_{pid}.json")
     matches = glob.glob(pattern)
     if not matches:
         return None
@@ -339,7 +416,8 @@ def cli_summary_line(summary: dict, csv_path: str):
 def main():
     parser = argparse.ArgumentParser(description="Replay a past Biofeedback session.")
     parser.add_argument('csv', nargs='?',
-                        help="Path to session_*.csv (omit for picker).")
+                        help="Path to a session folder OR a samples.csv "
+                             "(omit for the interactive picker).")
     parser.add_argument('--no-window', action='store_true',
                         help="Print summary only; skip the matplotlib window.")
     parser.add_argument('--save',
@@ -348,9 +426,15 @@ def main():
     args = parser.parse_args()
 
     if args.csv:
-        path = args.csv
-        if not os.path.isfile(path):
-            print(f"[REVIEW] File not found: {path}")
+        entry = args.csv
+        if not os.path.exists(entry):
+            print(f"[REVIEW] Path not found: {entry}")
+            sys.exit(1)
+        # Accept either a folder or a CSV path — resolve_csv_path normalises.
+        try:
+            path = resolve_csv_path(entry)
+        except FileNotFoundError as e:
+            print(f"[REVIEW] {e}")
             sys.exit(1)
     else:
         here = os.path.dirname(os.path.abspath(__file__))

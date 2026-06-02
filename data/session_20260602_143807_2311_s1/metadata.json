@@ -1,0 +1,53 @@
+{
+  "patient": {
+    "first_name": "parsa",
+    "last_name": "kazemi",
+    "patient_id": "2311",
+    "gender": "F",
+    "session_date": "2026-06-02",
+    "session_number": 1
+  },
+  "session_folder": "session_20260602_143807_2311_s1",
+  "session_timestamp": "20260602_143807",
+  "baseline": {
+    "captured_at": "2026-06-02 14:40:16",
+    "baseline_duration_sec": 120,
+    "sample_rate_pipeline_hz": 50.0,
+    "personal_baselines": {
+      "eda_uS": 9.033963054380695,
+      "hr_bpm": 86.43897251981157,
+      "hrv_ms": 34.11844162580868
+    },
+    "sigma_baseline": 0.5902038553471751,
+    "thresholds": {
+      "mild": 0.7616274774700054,
+      "high": 1.3813415255845394
+    },
+    "hrv_metrics": {},
+    "artifacts_removed": {
+      "eda": 213,
+      "hr": 0,
+      "hrv": 0
+    },
+    "source": "mock:data/paria_onmylaptop_opensignals_2026-05-25_15-13-39.txt",
+    "pipeline_constants": {
+      "ema_alpha_eda": 1.0,
+      "ema_alpha_hr": 1.0,
+      "ema_alpha_hrv": 1.0,
+      "artifact_sigma_multiplier": 3.0,
+      "weight_eda": 0.5,
+      "weight_hrv": 0.3,
+      "weight_hr": 0.2,
+      "thresh_mild_k": 1.28,
+      "thresh_high_k": 2.33,
+      "rmssd_window_sec": 60,
+      "hr_window_sec": 30,
+      "hr_compute_interval_sec": 0.5,
+      "rr_max_relative_change": 0.2,
+      "hr_sigma_floor_pct": 2.0,
+      "hrv_sigma_floor_pct": 5.0,
+      "eda_phasic_sigma_floor": 0.02,
+      "eda_phasic_max_us": 1.0
+    }
+  }
+}

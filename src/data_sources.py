@@ -251,6 +251,52 @@ def _read_lsl_channel_labels(inlet, timeout_sec=2.0):
 
 
 # =============================================================================
+# Malik / Task Force (1996) RR-interval artifact gate
+# =============================================================================
+# NeuroKit's Kubios artifact correction (correct_artifacts=True) reconstructs
+# missed beats by interpolation — but does NOT remove interpolated intervals,
+# so a few bad beats still inflate a time-domain RMSSD. The Malik / Task
+# Force 1996 rule is the standard add-on: reject any beat whose RR change
+# RELATIVE to the previous RR exceeds RR_MAX_RELATIVE_CHANGE (20%). Relative
+# because the tolerable beat-to-beat change scales with heart rate.
+#
+# Applied identically to baseline and live RMSSD so they are measured the
+# same way. Mirrors `gated_rmssd_from_peaks` in vret_server.py.
+
+def _gated_rmssd_from_peaks(peak_indices, fs_hz):
+    """
+    RMSSD (ms) from R-peak sample indices with Malik 20% RR gate.
+
+    Steps:
+      1. RR intervals (ms) from consecutive peak indices.
+      2. Clip to physiologically plausible band [RR_MIN_MS, RR_MAX_MS].
+      3. Drop successive differences whose relative change > 20%.
+      4. RMSSD = sqrt(mean(surviving diffs^2)).
+      5. Reject result if outside [RMSSD_MIN_MS, RMSSD_MAX_MS]
+         (PDF §4 Bug 3 plausibility band).
+
+    Returns NaN if any gate fails. Returning NaN keeps the data source's
+    "warmup / not measurable" semantics consistent.
+    """
+    pk = np.asarray(peak_indices, dtype=np.int64)
+    if pk.size < 2:
+        return float('nan')
+    rr = np.diff(pk) * 1000.0 / fs_hz
+    rr = rr[(rr >= Config.RR_MIN_MS) & (rr <= Config.RR_MAX_MS)]
+    if rr.size < 2:
+        return float('nan')
+    rel_change = np.abs(np.diff(rr)) / rr[:-1]
+    diffs = np.diff(rr)[rel_change <= Config.RR_MAX_RELATIVE_CHANGE]
+    # Need MIN_PEAKS_HRV - 1 *clean* diffs for a meaningful estimate
+    if diffs.size < (Config.MIN_PEAKS_HRV - 1):
+        return float('nan')
+    r = float(np.sqrt(np.mean(diffs ** 2)))
+    if not (np.isfinite(r) and Config.RMSSD_MIN_MS <= r <= Config.RMSSD_MAX_MS):
+        return float('nan')
+    return r
+
+
+# =============================================================================
 # HR / RMSSD recompute (canonical NeuroKit2 chain — PDF §2)
 # =============================================================================
 # Both data sources call this on a trailing window of ECG samples (raw mV).
@@ -317,18 +363,17 @@ def _compute_hr_rmssd(ecg_window: np.ndarray, fs_hz: float,
         except Exception:
             pass
 
-    # ---- RMSSD via nk.hrv_time, but only when the 60 s window has filled ----
+    # ---- RMSSD via Malik-gated RR intervals (vret_server.py) ----
     # PDF §3: "There is simply no valid live RMSSD in the first minute".
     # Until the caller has a full RMSSD_WINDOW_SEC of ECG, RMSSD stays NaN.
+    # Once available, we measure RMSSD via _gated_rmssd_from_peaks — which
+    # applies the Malik 20% RR-change rule on top of Kubios's already-applied
+    # peak correction, so interpolated-beat artifacts don't inflate the
+    # estimate. Result is rejected (NaN) if outside the plausibility band.
     if have_full_hrv_window and n_peaks >= Config.MIN_PEAKS_HRV:
-        try:
-            r = float(nk.hrv_time(signals, sampling_rate=fs_hz)["HRV_RMSSD"].iloc[0])
-            # PDF §4 Bug 3 plausibility band — outside this band, the
-            # detector has failed; don't report it as a measurement.
-            if np.isfinite(r) and Config.RMSSD_MIN_MS <= r <= Config.RMSSD_MAX_MS:
-                rmssd = r
-        except Exception:
-            pass
+        rmssd_gated = _gated_rmssd_from_peaks(info["ECG_R_Peaks"], fs_hz)
+        if np.isfinite(rmssd_gated):
+            rmssd = rmssd_gated
 
     return hr, rmssd
 
@@ -678,23 +723,17 @@ def _pre_derive_hr_hrv(ecg_mv: np.ndarray, fs_hz: float):
                 pass
 
         # RMSSD over the trailing RMSSD_WINDOW_SEC — only valid once the
-        # full window has filled (PDF §3 warm-up).
+        # full window has filled (PDF §3 warm-up). Uses the Malik 20%
+        # RR-change gate (vret_server.py): Kubios correction has already
+        # repaired peak DETECTION, but Malik filters out interpolated /
+        # ectopic INTERVALS that would still inflate a time-domain RMSSD.
         if end >= hrv_window_n:
             hrv_lo = end - hrv_window_n
             hrv_peaks = all_peaks[(all_peaks >= hrv_lo) & (all_peaks < end)]
             if len(hrv_peaks) >= Config.MIN_PEAKS_HRV:
-                try:
-                    with warnings.catch_warnings():
-                        warnings.simplefilter('ignore')
-                        rmssd = float(nk.hrv_time(
-                            hrv_peaks, sampling_rate=fs_hz,
-                        )["HRV_RMSSD"].iloc[0])
-                    if (np.isfinite(rmssd)
-                            and Config.RMSSD_MIN_MS <= rmssd
-                            <= Config.RMSSD_MAX_MS):
-                        current_rmssd = rmssd
-                except Exception:
-                    pass
+                rmssd = _gated_rmssd_from_peaks(hrv_peaks, fs_hz)
+                if np.isfinite(rmssd):
+                    current_rmssd = rmssd
 
         # Fill the per-sample series for this step interval (ZOH).
         hr_series[last_end:end] = current_hr

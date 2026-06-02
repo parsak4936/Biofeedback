@@ -92,12 +92,10 @@ def run_pipeline():
     #      file index 0 the moment we're ready.
     fusion = FusionEngine()
     out = UnityBridge()
-    # Audit log lives alongside the session CSV so it's trivial to
-    # correlate UDP packets with the recorded stress trace.
-    _audit_dir = os.path.dirname(session.output_file_path)
-    _audit_name = (f"unity_udp_log_{session.session_timestamp}"
-                   f"_{session.patient_info}.csv")
-    unity = UnityUDPBridge(audit_log_path=os.path.join(_audit_dir, _audit_name))
+    # Audit log lives inside the session folder as unity_udp.csv so it's
+    # trivial to correlate UDP packets with the recorded stress trace
+    # and the diagnostic per-tick log.
+    unity = UnityUDPBridge(audit_log_path=session.unity_udp_path)
     control = ControlSubscriber()  # blocks until dashboard publishes
     acq = BiofeedbackAcquisition()
     proc = SignalProcessor()
@@ -164,11 +162,13 @@ def run_pipeline():
             live_started_at = None
             live_elapsed_frozen = 0.0
 
-        # Stop DURING baseline (before the 120 s lock): the diagnostic
-        # logs contain partial garbage. Discard them.
+        # Stop DURING baseline (before the 120 s lock): the diagnostic log
+        # contains partial garbage. Truncate-and-reopen so the next attempt
+        # starts clean. (Previously acquisition.py and processing.py each
+        # owned a CSV; both have been merged into diagnostic.csv inside the
+        # session folder, managed by SessionManager.)
         if new_state == SessionState.IDLE and old_state == SessionState.BASELINE:
-            proc.discard_log()
-            acq.discard_log()
+            session.discard_diagnostic_log()
 
         # ---- BASELINE on entry: zero everything that's baseline-scoped. ----
         if new_state == SessionState.BASELINE:
@@ -254,43 +254,41 @@ def run_pipeline():
     def _handle_shutdown(cmd):
         """Process an out-of-band SHUTDOWN_* command. Cleans up files
         according to the operator's choice from the dashboard close prompt,
-        then returns True so the main loop can exit."""
+        then returns True so the main loop can exit.
+
+        File layout reminder (new): everything for this session lives in
+        ONE folder under data/session_<ts>_<id>_s<n>/. The discard branches
+        now operate at the folder / metadata level rather than against
+        individual flat files.
+        """
         print(f"[STATE] shutdown requested: {cmd.name}")
         # Always tell Unity we're done if a live session was active.
         try:
             unity.send_raw("stop")
         except Exception:
             pass
-        # Close diagnostic-log file handles before deletion (Windows lock).
+        # Close the unity audit + close all session-managed handles so
+        # Windows allows folder/file deletion below.
         try:
-            if proc.log_file is not None:
-                proc.log_file.flush(); proc.log_file.close()
-        except Exception:
-            pass
-        try:
-            if acq.log_file is not None:
-                acq.log_file.flush(); acq.log_file.close()
+            unity.close()
         except Exception:
             pass
 
         if cmd == Command.SHUTDOWN_DISCARD_BOTH:
-            session.delete_baseline_json()
-            session.delete_session_csv()
-            session.delete_patient_json()
-            session.delete_live_log()
-            # final=True: don't reopen the log files we just deleted.
-            proc.discard_log(final=True)
-            acq.discard_log(final=True)
+            # Nuke the whole session folder. metadata, samples, diagnostic,
+            # unity_udp — all gone. The operator chose "no record of this".
+            session.discard_diagnostic_log(final=True)
+            session.delete_session_folder()
         elif cmd == Command.SHUTDOWN_DISCARD_LIVE:
-            # Keep baseline JSON, patient JSON, and diagnostic logs from
-            # the captured baseline. Only the per-tick session CSV and
-            # the live transcript (mostly live-phase) get removed.
+            # Keep metadata.json (intake + baseline). Drop the per-tick
+            # outputs that are mostly live-phase data.
             session.delete_session_csv()
-            session.delete_live_log()
+            session.delete_unity_audit_csv()
+            session.discard_diagnostic_log(final=True)
         elif cmd == Command.SHUTDOWN_SAVE_BOTH:
-            # Just close the live log handle so the file is flushed; no
-            # delete. The session CSV, baseline JSON, etc. stay.
-            session.close_live_log()
+            # Just close handles cleanly; nothing is deleted. The whole
+            # session folder stays with all its files.
+            session.close_all()
         return True
 
     try:
@@ -475,13 +473,27 @@ def run_pipeline():
                 unity_commands_sent=unity.commands_sent,
             )
 
-            # ---- Phase F: CSV row ----
+            # ---- Phase F: CSV writes (samples.csv + diagnostic.csv) ----
+            # samples.csv is the canonical 50 Hz clinical record. During LIVE
+            # the row carries fusion outputs; during other states the deltas
+            # are 0 and the state stays at the default. diagnostic.csv carries
+            # the per-tick raw (from acquisition) + smoothed (from processing)
+            # pair plus the acquisition status code, written via session here
+            # so all files live in the session folder.
             if state == SessionState.LIVE:
                 session.log_sample(smoothed_vector[0], smoothed_vector[1], smoothed_vector[2],
                                    deltas['eda'], deltas['hr'], deltas['hrv'],
                                    s_inst, s_t, state_label, dashboard)
             else:
                 session.log_sample(smoothed_vector[0], smoothed_vector[1], smoothed_vector[2])
+
+            session.log_diagnostic_row(
+                status=acq.last_status,
+                raw_eda=raw_vector[0], raw_hr=raw_vector[1], raw_hrv=raw_vector[2],
+                smooth_eda=smoothed_vector[0],
+                smooth_hr=smoothed_vector[1],
+                smooth_hrv=smoothed_vector[2],
+            )
 
             # ---- Phase G: pace ----
             tick_elapsed = time.time() - start_time

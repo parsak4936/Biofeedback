@@ -33,9 +33,6 @@ import math
 import time
 from pylsl import resolve_stream, StreamInlet
 from config import Config
-import csv
-import datetime
-import os
 
 
 def _is_valid_number(x: float) -> bool:
@@ -93,49 +90,15 @@ class BiofeedbackAcquisition:
             'hr':  collections.deque(maxlen=window_n),
             'hrv': collections.deque(maxlen=window_n),
         }
-        
-        # Diagnostic tracking
+
+        # Per-tick diagnostic logging used to live here (acquisition_log_*.csv).
+        # It was merged into SessionManager.log_diagnostic_row(): main.py now
+        # writes one combined row per tick into diagnostic.csv inside the
+        # session folder. We expose `last_status` so main.py can read it
+        # without us owning a file handle.
         self.tick_counter = 0
-        self.log_path = None
-        self.log_file = None
-        self.csv_writer = None
-        self._open_log()
+        self.last_status = "HOLD_LAST"  # latest NEW_DATA / HOLD_LAST / NAN_REJ / OOR_REJ
 
-    def _open_log(self):
-        """(Re-)open the acquisition audit log with a fresh timestamp."""
-        session_time = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
-        current_dir = os.path.dirname(os.path.abspath(__file__))
-        project_root = os.path.dirname(current_dir)
-        data_dir = os.path.join(project_root, 'data')
-        os.makedirs(data_dir, exist_ok=True)
-        filename = f'acquisition_log_{session_time}.csv'
-        self.log_path = os.path.join(data_dir, filename)
-        self.log_file = open(self.log_path, mode='w', newline='')
-        self.csv_writer = csv.writer(self.log_file)
-        self.csv_writer.writerow(['timestamp', 'status', 'raw_eda', 'raw_hr', 'raw_hrv'])
-
-    def discard_log(self, final: bool = False):
-        """Close and delete the current acquisition log.
-
-        final=False (default): reopen a fresh log for the next baseline.
-        final=True: skip the reopen. Used on shutdown so the discarded
-        file doesn't immediately come back as an empty one."""
-        path = self.log_path
-        try:
-            if self.log_file is not None:
-                self.log_file.flush()
-                self.log_file.close()
-                self.log_file = None
-        except Exception:
-            pass
-        try:
-            if path and os.path.exists(path):
-                os.remove(path)
-                print(f"[ACQUISITION] Discarded partial log: {os.path.basename(path)}")
-        except OSError as e:
-            print(f"[ACQUISITION] WARN: could not delete log {path}: {e}")
-        if not final:
-            self._open_log()
     def _connect_to_stream(self) -> StreamInlet:
         """
         Locates the target LSL stream on the local network and establishes an inlet.
@@ -285,12 +248,10 @@ class BiofeedbackAcquisition:
                   f"raw HRV: {hrv_str} ms")
 
         self.tick_counter += 1
-        # Write to audit log
-        current_time = datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S.%f')[:-3]
-        self.csv_writer.writerow([
-            current_time, status.strip(), 
-            round(self.latest_eda, 4), round(self.latest_hr, 4), round(self.latest_hrv, 4)
-        ])
+        # Per-tick diagnostic CSV write moved to main.py →
+        # session.log_diagnostic_row() so all per-tick files (samples.csv,
+        # diagnostic.csv, unity_udp.csv) live in the session folder.
+        self.last_status = status.strip()
         return [self.latest_eda, self.latest_hr, self.latest_hrv]
 
     def _check_disconnect(self):

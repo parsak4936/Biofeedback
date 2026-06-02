@@ -2,93 +2,124 @@
 """
 Per-session bookkeeping and output writing.
 
-One SessionManager instance per pipeline run. Responsibilities:
+All files for one session live inside ONE folder created by the launcher
+and passed via the SESSION_FOLDER environment variable:
 
-  - Reads the patient intake JSON written by the launcher (path comes
-    via the PATIENT_INTAKE_JSON env var) so every CSV row and the
-    baseline JSON include the full demographics: first/last name, ID,
-    gender, session date, session number.
+    data/session_<YYYYMMDD>_<HHMMSS>_<patient_id>_s<n>/
+        ├── metadata.json    (intake + frozen baseline merged)
+        ├── samples.csv      (50 Hz clinical record — main artifact)
+        ├── unity_udp.csv    (UDP audit log)
+        └── diagnostic.csv   (raw + smoothed signal trace, per tick)
 
-  - Writes data/session_<timestamp>_<patient_id>.csv, the clinical
-    record. Header is set at construction time; rows are appended per
-    tick by main.py via log_sample(). 21 columns covering patient info,
-    phase, signals, deltas, stress index, state, score, and artifact
-    counts. A held file handle is used so the per-tick CSV write is
-    cheap; opening + closing every tick was visibly slowing the loop.
-    Rotated to a new file on Start Live after a Stop, so each live run
-    lands in its own CSV.
+Responsibilities of SessionManager:
 
-  - Writes data/baseline_<timestamp>_<patient_id>.json once at the
-    moment the 120-second baseline finishes (via
-    write_baseline_capture()). Contains the personal averages,
-    sigma_baseline, the locked thresholds, the bonus HRV metrics, the
-    artifact counts, the source recording label, and a snapshot of
-    every pipeline constant in force, so a baseline can be reproduced
-    exactly later.
-
-  - Writes data/live_log_<timestamp>_<patient_id>.txt during LIVE: one
-    line per second with smoothed signals, deltas, S_t, and state. A
-    human-readable transcript convenient for terminal review and
-    pasting into clinical notes.
-
-  - Tracks per-session history (signal_history, stress_history) for
-    diagnostic / review use.
-
-  - Exposes delete_session_csv / delete_baseline_json /
-    delete_patient_json / delete_live_log helpers for the shutdown
-    path, which closes open handles before the unlink so Windows
-    allows it.
-
-There is some defensive overhead here (the get_current_state_summary
-method and a few duplicated method definitions from an earlier
-version) that the current state-machine architecture does not need,
-but it hurts nothing.
+  * Read the launcher-written metadata.json (intake portion) so every CSV
+    row carries the full patient demographics.
+  * Maintain samples.csv (the canonical 50 Hz record). Rotated to
+    samples_002.csv / samples_003.csv on each LIVE_RESTART so multiple live
+    runs against the same baseline land in distinct files inside the same
+    session folder.
+  * At baseline lock, APPEND the frozen baseline to metadata.json
+    (replacing the placeholder `"baseline": null` written by the launcher).
+  * Maintain diagnostic.csv: one row per tick, written from main.py via
+    log_diagnostic_row(). Acquisition + processing no longer write their
+    own diagnostic CSVs — they hand the values to main, main passes them
+    here. Single source of truth for per-tick diagnostic data.
+  * Track in-memory per-session history (signal_history, stress_history)
+    for the print_session_summary at LIVE → STOPPED.
+  * Provide cleanup helpers for the shutdown-discard paths.
 """
 
 import json
-import time
 import os
+import time
 from datetime import datetime
+
 from config import Config
 
 
-def _load_patient_from_env() -> dict:
+# ---------- module-level helpers --------------------------------------------
+
+def _session_folder_from_env() -> str:
     """
-    Read the intake JSON file written by the launcher. If the env var isn't
-    set (e.g. running a module directly without the launcher), return a
-    minimal dict so tests still work.
+    Return the per-session folder path the launcher created. Falls back to
+    a fresh folder under data/ when SESSION_FOLDER isn't set (e.g. tests
+    that import this module without running through the launcher).
     """
-    path = os.environ.get('PATIENT_INTAKE_JSON')
-    if path and os.path.exists(path):
+    sf = os.environ.get('SESSION_FOLDER')
+    if sf and os.path.isdir(sf):
+        return sf
+    # Fallback for standalone testing.
+    project_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    data_dir = os.path.join(project_root, 'data')
+    os.makedirs(data_dir, exist_ok=True)
+    ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+    fallback = os.path.join(data_dir, f"session_{ts}_TEST_s1")
+    os.makedirs(fallback, exist_ok=True)
+    return fallback
+
+
+def _load_metadata_from_env() -> dict:
+    """
+    Read the launcher-written metadata.json from the session folder.
+    Returns the full dict; the 'patient' subkey carries demographics and
+    'baseline' is None until write_baseline_capture() fills it in.
+    """
+    sf = _session_folder_from_env()
+    path = os.path.join(sf, 'metadata.json')
+    if os.path.exists(path):
         try:
             with open(path, 'r', encoding='utf-8') as f:
                 return json.load(f)
         except Exception:
             pass
+    # Minimal fallback so a stray test import doesn't crash.
     return {
-        'first_name':     os.environ.get('PATIENT_NAME', 'PATIENT'),
-        'last_name':      '',
-        'patient_id':     os.environ.get('PATIENT_ID', '000'),
-        'gender':         '',
-        'session_date':   datetime.now().strftime('%Y-%m-%d'),
-        'session_number': 1,
+        'patient': {
+            'first_name':     os.environ.get('PATIENT_NAME', 'PATIENT'),
+            'last_name':      '',
+            'patient_id':     os.environ.get('PATIENT_ID', '000'),
+            'gender':         '',
+            'session_date':   datetime.now().strftime('%Y-%m-%d'),
+            'session_number': 1,
+        },
+        'session_folder': os.path.basename(sf),
+        'session_timestamp': datetime.now().strftime("%Y%m%d_%H%M%S"),
+        'baseline': None,
     }
 
 
+# ---------- main class -------------------------------------------------------
+
 class SessionManager:
-    """Centralized session state tracking."""
+    """Centralised session state + per-tick file writing."""
+
+    # samples.csv header — 21 columns. Unchanged from the pre-folder layout
+    # so anything that already reads the canonical 50 Hz record keeps working.
+    _SAMPLES_HEADER = ("timestamp,phase,"
+                       "patient_first_name,patient_last_name,patient_id,"
+                       "gender,session_date,session_number,"
+                       "eda,hr,hrv,"
+                       "delta_eda,delta_hr,delta_hrv,"
+                       "s_instant,s_t,state,dashboard_score,"
+                       "artifacts_eda,artifacts_hr,artifacts_hrv\n")
+
+    # diagnostic.csv header — one row per tick, written by main.py via
+    # log_diagnostic_row(). Combines what used to be two separate files
+    # (acquisition_log + processing_log). Since the EMA is now α=1.0
+    # (pass-through, per the PDF — see config.py), `smooth_*` columns
+    # equal `raw_*` in normal runs; they're kept for forensic continuity
+    # if smoothing is ever re-enabled.
+    _DIAGNOSTIC_HEADER = ("timestamp,phase,status,"
+                          "raw_eda,raw_hr,raw_hrv,"
+                          "smooth_eda,smooth_hr,smooth_hrv\n")
 
     def __init__(self, patient_name: str = "PATIENT", patient_id: str = "000"):
-        """
-        Initialize a new session.
+        # Load metadata from the session folder (launcher wrote it).
+        self.metadata = _load_metadata_from_env()
+        self.patient = self.metadata['patient']
 
-        The full patient record (first name, last name, ID, gender, date,
-        session number) is loaded from the intake JSON the launcher wrote,
-        via the PATIENT_INTAKE_JSON env var. The positional args are kept for
-        backwards compatibility but are overridden by the JSON if present.
-        """
-        self.patient = _load_patient_from_env()
-        # Allow positional args to override (they're how main.py currently calls us).
+        # Allow positional args to override (compat with main.py's old calls).
         if patient_name != "PATIENT":
             self.patient['first_name'] = patient_name
         if patient_id != "000":
@@ -97,289 +128,155 @@ class SessionManager:
         self.patient_name = self.patient['first_name']
         self.patient_id = self.patient['patient_id']
         self.patient_info = f"{self.patient_name}_{self.patient_id}"
-        
+
+        # Session folder + per-file paths inside it.
+        self.session_folder = _session_folder_from_env()
+        self.metadata_path = os.path.join(self.session_folder, 'metadata.json')
+        self.samples_path = os.path.join(self.session_folder, 'samples.csv')
+        self.diagnostic_path = os.path.join(self.session_folder, 'diagnostic.csv')
+        # unity_udp.csv is written by UnityUDPBridge — main.py passes the
+        # path; we just expose where it lives for the summary print.
+        self.unity_udp_path = os.path.join(self.session_folder, 'unity_udp.csv')
+
         self.session_start_time = time.time()
         self.session_start_datetime = datetime.now()
-        self.session_timestamp = self.session_start_datetime.strftime("%Y%m%d_%H%M%S")
-        
-        # ============================================
-        # PHASE TRACKING
-        # ============================================
-        self.phase = "BASELINE"  # "BASELINE" or "LIVE"
+        self.session_timestamp = self.metadata.get(
+            'session_timestamp',
+            self.session_start_datetime.strftime("%Y%m%d_%H%M%S"),
+        )
+
+        # Counter for LIVE_RESTART file rotation (samples.csv → samples_002.csv).
+        self._live_run_counter = 1
+
+        # Phase tracking, signal history, stress history — unchanged shape so
+        # everything that reads these (dashboard summary, session_review)
+        # keeps working.
+        self.phase = "BASELINE"
         self.baseline_end_time = None
         self.baseline_ticks_remaining = int(Config.BASELINE_SEC * Config.PIPELINE_RATE)
-        
-        # ============================================
-        # SIGNAL HISTORY (for charting)
-        # ============================================
-        # Store raw samples for dashboard updates
-        self.signal_history = {
-            'eda': [],
-            'hr': [],
-            'hrv': [],
-            'timestamps': []
-        }
-        self.max_history_length = int(Config.PIPELINE_RATE * 60)  # Keep last 60 seconds
-        
-        # ============================================
-        # BASELINE STATISTICS
-        # ============================================
+        self.signal_history = {'eda': [], 'hr': [], 'hrv': [], 'timestamps': []}
+        self.max_history_length = int(Config.PIPELINE_RATE * 60)
         self.personal_baselines = None
         self.baseline_buffers = None
-        self.artifacts_removed = {
-            'eda': 0,
-            'hr': 0,
-            'hrv': 0
-        }
-        
-        # ============================================
-        # STRESS METRICS HISTORY
-        # ============================================
+        self.artifacts_removed = {'eda': 0, 'hr': 0, 'hrv': 0}
         self.stress_history = {
-            's_instant': [],      # Raw instantaneous stress
-            's_t': [],             # Smoothed stress (1-second window)
-            'state': [],           # calm/stressed/ultra_stressed
-            'dashboard_score': []  # 0-100 operator display
+            's_instant': [], 's_t': [], 'state': [], 'dashboard_score': [],
         }
-        
-        # ============================================
-        # THRESHOLDS (locked after baseline)
-        # ============================================
         self.thresh_mild = None
         self.thresh_high = None
-        
-        # ============================================
-        # SESSION OUTPUT FILE
-        # ============================================
-        self._setup_output_file()
-        
+
+        # Open the two CSV file handles for the lifetime of the session.
+        # Opening + closing per tick costs ~ms on Windows (drags the loop
+        # below 50 Hz); a held handle makes the write essentially free.
+        self._samples_handle = None
+        self._diagnostic_handle = None
+        self._open_samples(write_header=True)
+        self._open_diagnostic(write_header=True)
+
+        # Expose canonical paths for callers (main.py uses this for the
+        # unity_udp.csv path, summary printing, etc.).
+        self.output_file_path = self.samples_path  # back-compat alias
+
         bar = '=' * 58
         print(f"\n[SESSION] {bar}")
         print(f"[SESSION] New session started")
         print(f"[SESSION]   Patient            : {self.patient_info}")
         print(f"[SESSION]   Start time         : "
               f"{self.session_start_datetime.strftime('%Y-%m-%d %H:%M:%S')}")
+        print(f"[SESSION]   Session folder     : {os.path.basename(self.session_folder)}")
         print(f"[SESSION]   Phase              : {self.phase}")
         print(f"[SESSION]   Baseline duration  : "
               f"{Config.BASELINE_SEC}s ({self.baseline_ticks_remaining} ticks)")
         print(f"[SESSION] {bar}\n")
-    
-    def _setup_output_file(self):
-        """Create output CSV file for this session."""
-        current_dir = os.path.dirname(os.path.abspath(__file__))
-        project_root = os.path.dirname(current_dir)
-        data_dir = os.path.join(project_root, 'data')
-        os.makedirs(data_dir, exist_ok=True)
 
-        # Filename format: session_YYYYMMDD_HHMMSS_PatientName_PatientID.csv
-        filename = f"session_{self.session_timestamp}_{self.patient_info}.csv"
-        self.output_file_path = os.path.join(data_dir, filename)
-        # Baseline JSON path is set when write_baseline_capture() succeeds;
-        # we hold the slot so shutdown cleanup can find the file.
-        self.baseline_capture_path = None
+    # ---------- file-handle helpers -----------------------------------------
 
-        # Keep one open handle for the session CSV's lifetime. Opening +
-        # closing the file every tick (the old behavior) cost a few ms
-        # each on Windows — enough at 50 Hz to drag the main loop down to
-        # 40-48 Hz, which in turn meant the 6000-sample baseline target
-        # never quite got hit at the 2-minute mark. With a held handle
-        # the per-tick CSV write is essentially free.
-        self._csv_handle = None
-        self._open_csv(mode='w', write_header=True)
-
-        print(f"[SESSION] Output file: {filename}")
-
-    _CSV_HEADER = ("timestamp,phase,"
-                   "patient_first_name,patient_last_name,patient_id,"
-                   "gender,session_date,session_number,"
-                   "eda,hr,hrv,"
-                   "delta_eda,delta_hr,delta_hrv,"
-                   "s_instant,s_t,state,dashboard_score,"
-                   "artifacts_eda,artifacts_hr,artifacts_hrv\n")
-
-    def _open_csv(self, mode: str, write_header: bool):
-        """(Re-)open the session CSV. Used at __init__ ('w' + header),
-        after flush_live_data ('w' + header), and after delete_session_csv
-        if anyone wants to keep writing (we don't, but defensive)."""
-        self._close_csv()
-        self._csv_handle = open(self.output_file_path, mode, newline='', buffering=1)
+    def _open_samples(self, write_header: bool):
+        self._close_samples()
+        self._samples_handle = open(self.samples_path, 'w',
+                                    newline='', buffering=1)
         if write_header:
-            self._csv_handle.write(self._CSV_HEADER)
-            self._csv_handle.flush()
+            self._samples_handle.write(self._SAMPLES_HEADER)
+            self._samples_handle.flush()
 
-    def _close_csv(self):
+    def _close_samples(self):
         try:
-            if self._csv_handle is not None:
-                self._csv_handle.flush()
-                self._csv_handle.close()
+            if self._samples_handle is not None:
+                self._samples_handle.flush()
+                self._samples_handle.close()
         except Exception:
             pass
-        self._csv_handle = None
+        self._samples_handle = None
+
+    def _open_diagnostic(self, write_header: bool):
+        self._close_diagnostic()
+        self._diagnostic_handle = open(self.diagnostic_path, 'w',
+                                       newline='', buffering=1)
+        if write_header:
+            self._diagnostic_handle.write(self._DIAGNOSTIC_HEADER)
+            self._diagnostic_handle.flush()
+
+    def _close_diagnostic(self):
+        try:
+            if self._diagnostic_handle is not None:
+                self._diagnostic_handle.flush()
+                self._diagnostic_handle.close()
+        except Exception:
+            pass
+        self._diagnostic_handle = None
+
+    def close_all(self):
+        """Close both file handles. Safe to call repeatedly."""
+        self._close_samples()
+        self._close_diagnostic()
+
+    # ---------- LIVE_RESTART rotation ---------------------------------------
 
     def rotate_session_csv(self):
-        """Close the current session CSV and open a fresh one with a new
-        timestamp. Called when the operator clicks Start Live a second
-        time after a Stop — so each live session lands in its own file
-        rather than concatenating into the first one."""
-        self._close_csv()
-        self.session_start_datetime = datetime.now()
-        self.session_timestamp = self.session_start_datetime.strftime("%Y%m%d_%H%M%S")
-        filename = f"session_{self.session_timestamp}_{self.patient_info}.csv"
-        current_dir = os.path.dirname(os.path.abspath(__file__))
-        project_root = os.path.dirname(current_dir)
-        data_dir = os.path.join(project_root, 'data')
-        self.output_file_path = os.path.join(data_dir, filename)
-        self._open_csv(mode='w', write_header=True)
-        # The previous run's stress-history is no longer relevant to the
-        # new file; drop it so print_session_summary reflects only the
+        """
+        Called when the operator clicks Start Live a SECOND time after a
+        Stop. Inside the per-session folder we don't change folders — we
+        rotate samples.csv to samples_002.csv / samples_003.csv etc. so
+        each live run lands in a distinct file (diagnostic.csv keeps
+        accumulating across all runs in the same launch).
+        """
+        self._live_run_counter += 1
+        new_name = f"samples_{self._live_run_counter:03d}.csv"
+        self.samples_path = os.path.join(self.session_folder, new_name)
+        self.output_file_path = self.samples_path
+        self._open_samples(write_header=True)
+        # Reset stress history so print_session_summary reflects only the
         # session that is about to begin.
         self.stress_history = {
             's_instant': [], 's_t': [], 'state': [], 'dashboard_score': [],
         }
-        print(f"[SESSION] Rotated to new session CSV: {filename}")
+        print(f"[SESSION] Rotated samples CSV: {new_name}")
 
     def flush_live_data(self):
-        """Drop in-memory live-phase stress history and rewrite the session
-        CSV from scratch with only its header. Called on LIVE_RESTART so the
+        """
+        Drop in-memory live-phase stress history and rewrite samples.csv
+        from scratch with only its header. Called on LIVE_RESTART so the
         operator's next live run isn't contaminated by the previous one.
-        Baseline JSON is left untouched."""
+        Baseline (in metadata.json) is left untouched.
+        """
         self.stress_history = {
             's_instant': [], 's_t': [], 'state': [], 'dashboard_score': [],
         }
-        # Truncate the CSV via _open_csv (which closes the current handle,
-        # reopens in 'w' mode, rewrites the header). Writing continues
-        # through the new handle on the next log_sample call.
-        self._open_csv(mode='w', write_header=True)
-        print("[SESSION] flush_live_data: stress history and session CSV reset.")
+        self._open_samples(write_header=True)
+        print("[SESSION] flush_live_data: stress history and samples CSV reset.")
 
-    def delete_session_csv(self):
-        """Remove the per-tick session CSV from disk. Closes the held
-        handle first so Windows allows the delete."""
-        self._close_csv()
-        try:
-            if self.output_file_path and os.path.exists(self.output_file_path):
-                os.remove(self.output_file_path)
-                print(f"[SESSION] Deleted: {os.path.basename(self.output_file_path)}")
-        except OSError as e:
-            print(f"[SESSION] WARN: could not delete session CSV: {e}")
+    # ---------- per-tick writes ---------------------------------------------
 
-    def delete_baseline_json(self):
-        """Remove the baseline JSON capture from disk, if one was written."""
-        try:
-            if self.baseline_capture_path and os.path.exists(self.baseline_capture_path):
-                os.remove(self.baseline_capture_path)
-                print(f"[SESSION] Deleted: {os.path.basename(self.baseline_capture_path)}")
-        except OSError as e:
-            print(f"[SESSION] WARN: could not delete baseline JSON: {e}")
-
-    def log_live_line(self, line: str):
-        """Append a human-readable line to the per-session live log
-        (data/live_log_<ts>_<patient>.txt) AND echo it to stdout.
-
-        Opened lazily on first call so an aborted baseline doesn't leave
-        an empty live log on disk. Each line carries a wall-clock
-        timestamp so the file is a clean, paste-friendly transcript of
-        what the operator saw during a session — useful in clinical
-        notes and downstream research without parsing the CSV."""
-        try:
-            if not hasattr(self, '_live_log_handle') or self._live_log_handle is None:
-                current_dir = os.path.dirname(os.path.abspath(__file__))
-                project_root = os.path.dirname(current_dir)
-                data_dir = os.path.join(project_root, 'data')
-                os.makedirs(data_dir, exist_ok=True)
-                self.live_log_path = os.path.join(
-                    data_dir,
-                    f"live_log_{self.session_timestamp}_{self.patient_info}.txt",
-                )
-                self._live_log_handle = open(self.live_log_path, 'a',
-                                             encoding='utf-8', buffering=1)
-                print(f"[SESSION] Live log: {os.path.basename(self.live_log_path)}")
-            ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-            full = f"{ts} | {line}"
-            self._live_log_handle.write(full + "\n")
-            print(full)
-        except Exception as e:
-            print(f"[SESSION] WARN: live log write failed: {e}")
-
-    def close_live_log(self):
-        """Flush and close the live-log file handle, if open."""
-        try:
-            if getattr(self, '_live_log_handle', None) is not None:
-                self._live_log_handle.flush()
-                self._live_log_handle.close()
-                self._live_log_handle = None
-        except Exception:
-            pass
-
-    def delete_live_log(self):
-        """Remove the live log file from disk."""
-        self.close_live_log()
-        try:
-            path = getattr(self, 'live_log_path', None)
-            if path and os.path.exists(path):
-                os.remove(path)
-                print(f"[SESSION] Deleted: {os.path.basename(path)}")
-        except OSError as e:
-            print(f"[SESSION] WARN: could not delete live log: {e}")
-
-    def delete_patient_json(self):
-        """Remove the patient-intake JSON the launcher wrote. We find its
-        path via the PATIENT_INTAKE_JSON env var that the launcher set."""
-        path = os.environ.get('PATIENT_INTAKE_JSON')
-        try:
-            if path and os.path.exists(path):
-                os.remove(path)
-                print(f"[SESSION] Deleted: {os.path.basename(path)}")
-        except OSError as e:
-            print(f"[SESSION] WARN: could not delete patient JSON: {e}")
-
-    def print_session_summary(self):
-        """Console summary at LIVE -> STOPPED. Compact clinical-style block."""
-        states = self.stress_history.get('state') or []
-        s_t = self.stress_history.get('s_t') or []
-        if not states:
-            print("\n[SESSION REVIEW] No live samples recorded — nothing to summarize.\n")
-            return
-        n = len(states)
-        rate = float(Config.PIPELINE_RATE)
-        live_sec = n / rate
-        n_calm = sum(1 for s in states if s == 'calm')
-        n_stress = sum(1 for s in states if s == 'stressed')
-        n_ultra = sum(1 for s in states if s == 'ultra_stressed')
-
-        def _pct(k):
-            return 100.0 * k / n if n else 0.0
-
-        mean_st = sum(s_t) / len(s_t) if s_t else 0.0
-        max_st = max(s_t) if s_t else 0.0
-
-        print()
-        print("=" * 56)
-        print("  SESSION REVIEW")
-        print("=" * 56)
-        print(f"  Patient        : {self.patient_info}")
-        print(f"  Live duration  : {live_sec:6.1f} s  ({n} samples)")
-        print(f"  Time in CALM   : {n_calm/rate:6.1f} s  ({_pct(n_calm):5.1f}%)")
-        print(f"  Time in STRESS : {n_stress/rate:6.1f} s  ({_pct(n_stress):5.1f}%)")
-        print(f"  Time in ULTRA  : {n_ultra/rate:6.1f} s  ({_pct(n_ultra):5.1f}%)")
-        print(f"  Mean S_t       : {mean_st:+6.2f}")
-        print(f"  Max  S_t       : {max_st:+6.2f}")
-        print(f"  CSV            : {os.path.basename(self.output_file_path)}")
-        if self.baseline_capture_path:
-            print(f"  Baseline JSON  : {os.path.basename(self.baseline_capture_path)}")
-        print("=" * 56)
-        print()
-    
     def log_sample(self, eda: float, hr: float, hrv: float,
                    delta_eda: float = 0.0, delta_hr: float = 0.0, delta_hrv: float = 0.0,
                    s_instant: float = None, s_t: float = None,
                    state: str = None, dashboard_score: float = None):
-        """Log a complete sample to the output CSV file (held handle)."""
-        if self._csv_handle is None:
+        """Append one row to samples.csv (held handle, single fwrite)."""
+        if self._samples_handle is None:
             return
         timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S.%f")[:-3]
         p = self.patient
-        self._csv_handle.write(
+        self._samples_handle.write(
             f"{timestamp},{self.phase},"
             f"{p['first_name']},{p['last_name']},{p['patient_id']},"
             f"{p['gender']},{p['session_date']},{p['session_number']},"
@@ -393,72 +290,91 @@ class SessionManager:
             f"{self.artifacts_removed.get('hr', 0)},"
             f"{self.artifacts_removed.get('hrv', 0)}\n"
         )
-    
+
+    def log_diagnostic_row(self, status: str,
+                            raw_eda: float, raw_hr: float, raw_hrv: float,
+                            smooth_eda: float, smooth_hr: float, smooth_hrv: float):
+        """
+        Append one row to diagnostic.csv. Called by main.py once per tick
+        with both the raw (from acquisition) and smoothed (from processing)
+        values + the acquisition status code (NEW_DATA / HOLD_LAST / etc.).
+        Replaces the per-module acquisition_log + processing_log files
+        from the old flat layout.
+
+        NaN-friendly: any of the float args can be NaN (HR/HRV warm-up
+        sentinels per PDF §3). We write "nan" — pandas / Excel both
+        understand it on read.
+        """
+        if self._diagnostic_handle is None:
+            return
+        timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S.%f")[:-3]
+
+        def _f(x):
+            try:
+                return f"{x:.4f}"
+            except Exception:
+                return "nan"
+
+        self._diagnostic_handle.write(
+            f"{timestamp},{self.phase},{status},"
+            f"{_f(raw_eda)},{_f(raw_hr)},{_f(raw_hrv)},"
+            f"{_f(smooth_eda)},{_f(smooth_hr)},{_f(smooth_hrv)}\n"
+        )
+
+    # ---------- in-memory history (for dashboard / summary) -----------------
+
     def record_raw_sample(self, eda: float, hr: float, hrv: float):
-        """Record a raw signal sample from acquisition."""
+        """Append to the in-memory rolling history (60 s)."""
         timestamp = time.time() - self.session_start_time
-        
         self.signal_history['eda'].append(eda)
         self.signal_history['hr'].append(hr)
         self.signal_history['hrv'].append(hrv)
         self.signal_history['timestamps'].append(timestamp)
-        
-        # Keep only recent history for dashboard
         if len(self.signal_history['eda']) > self.max_history_length:
             self.signal_history['eda'].pop(0)
             self.signal_history['hr'].pop(0)
             self.signal_history['hrv'].pop(0)
             self.signal_history['timestamps'].pop(0)
-    
-    def record_stress_metric(self, s_instant: float, s_t: float, state: str, dashboard_score: float):
-        """Record computed stress metrics."""
+
+    def record_stress_metric(self, s_instant: float, s_t: float,
+                              state: str, dashboard_score: float):
+        """Append a computed S_t / state pair to the in-memory history."""
         self.stress_history['s_instant'].append(s_instant)
         self.stress_history['s_t'].append(s_t)
         self.stress_history['state'].append(state)
         self.stress_history['dashboard_score'].append(dashboard_score)
-    
-    def update_phase_baseline(self, is_baseline_complete: bool):
-        """Called when processing indicates baseline is complete."""
-        if is_baseline_complete and self.phase == "BASELINE":
-            self.phase = "LIVE"
-            self.baseline_end_time = time.time()
-            elapsed = self.baseline_end_time - self.session_start_time
-            print(f"\n[SESSION] BASELINE COMPLETE at {elapsed:.1f}s")
-            print(f"[SESSION] Phase transition: BASELINE -> LIVE\n")
-    
-    def set_baseline_stats(self, personal_baselines: dict, artifacts_removed: dict):
+
+    # ---------- baseline ----------------------------------------------------
+
+    def set_baseline_stats(self, personal_baselines: dict,
+                            artifacts_removed: dict):
         """Store baseline statistics after 3-sigma cleaning."""
         self.personal_baselines = personal_baselines
         self.artifacts_removed = artifacts_removed
-
         print(f"[SESSION] Personal Baselines:")
-        print(f"  EDA: {personal_baselines['eda']:.2f} uS")
-        print(f"  HR:  {personal_baselines['hr']:.2f} BPM")
-        print(f"  HRV: {personal_baselines['hrv']:.2f} ms")
+        print(f"  -> EDA:  {personal_baselines['eda']:.2f} uS")
+        print(f"  -> HR:   {personal_baselines['hr']:.2f} BPM")
+        print(f"  -> HRV:  {personal_baselines['hrv']:.2f} ms")
+
+    def set_thresholds(self, thresh_mild: float, thresh_high: float):
+        """Store classification thresholds locked at baseline end."""
+        self.thresh_mild = thresh_mild
+        self.thresh_high = thresh_high
 
     def write_baseline_capture(self, sigma_baseline: float,
                                 thresh_mild: float, thresh_high: float,
                                 source_label: str = "",
                                 hrv_summary: dict = None):
         """
-        Persist the complete baseline state to a JSON file at the moment
-        calibration finishes. This file is the canonical record of the
-        patient's resting state for this session and can be loaded later
-        for follow-up sessions or post-hoc analysis.
+        Persist the frozen baseline by AMENDING the metadata.json that
+        the launcher wrote at session start. We don't write a separate
+        baseline_*.json file anymore — there's one metadata.json per
+        session and the baseline lives inside it.
+
+        Returns the metadata.json path (kept for back-compat with old
+        callers that print it).
         """
-        import json as _json
-        current_dir = os.path.dirname(os.path.abspath(__file__))
-        project_root = os.path.dirname(current_dir)
-        data_dir = os.path.join(project_root, 'data')
-        os.makedirs(data_dir, exist_ok=True)
-
-        filename = (f"baseline_{self.session_timestamp}_"
-                    f"{self.patient['patient_id']}.json")
-        path = os.path.join(data_dir, filename)
-
-        record = {
-            "patient": self.patient,
-            "session_timestamp": self.session_timestamp,
+        baseline_record = {
             "captured_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
             "baseline_duration_sec": Config.BASELINE_SEC,
             "sample_rate_pipeline_hz": Config.PIPELINE_RATE,
@@ -489,32 +405,189 @@ class SessionManager:
                 "weight_hr":  Config.WEIGHT_HR,
                 "thresh_mild_k": Config.THRESH_MILD_K,
                 "thresh_high_k": Config.THRESH_HIGH_K,
+                "rmssd_window_sec": Config.RMSSD_WINDOW_SEC,
+                "hr_window_sec": Config.HR_WINDOW_SEC,
+                "hr_compute_interval_sec": Config.HR_COMPUTE_INTERVAL_SEC,
+                "rr_max_relative_change": Config.RR_MAX_RELATIVE_CHANGE,
+                "hr_sigma_floor_pct": Config.HR_SIGMA_FLOOR_PCT,
+                "hrv_sigma_floor_pct": Config.HRV_SIGMA_FLOOR_PCT,
+                "eda_phasic_sigma_floor": Config.EDA_PHASIC_SIGMA_FLOOR,
+                "eda_phasic_max_us": Config.EDA_PHASIC_MAX_US,
             },
         }
-        with open(path, 'w', encoding='utf-8') as f:
-            _json.dump(record, f, indent=2)
-        self.baseline_capture_path = path
-        print(f"[SESSION] Baseline captured: {os.path.basename(path)}")
-        return path
+        self.metadata['baseline'] = baseline_record
+        with open(self.metadata_path, 'w', encoding='utf-8') as f:
+            json.dump(self.metadata, f, indent=2)
+        print(f"[SESSION] Baseline captured into metadata.json")
+        return self.metadata_path
 
-    def set_thresholds(self, thresh_mild: float, thresh_high: float):
-        """Store stress classification thresholds."""
-        self.thresh_mild = thresh_mild
-        self.thresh_high = thresh_high
+    # ---------- shutdown / cleanup helpers ----------------------------------
+    #
+    # Files now live inside the session folder. The shutdown semantics map to:
+    #
+    #   SHUTDOWN_SAVE_BOTH    → keep the folder intact, just close handles
+    #   SHUTDOWN_DISCARD_LIVE → keep metadata.json (baseline); drop samples.csv,
+    #                            diagnostic.csv (live portion), unity_udp.csv
+    #   SHUTDOWN_DISCARD_BOTH → delete the WHOLE folder (no files survive)
+    #
+    # The old per-file delete helpers stay around as no-ops / partial deletes
+    # for back-compat with main.py's existing shutdown branches.
+
+    def delete_session_csv(self):
+        """Remove samples.csv (and any rotated samples_NNN.csv) from disk."""
+        self._close_samples()
+        try:
+            for fn in os.listdir(self.session_folder):
+                if fn.startswith('samples') and fn.endswith('.csv'):
+                    p = os.path.join(self.session_folder, fn)
+                    os.remove(p)
+                    print(f"[SESSION] Deleted: {fn}")
+        except OSError as e:
+            print(f"[SESSION] WARN: could not delete samples CSVs: {e}")
+
+    def delete_baseline_json(self):
+        """
+        In the new layout the baseline lives inside metadata.json, not a
+        separate file. To 'delete the baseline' we reset its key to None
+        and rewrite the file (preserving the intake portion). The
+        SHUTDOWN_DISCARD_BOTH path uses delete_session_folder() instead.
+        """
+        try:
+            self.metadata['baseline'] = None
+            with open(self.metadata_path, 'w', encoding='utf-8') as f:
+                json.dump(self.metadata, f, indent=2)
+            print(f"[SESSION] Baseline cleared from metadata.json")
+        except OSError as e:
+            print(f"[SESSION] WARN: could not clear baseline in metadata.json: {e}")
+
+    def delete_patient_json(self):
+        """
+        In the old layout this removed a separate patient_*.json. In the
+        new layout the intake is part of metadata.json — for the discard
+        path it's covered by delete_session_folder(); calling this alone
+        is now a no-op so existing main.py shutdown branches don't crash.
+        """
+        # No-op: the intake lives in metadata.json and is handled by the
+        # whole-folder discard path. Kept for back-compat.
+        pass
+
+    def delete_live_log(self):
+        """No-op: the live-log file was dropped. Kept for back-compat."""
+        pass
+
+    def close_live_log(self):
+        """No-op: the live-log file was dropped. Kept for back-compat."""
+        pass
+
+    def discard_diagnostic_log(self, final: bool = False):
+        """
+        Close (and optionally truncate-reopen) diagnostic.csv. Replaces
+        the per-module discard_log() that acquisition.py and processing.py
+        used to expose.
+
+        final=False (default): truncate the file (rewrite the header) so
+        the next baseline attempt has a clean slate.
+        final=True: close and delete the file with no reopen — used on the
+        shutdown-discard path so we don't recreate a file we just removed.
+        """
+        self._close_diagnostic()
+        if final:
+            try:
+                if os.path.exists(self.diagnostic_path):
+                    os.remove(self.diagnostic_path)
+                    print(f"[SESSION] Discarded diagnostic.csv (final).")
+            except OSError as e:
+                print(f"[SESSION] WARN: could not delete diagnostic.csv: {e}")
+        else:
+            self._open_diagnostic(write_header=True)
+
+    def delete_unity_audit_csv(self):
+        """Remove unity_udp.csv (UnityUDPBridge already closed its handle
+        via the shutdown path before this is called)."""
+        try:
+            if os.path.exists(self.unity_udp_path):
+                os.remove(self.unity_udp_path)
+                print(f"[SESSION] Deleted: unity_udp.csv")
+        except OSError as e:
+            print(f"[SESSION] WARN: could not delete unity_udp.csv: {e}")
+
+    def delete_session_folder(self):
+        """
+        Nuke the whole session folder. Used by SHUTDOWN_DISCARD_BOTH —
+        the operator explicitly chose to throw away everything.
+        Equivalent to rm -rf data/session_<...>/.
+        """
+        self.close_all()
+        try:
+            import shutil as _shutil
+            if os.path.isdir(self.session_folder):
+                _shutil.rmtree(self.session_folder, ignore_errors=False)
+                print(f"[SESSION] Deleted session folder: "
+                      f"{os.path.basename(self.session_folder)}")
+        except OSError as e:
+            print(f"[SESSION] WARN: could not delete session folder: {e}")
+
+    # ---------- session summary --------------------------------------------
+
+    def print_session_summary(self):
+        """Console summary at LIVE → STOPPED. Compact clinical-style block."""
+        states = self.stress_history.get('state') or []
+        s_t = self.stress_history.get('s_t') or []
+        if not states:
+            print("\n[SESSION REVIEW] No live samples recorded — nothing to summarize.\n")
+            return
+        n = len(states)
+        rate = float(Config.PIPELINE_RATE)
+        live_sec = n / rate
+        n_calm = sum(1 for s in states if s == 'calm')
+        n_stress = sum(1 for s in states if s == 'stressed')
+        n_ultra = sum(1 for s in states if s == 'ultra_stressed')
+
+        def _pct(k):
+            return 100.0 * k / n if n else 0.0
+
+        mean_st = sum(s_t) / len(s_t) if s_t else 0.0
+        max_st = max(s_t) if s_t else 0.0
+
+        print()
+        print("=" * 56)
+        print("  SESSION REVIEW")
+        print("=" * 56)
+        print(f"  Patient        : {self.patient_info}")
+        print(f"  Session folder : {os.path.basename(self.session_folder)}")
+        print(f"  Live duration  : {live_sec:6.1f} s  ({n} samples)")
+        print(f"  Time in CALM   : {n_calm/rate:6.1f} s  ({_pct(n_calm):5.1f}%)")
+        print(f"  Time in STRESS : {n_stress/rate:6.1f} s  ({_pct(n_stress):5.1f}%)")
+        print(f"  Time in ULTRA  : {n_ultra/rate:6.1f} s  ({_pct(n_ultra):5.1f}%)")
+        print(f"  Mean S_t       : {mean_st:+6.2f}")
+        print(f"  Max  S_t       : {max_st:+6.2f}")
+        print(f"  Samples CSV    : {os.path.basename(self.samples_path)}")
+        print(f"  Metadata JSON  : metadata.json")
+        print("=" * 56)
+        print()
+
+    # ---------- back-compat / dashboard helpers ----------------------------
+
+    def update_phase_baseline(self, is_baseline_complete: bool):
+        """Called when processing indicates baseline is complete."""
+        if is_baseline_complete and self.phase == "BASELINE":
+            self.phase = "LIVE"
+            self.baseline_end_time = time.time()
+            elapsed = self.baseline_end_time - self.session_start_time
+            print(f"\n[SESSION] BASELINE COMPLETE at {elapsed:.1f}s")
+            print(f"[SESSION] Phase transition: BASELINE -> LIVE\n")
 
     def get_session_duration_sec(self) -> float:
-        """Elapsed time since session start."""
         return time.time() - self.session_start_time
 
     def get_session_duration_str(self) -> str:
-        """Formatted session duration MM:SS."""
         elapsed = self.get_session_duration_sec()
-        minutes = int(elapsed // 60)
-        seconds = int(elapsed % 60)
-        return f"{minutes:02d}:{seconds:02d}"
+        m = int(elapsed // 60)
+        s = int(elapsed % 60)
+        return f"{m:02d}:{s:02d}"
 
     def get_current_state_summary(self) -> dict:
-        """Return current session state as dictionary for dashboard."""
+        """Return current session state as a dict (used by some dashboard code)."""
         return {
             'patient_name': self.patient_name,
             'patient_id': self.patient_id,
@@ -532,106 +605,35 @@ class SessionManager:
             'current_state': self.stress_history['state'][-1] if self.stress_history['state'] else None,
             'current_s_t': self.stress_history['s_t'][-1] if self.stress_history['s_t'] else None,
             'current_dashboard_score': self.stress_history['dashboard_score'][-1] if self.stress_history['dashboard_score'] else None,
-            'output_file': self.output_file_path
+            'output_file': self.output_file_path,
+            'session_folder': self.session_folder,
         }
-    
-    def record_raw_sample(self, eda: float, hr: float, hrv: float):
-        """Record a raw signal sample from acquisition."""
-        timestamp = time.time() - self.session_start_time
-        
-        self.signal_history['eda'].append(eda)
-        self.signal_history['hr'].append(hr)
-        self.signal_history['hrv'].append(hrv)
-        self.signal_history['timestamps'].append(timestamp)
-        
-        # Keep only recent history for dashboard
-        if len(self.signal_history['eda']) > self.max_history_length:
-            self.signal_history['eda'].pop(0)
-            self.signal_history['hr'].pop(0)
-            self.signal_history['hrv'].pop(0)
-            self.signal_history['timestamps'].pop(0)
-    
-    def record_stress_metric(self, s_instant: float, s_t: float, state: str, dashboard_score: float):
-        """Record computed stress metrics."""
-        self.stress_history['s_instant'].append(s_instant)
-        self.stress_history['s_t'].append(s_t)
-        self.stress_history['state'].append(state)
-        self.stress_history['dashboard_score'].append(dashboard_score)
-    
-    def update_phase_baseline(self, is_baseline_complete: bool):
-        """Called when processing indicates baseline is complete."""
-        if is_baseline_complete and self.phase == "BASELINE":
-            self.phase = "LIVE"
-            self.baseline_end_time = time.time()
-            elapsed = self.baseline_end_time - self.session_start_time
-            print(f"\n[SESSION] BASELINE COMPLETE at {elapsed:.1f}s")
-            print(f"[SESSION] Phase transition: BASELINE -> LIVE\n")
-    
-    def set_baseline_stats(self, personal_baselines: dict, artifacts_removed: dict):
-        """Store baseline statistics after 3-sigma cleaning."""
-        self.personal_baselines = personal_baselines
-        self.artifacts_removed = artifacts_removed
-        
-        print(f"[SESSION] Personal Baselines:")
-        print(f"  -> EDA:  {personal_baselines['eda']:.2f} uS")
-        print(f"  -> HR:   {personal_baselines['hr']:.2f} BPM")
-        print(f"  -> HRV:  {personal_baselines['hrv']:.2f} ms")
-    
-    def set_thresholds(self, thresh_mild: float, thresh_high: float):
-        """Store stress classification thresholds."""
-        self.thresh_mild = thresh_mild
-        self.thresh_high = thresh_high
-    
-    def get_session_duration_sec(self) -> float:
-        """Elapsed time since session start."""
-        return time.time() - self.session_start_time
-    
-    def get_session_duration_str(self) -> str:
-        """Formatted session duration MM:SS."""
-        elapsed = self.get_session_duration_sec()
-        minutes = int(elapsed // 60)
-        seconds = int(elapsed % 60)
-        return f"{minutes:02d}:{seconds:02d}"
-    
-    def get_current_state_summary(self) -> dict:
-        """Return current session state as dictionary for dashboard."""
-        return {
-            'patient_id': self.patient_id,
-            'phase': self.phase,
-            'duration': self.get_session_duration_str(),
-            'duration_sec': self.get_session_duration_sec(),
-            'baseline_complete': (self.phase == "LIVE"),
-            'personal_baselines': self.personal_baselines,
-            'thresh_mild': self.thresh_mild,
-            'thresh_high': self.thresh_high,
-            'artifacts_removed': self.artifacts_removed,
-            'signal_count': len(self.signal_history['eda']),
-            'stress_events_count': len(self.stress_history['s_t']),
-            'current_state': self.stress_history['state'][-1] if self.stress_history['state'] else None,
-            'current_s_t': self.stress_history['s_t'][-1] if self.stress_history['s_t'] else None,
-            'current_dashboard_score': self.stress_history['dashboard_score'][-1] if self.stress_history['dashboard_score'] else None
-        }
+
+    # log_live_line was removed (the standalone live_log.txt was dropped).
+    # main.py used to call this; it now just echoes to stdout directly.
+    def log_live_line(self, line: str):
+        """Back-compat: the standalone live_log.txt file was dropped.
+        We just echo to stdout so the operator still sees the per-second
+        transcript in the terminal. To regenerate a paste-friendly text
+        file post-hoc, run `python src/session_review.py <session-folder>`
+        which can derive it from samples.csv."""
+        ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        print(f"{ts} | {line}")
 
 
 if __name__ == "__main__":
-    # Quick test of session manager
     print("\n=== SESSION MANAGER TEST ===\n")
-    
-    session = SessionManager("DEMO_USER")
-    
-    # Simulate some data
+    session = SessionManager()
     for i in range(10):
-        session.record_raw_sample(5.0 + i*0.1, 75.0 + i*0.5, 40.0)
+        session.record_raw_sample(5.0 + i * 0.1, 75.0 + i * 0.5, 40.0)
         session.record_stress_metric(0.5, 0.3, "calm", 25.0)
-    
     session.set_baseline_stats(
         {'eda': 5.0, 'hr': 75.0, 'hrv': 40.0},
-        {'eda': 2, 'hr': 0, 'hrv': 1}
+        {'eda': 2, 'hr': 0, 'hrv': 1},
     )
-    session.set_thresholds(1.33, 2.28)
-    
-    # Print summary
+    session.set_thresholds(1.28, 2.33)
     summary = session.get_current_state_summary()
     print("\nCurrent State Summary:")
     for key, value in summary.items():
         print(f"  {key}: {value}")
+    session.close_all()
