@@ -84,36 +84,39 @@ The live paths auto-detect which LSL channel carries ECG and which carries EDA f
 
 ## Configuration
 
-Everything tunable lives in `src/config.py`: data source, EMA smoothing factors, fusion weights, stress thresholds, heart-rate detection method (NeuroKit2 is primary), physiological sanity bounds, disconnect-detection thresholds, dashboard chart ranges, UDP target and throttle, wait-for-calm warmup, and the DataSource2 windowing parameters. The design intent is that behavior changes happen there, not by editing pipeline code. `CODE_AUDIT.md` has a full list of what is config-only versus what needs a code change.
+Everything tunable lives in `src/config.py`: data source selection, fusion weights, threshold z-multipliers (1.28 / 2.33 per PDF), per-signal sigma floors, Malik RR-gate parameters, phasic-EDA decomposition knobs, physiological sanity bounds, disconnect-detection thresholds, dashboard chart ranges, UDP target and throttle, wait-for-calm warmup, samples + diagnostic CSV write rates. The design intent is that behavior changes happen there, not by editing pipeline code. `CODE_AUDIT.md` has a full list of what is config-only versus what needs a code change.
+
+EMA smoothing has been removed per the PDF spec (vret_server.py: "EDA is intentionally NOT smoothed"). HR and RMSSD are already ZOH-held by the data source between 0.5 s recomputes, so adding an EMA on top would over-smooth them.
 
 ## Output
 
-Each session writes per patient:
+Each session creates **one folder** under `data/`, named patient-first so sessions for the same person sort together:
 
-- `data/patient_<id>_<date>_s<n>.json`: the intake form's record
-- `data/baseline_<timestamp>_<patient_id>.json`: captured at the end of baseline (personal averages, sigma, locked thresholds, NeuroKit2 HRV summary, pipeline constants in force)
-- `data/session_<timestamp>_<patient_id>.csv`: clinical record, one row per 50 Hz tick, 21 columns covering patient demographics, signals, deltas, stress index, state, score, and artifact counts
-- `data/live_log_<timestamp>_<patient_id>.txt`: human-readable 1 Hz transcript of the live session
-- `data/unity_udp_log_<timestamp>_<patient_id>.csv`: audit log of every UDP packet sent to Unity (timestamp, command, state, S_t, gate)
-- `data/acquisition_log_*.csv` and `data/processing_log_*.csv`: diagnostic logs (raw and smoothed signal traces)
+    data/<first>_<last>_Session<n>_<YYYY-MM-DD>_<gender>/
+        ├── metadata.json    (intake + frozen baseline merged)
+        ├── samples.csv      (1 Hz clinical record — counter-indexed, 21 columns)
+        ├── diagnostic.csv   (1 Hz forensic raw-signal trace with status)
+        └── unity_udp.csv    (one row per UDP packet sent to Unity)
 
-Live, the system broadcasts a 24-channel LSL stream the dashboard draws from, and sends `increase` / `decrease` / `start` / `stop` text commands to Unity over UDP. Every output and what it means is documented in `OUTPUTS.md`.
+`Config.SAMPLES_CSV_RATE_HZ` and `DIAGNOSTIC_CSV_RATE_HZ` (both default 1.0) control how often each file decimates from the 50 Hz pipeline. The LSL `Biofeedback_State` stream the dashboard reads is unaffected — it still runs at 50 Hz for smooth real-time charts.
+
+Live, the system also sends `increase` / `decrease` / `start` / `stop` text commands to Unity over UDP on port 5005. Every output and what it means is documented in `OUTPUTS.md`.
 
 ## The source files
 
 | File | What it does |
 |---|---|
-| `launcher.py` | Patient intake dialog, then spawns the three subprocesses |
+| `launcher.py` | Patient intake dialog, creates the session folder, pre-flight checks (e.g. missing mock file), then spawns the three subprocesses |
 | `src/config.py` | Every tunable value |
 | `src/patient_intake.py` | PyQt5 modal form with validated demographic fields |
-| `src/data_sources.py` | Mock and real-PLUX adapters (two derivation methods each), ADC conversion, NeuroKit2 R-peak detection, live-stream channel auto-detection |
-| `src/streamer.py` | Wrapper that drives the data source's outlet at native rate |
-| `src/acquisition.py` | Reads OpenSignals stream at 50 Hz, validates samples, detects disconnects |
-| `src/processing.py` | EMA smoothing, baseline buffer, 3-sigma cleaning |
-| `src/fusion.py` | Stress fusion, thresholds, state classification |
-| `src/session_control.py` | LSL command bus (dashboard -> main) and the SessionState machine |
-| `src/session_manager.py` | Per-session CSV, baseline JSON capture, live transcript log |
-| `src/output.py` | The 24-channel LSL output stream (Biofeedback_State) |
+| `src/data_sources.py` | One `MockDataSource` (file replay with pre-derivation) and one `RealPLUXDataSource` (live LSL); ADC → physical-unit conversion; canonical NeuroKit2 chain with Malik RR-gate; both republish derived (EDA, HR, HRV) on the internal `Biofeedback_Raw` stream |
+| `src/streamer.py` | Wrapper that drives the data source in a tight loop |
+| `src/acquisition.py` | Reads the internal stream at 50 Hz, validates samples (NaN/Inf and physiological bounds), detects electrode disconnects, exposes `last_status` per tick |
+| `src/processing.py` | Phasic-EDA decomposition (rolling `nk.eda_phasic`), 120 s baseline buffer accumulation, 3-sigma cleaning of personal averages |
+| `src/fusion.py` | Per-signal z-scoring with sigma floors; thresholds = `mean_baseline + K · sigma_baseline`; state classification; HR omit-and-renormalise during warm-up |
+| `src/session_control.py` | LSL command bus (dashboard → main) and the SessionState machine |
+| `src/session_manager.py` | Writes `metadata.json`, `samples.csv`, `diagnostic.csv`; counter-based decimation; folder-aware cleanup paths |
+| `src/output.py` | The 24-channel LSL output stream (`Biofeedback_State`) |
 | `src/unity_bridge.py` | UDP bridge sending balloon commands to Unity (with wait-for-calm gate and per-packet audit log) |
 | `src/dashboard.py` | The two-panel operator dashboard |
 | `src/main.py` | The 50 Hz loop tying it all together, state-machine driven |

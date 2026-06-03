@@ -245,40 +245,6 @@ class SignalProcessor:
             # good value rather than poisoning S_t with a synthetic zero.
             pass
 
-    def _apply_ema(self, signal_name: str, current_value: float, alpha: float) -> float:
-        """
-        Applies the one-pole exponential moving average.
-        y_t = α · x_t + (1 − α) · y_{t−1}
-
-        NaN handling (PDF §3 HR/HRV warm-up): the data source emits NaN for
-        HR until the R-peak detector has seen a few beats (~2 s) and for
-        HRV until the 60 s RMSSD window has filled. We handle NaN by:
-          * NaN input + EMA never initialised  →  return NaN (still warming)
-          * NaN input + EMA already initialised →  hold previous value (do
-                                                   not update state — this
-                                                   prevents a transient
-                                                   detector failure from
-                                                   contaminating the EMA)
-          * Real input + EMA never initialised  →  initialise to this value
-                                                   (avoids the ramp-from-
-                                                   zero artifact)
-          * Real input + EMA already initialised →  standard EMA blend
-        """
-        if isinstance(current_value, float) and math.isnan(current_value):
-            previous_value = self.ema_state[signal_name]
-            return previous_value if previous_value is not None else float('nan')
-
-        previous_value = self.ema_state[signal_name]
-        if previous_value is None:
-            # Initialise filter with the first valid sample so the smoothed
-            # trace doesn't ramp up from zero.
-            self.ema_state[signal_name] = current_value
-            return current_value
-
-        smoothed_value = (alpha * current_value) + ((1.0 - alpha) * previous_value)
-        self.ema_state[signal_name] = smoothed_value
-        return smoothed_value
-
     def _buffer_sample(self, smoothed_vector: list):
         """Appends to the baseline array and triggers computation when full."""
         self.buffers['eda'].append(smoothed_vector[0])

@@ -502,9 +502,6 @@ def run_pipeline():
             session.log_diagnostic_row(
                 status=acq.last_status,
                 raw_eda=raw_vector[0], raw_hr=raw_vector[1], raw_hrv=raw_vector[2],
-                smooth_eda=smoothed_vector[0],
-                smooth_hr=smoothed_vector[1],
-                smooth_hrv=smoothed_vector[2],
             )
 
             # ---- Phase G: pace ----

@@ -62,14 +62,14 @@ Every numbered step of the math-pipeline document is implemented. The detailed s
 | Step | What | Where |
 |---|---|---|
 | 0 | Acquisition, zero-order hold, HR and HRV from ECG | `acquisition.py`, `data_sources.derive_hr_hrv_from_ecg` (adaptive) and `derive_hr_hrv_from_ecg_nk` (NeuroKit chain) |
-| 1 | EMA smoothing | `processing.py` `_apply_ema` |
+| 1 | Smoothing — REMOVED per PDF (vret_server.py: "EDA is intentionally NOT smoothed"). Raw values flow through unchanged; phasic EDA decomposition lives in `processing._update_phasic_eda`. |
 | 2 | 120-second baseline buffer | `processing.py` `_buffer_sample` + `main.py` wall-clock safety net |
 | 3 | 3-sigma outlier removal | `processing.py` `_compute_personal_baselines` |
 | 4 | Personal baselines and frozen sigma | `processing.py` and `fusion.calculate_baseline_sigma` |
 | 5 | Per-sample percentage deviation (HRV inverted) | `fusion.compute_s_instant` |
 | 6 | Weighted fusion (0.5 / 0.3 / 0.2) | `fusion.compute_s_instant` |
 | 7 | One-second rolling mean to get S_t | `fusion.evaluate_state` |
-| 8 | Thresholds at 1.33 and 2.28 times sigma, frozen for the session | `fusion.set_thresholds` |
+| 8 | Thresholds at `mean_baseline + 1.28·sigma` and `mean_baseline + 2.33·sigma` (true 90th / 99th-percentile z, centred on baseline mean per PDF Bug 6); frozen for the session | `fusion.set_thresholds` |
 | 9 | State classification (calm / stressed / ultra_stressed). Balloon control was removed from Python; Unity owns altitude now. | `fusion.evaluate_state` |
 | 10 | 0-100 dashboard score | `fusion.evaluate_state` |
 | outputs | 24-channel LSL stream + UDP command bridge to Unity with audit log | `output.UnityBridge`, `unity_bridge.UnityUDPBridge` |

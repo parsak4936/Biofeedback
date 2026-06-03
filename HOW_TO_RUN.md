@@ -112,24 +112,24 @@ python src/session_review.py
 
 Lists every saved session newest-first. Pick one by number and a matplotlib window opens with:
 
-- S_t over time, with shaded bands for calm / stressed / ultra
-- Smoothed EDA, HR, HRV traces below
+- S_t over time, with shaded bands for baseline / calm / stressed / ultra
+- Raw EDA, HR, HRV traces below (no smoothing per PDF)
 - A summary box on the right: patient demographics, session number and date, source label, durations, time-in-state, mean and max S_t, mean dashboard score, personal baseline values, locked thresholds and sigma, artifact counts
 
 The same summary is also printed to the terminal in a paste-friendly multi-line block.
 
-### Open a specific file
+### Open a specific session
 
 ```
-python src/session_review.py data/session_20260601_143022_alice_P0001.csv
+python src/session_review.py data/Alice_Rossi_Session1_2026-06-01_F
 ```
 
-The matching `baseline_<timestamp>_<patient_id>.json` is auto-loaded from the same folder. The personal baseline values, thresholds, and source label come from that file.
+Pass either the **session folder** (recommended) or the path to its `samples.csv`. The matching baseline is read from `metadata.json` inside the folder. The picker also still understands the legacy flat `session_*.csv + baseline_*.json` layout for old recordings.
 
 ### Print to the patient file (PDF / PNG)
 
 ```
-python src/session_review.py data/session_20260601_143022_alice_P0001.csv --save data/review_alice_s1.pdf
+python src/session_review.py data/Alice_Rossi_Session1_2026-06-01_F --save review_alice_s1.pdf
 ```
 
 `--save` writes the review figure to disk at 150 dpi with tight margins, suitable for printing on A4 / Letter and attaching to the patient record. The file extension chooses the format (`.pdf`, `.png`, `.svg`, etc.). The window does not open in this mode.

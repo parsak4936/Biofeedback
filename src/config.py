@@ -62,7 +62,7 @@ class Config:
     # ============================================
     # SYSTEM LIMITS
     # ============================================
-    STREAM_TIMEOUT_SEC = 5.0  # Maximum seconds of silence before declaring stream dead
+    STREAM_TIMEOUT_SEC = 50.0  # Maximum seconds of silence before declaring stream dead
     # The mock streamer waits up to this long for the acquisition consumer to
     # subscribe before it begins pushing samples. This is the reproducibility
     # fix — without it the streamer races ahead while subprocesses spawn and
@@ -116,19 +116,11 @@ class Config:
     # ============================================
     # PIPELINE MATH & BASELINE PARAMETERS
     # ============================================
-    # EMA smoothing — DISABLED per PDF.
-    # Per vret_server.py: "EDA is intentionally NOT smoothed. It is an
-    # inherently slow signal, and its real processing is the phasic
-    # decomposition (compute_phasic_eda) used by the score. A display-only
-    # EMA was previously applied but contributed nothing to S_t and was
-    # visually indistinguishable from raw, so it has been removed. Raw EDA
-    # is shown directly."
-    # HR and RMSSD are likewise emitted as recompute-and-hold (ZOH between
-    # 0.5 s recomputes), so an EMA on top would over-smooth them. Setting
-    # alpha = 1.0 makes the EMA layer a pass-through (output = input).
-    EMA_ALPHA_EDA = 1.0     # pass-through (no smoothing — PDF)
-    EMA_ALPHA_HR = 1.0      # pass-through (already ZOH-held by data source)
-    EMA_ALPHA_HRV = 1.0     # pass-through (already ZOH-held by data source)
+    # EMA smoothing removed entirely per PDF (vret_server.py: "EDA is
+    # intentionally NOT smoothed... it has been removed."). HR/RMSSD are
+    # already ZOH-held by the data source between 0.5 s recomputes, so
+    # an EMA on top would over-smooth them. processing.process_sample()
+    # is now a pass-through; raw values flow straight to fusion + LSL.
 
     BASELINE_SEC = 120  # math-pipeline Step 2
 
@@ -368,7 +360,7 @@ class Config:
     # ============================================
     # MockDataSource auto-detects sampling rate AND channel order (ECG vs EDA)
     # from the OpenSignals header JSON — switch files freely, no other edits.
-    MOCK_DATA_FILE = "data/5_2026-05-29_14-52-05.txt"  # 1000Hz, 6.1min, ECG=col2/EDA=col3
+    MOCK_DATA_FILE = "data/14_minute_test_of_myself_2026-05-26_16-47-36.txt"  # 1000Hz, 6.1min, ECG=col2/EDA=col3
   # MOCK_DATA_FILE = "data/opensignals_2026-05-25_14-57-56.txt"            # 200Hz, 8.7min, ECG=col2/EDA=col3
     # MOCK_DATA_FILE = "data/fake_opensignals_2026-05-13_15-24-44.txt"       # 1000Hz, 42s, EDA=col2/ECG=col3
     # When False (default), MockDataSource stops publishing once the file is

@@ -142,7 +142,7 @@ For the offline mock paths the detection runs once over the whole recording at l
 
 ## EDA needs no derivation
 
-EDA is the simplest of the three signals. Once the ADC-to-microsiemens conversion is done, that is already the value the rest of the pipeline uses. Skin conductance changes slowly (over seconds, not milliseconds), so the high sample rate of the device is just oversampling. The pipeline's EMA smoothing handles whatever residual noise is left.
+EDA is the simplest of the three signals. Once the ADC-to-microsiemens conversion is done, that is already the value the rest of the pipeline uses. Skin conductance changes slowly (over seconds, not milliseconds), so the high sample rate of the device is just oversampling. The pipeline does NOT smooth EDA per the PDF spec — instead it decomposes raw EDA into tonic + phasic via `nk.eda_phasic` on a rolling 60-second window, and only the phasic component (tonic drift removed) feeds the stress score.
 
 ## Putting it all together
 

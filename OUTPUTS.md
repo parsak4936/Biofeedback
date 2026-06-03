@@ -6,19 +6,22 @@ One thing to remember: the device gives voltage; everything else is computed by 
 
 ## The files written per session
 
-Every session drops a small set of files into the `data/` folder. They share a timestamp so it is clear which ones belong together.
+Every session creates ONE folder under `data/`. All outputs for that launch live inside it — `metadata.json`, `samples.csv`, `diagnostic.csv`, `unity_udp.csv`. Four files per session, not seven.
+
+The folder name is patient-first so sorting by name groups all sessions for one patient together:
+
+    data/<first>_<last>_Session<n>_<YYYY-MM-DD>_<gender>/
+
+e.g. `data/Alice_Rossi_Session1_2026-06-02_F/`. If the same patient + same session number + same day collides (rare), an `_HHMMSS` suffix is appended so nothing is clobbered.
 
 | File | What it is | When written |
 |---|---|---|
-| `session_<timestamp>_<patient_id>.csv` | The clinical record. One row per processing tick (50 rows/sec), 21 columns covering demographics, phase, the three smoothed signals, the three percentage deltas from baseline, the stress index, the state, the operator score, and the per-signal baseline artifact counts. | Per-tick from session start. Rotated to a new file on Start Live after a Stop. |
-| `baseline_<timestamp>_<patient_id>.json` | The personal averages, noise-floor sigma, locked thresholds, bonus HRV metrics (RMSSD, SDNN, pNN50, etc. from NeuroKit2), per-signal artifact counts, source label, and the pipeline constants in force. The canonical record of "what calibrated this session". Reusable for follow-up sessions on the same patient. | Once, at the 120 s baseline lock. |
-| `patient_<id>_<date>_s<n>.json` | The intake form's output: first name, last name, ID, gender, session date, session number. | Once, at launcher startup after the operator submits the intake dialog. |
-| `live_log_<timestamp>_<patient_id>.txt` | Human-readable 1 Hz transcript of the live session. One line per second with the timestamp, smoothed signals, deltas, S_t, and state. Convenient for terminal review and for pasting into clinical notes. | Per-second during LIVE. |
-| `unity_udp_log_<timestamp>_<patient_id>.csv` | Audit log of every UDP packet sent to Unity. Columns: timestamp, kind (`lifecycle` or `state`), command, state, s_t, gate_open. Use it to verify the throttle is working and to correlate the balloon's behavior with the stress trace. | Per UDP send. |
-| `acquisition_log_<timestamp>.csv` | Raw 50 Hz signal values and a status code per tick. Diagnostic; safe to delete after confirming a session went fine. | Per-tick. |
-| `processing_log_<timestamp>.csv` | The same ticks after EMA smoothing. Diagnostic; safe to delete. | Per-tick. |
+| `metadata.json` | Intake form + frozen baseline merged into one JSON. Contains patient demographics, session info, personal averages, sigma_baseline, locked thresholds, bonus HRV metrics, per-signal artifact counts, source label, and the pipeline constants in force. The canonical record of "what calibrated this session." | At session start (intake portion); the baseline portion is appended at the 120 s lock. |
+| `samples.csv` | The clinical record. ~1 row per wall second (1 Hz, configurable via `Config.SAMPLES_CSV_RATE_HZ`), 21 columns including patient demographics, phase, signals, percentage deltas, the stress index, the state, the dashboard score, and the baseline artifact counts. First column is `sample_n`, a 1-indexed row counter. | Per pipeline tick during BASELINE and LIVE only, decimated to the configured rate. Skipped entirely in IDLE / BASELINE_DONE / STOPPED so the file ends cleanly. Truncated and restarted on Start Live after a Stop. |
+| `diagnostic.csv` | Forensic raw-signal trace, one row per write (1 Hz default). Columns: `tick_n, phase, status, raw_eda, raw_hr, raw_hrv`. The `status` column records the acquisition layer's per-tick verdict (`NEW_DATA`, `HOLD_LAST`, `NAN_REJ`, `OOR_REJ`). Safe to delete after confirming a session went fine. | Per pipeline tick in every phase (decimated). Counter `tick_n` is monotonic across the whole launch. |
+| `unity_udp.csv` | Audit log of every UDP packet sent to Unity. Columns: `timestamp, kind` (`lifecycle` for start/stop, `state` for increase/decrease), `command, state, s_t, gate_open`. Use it to verify the throttle is working and to correlate the balloon's behavior with the stress trace. | Per UDP send. |
 
-The session CSV and baseline JSON are the long-term archive. The diagnostic logs are scratch.
+`metadata.json` and `samples.csv` are the long-term archive. `diagnostic.csv` and `unity_udp.csv` are operational scratch you can clean out later.
 
 ## The session CSV, column by column
 
@@ -26,29 +29,29 @@ The session CSV and baseline JSON are the long-term archive. The diagnostic logs
 
 | Column | Unit | Meaning |
 |---|---|---|
-| `timestamp` | wall clock | Time the row was written, millisecond precision |
-| `phase` | text | `BASELINE` for the 120 s baseline, `BASELINE_DONE` between baseline lock and Start Live, `LIVE` during the live session, `STOPPED` after Stop |
+| `sample_n` | integer | 1-indexed row counter. Resets to 1 on Stop-then-Start-Live restart. Combined with the write rate (`Config.SAMPLES_CSV_RATE_HZ`, default 1 Hz) it tells you elapsed seconds. |
+| `phase` | text | `BASELINE` for the 120 s baseline, `LIVE` during the live session. Rows for IDLE / BASELINE_DONE / STOPPED are not written. |
 | `patient_first_name` | text | From the intake form |
 | `patient_last_name` | text | From the intake form |
 | `patient_id` | text | From the intake form |
 | `gender` | text | F or M, from the intake dropdown |
 | `session_date` | YYYY-MM-DD | Set at intake (always today) |
 | `session_number` | integer | Set at intake (1 to `Config.MAX_SESSION_NUMBER`) |
-| `eda` | microsiemens | Smoothed skin conductance |
-| `hr` | BPM | Smoothed heart rate |
-| `hrv` | milliseconds | Smoothed RMSSD (heart-rate variability) |
-| `delta_eda` | percent | EDA's deviation from this patient's baseline |
-| `delta_hr` | percent | HR's deviation from baseline |
-| `delta_hrv` | percent | HRV's deviation from baseline (inverted so positive = more stressed) |
-| `s_instant` | percent-ish | Raw per-tick stress value before smoothing. Zero during baseline. |
-| `s_t` | percent-ish | Smoothed stress index. Zero during baseline. |
-| `state` | text | `calm`, `stressed`, or `ultra_stressed`. Always `calm` during baseline. |
+| `eda` | microsiemens | Raw skin conductance (no smoothing — see PDF §7). |
+| `hr` | BPM | Heart rate from `nk.ecg_rate` over the trailing `HR_WINDOW_SEC` (30 s) of ECG, ZOH-held between recomputes (every 0.5 s). NaN during the first ~3 s warm-up. |
+| `hrv` | milliseconds | RMSSD via `nk.hrv_time` over the trailing `RMSSD_WINDOW_SEC` (60 s) of ECG, with the Malik 20% RR-change gate applied. NaN during the 60 s warm-up. |
+| `delta_eda` | µS | **Phasic EDA** in microsiemens (channel 6 carries phasic, not a percent — PDF §7 Cause 1). |
+| `delta_hr` | percent | HR's deviation from baseline. NaN during HR warm-up. |
+| `delta_hrv` | percent | HRV's deviation from baseline (inverted so positive = more stressed). NaN during HRV warm-up. |
+| `s_instant` | unitless (z-weighted) | Raw per-tick stress, computed as `0.5·z(phasic_EDA) + 0.3·z(HRV%) + 0.2·z(HR%)` with HR-omit-and-renormalise during HR warm-up. Zero during BASELINE. |
+| `s_t` | unitless (z-weighted) | 1-second rolling mean of `s_instant`. Zero during BASELINE. |
+| `state` | text | `baseline` during BASELINE; one of `calm` / `stressed` / `ultra_stressed` during LIVE. |
 | `dashboard_score` | 0-100 | Operator-friendly remap of `s_t`. Zero during baseline. |
 | `artifacts_eda` | count | EDA samples thrown out by the 3-sigma cleaning during baseline |
 | `artifacts_hr` | count | Same for HR |
 | `artifacts_hrv` | count | Same for HRV |
 
-During the 120 s baseline, the stress-related columns are deliberately zero or calm; the math that produces them is not running yet, by design. They come alive at the baseline-to-live transition. The artifact counts stay zero until the baseline finishes (that is when the cleaning happens), then hold their final value for the rest of the file.
+During the 120 s baseline, the stress-related columns are deliberately zero; the fusion math doesn't run yet, by design. They come alive at the baseline-to-live transition. The artifact counts stay zero until the baseline finishes (that is when the cleaning happens), then hold their final value for the rest of the file.
 
 ## The UDP bridge to Unity
 

@@ -1,0 +1,50 @@
+{
+  "patient": {
+    "first_name": "shayan",
+    "last_name": "fortheenmin",
+    "patient_id": "123",
+    "gender": "M",
+    "session_date": "2026-06-03",
+    "session_number": 1
+  },
+  "session_folder": "shayan_fortheenmin_Session1_2026-06-03_M",
+  "session_timestamp": "20260603_165246",
+  "baseline": {
+    "captured_at": "2026-06-03 16:54:54",
+    "baseline_duration_sec": 120,
+    "sample_rate_pipeline_hz": 50.0,
+    "personal_baselines": {
+      "eda_uS": 3.6769652169666616,
+      "hr_bpm": 78.52751597707959,
+      "hrv_ms": 74.27596686785911
+    },
+    "sigma_baseline": 0.26854012529360816,
+    "thresholds": {
+      "mild": 0.3370787580649503,
+      "high": 0.6190458896232388
+    },
+    "hrv_metrics": {},
+    "artifacts_removed": {
+      "eda": 383,
+      "hr": 0,
+      "hrv": 0
+    },
+    "source": "mock:data/14_minute_test_of_myself_2026-05-26_16-47-36.txt",
+    "pipeline_constants": {
+      "artifact_sigma_multiplier": 3.0,
+      "weight_eda": 0.5,
+      "weight_hrv": 0.3,
+      "weight_hr": 0.2,
+      "thresh_mild_k": 1.28,
+      "thresh_high_k": 2.33,
+      "rmssd_window_sec": 60,
+      "hr_window_sec": 30,
+      "hr_compute_interval_sec": 0.5,
+      "rr_max_relative_change": 0.2,
+      "hr_sigma_floor_pct": 2.0,
+      "hrv_sigma_floor_pct": 5.0,
+      "eda_phasic_sigma_floor": 0.02,
+      "eda_phasic_max_us": 1.0
+    }
+  }
+}

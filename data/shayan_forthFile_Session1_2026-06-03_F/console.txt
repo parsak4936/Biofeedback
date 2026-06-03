@@ -1,0 +1,742 @@
+(env) PS F:\Biofeedback> & f:\Biofeedback\env\Scripts\python.exe f:/Biofeedback/launcher.py
+
+============================================================
+  BIOFEEDBACK VIRTUAL CLINIC - LAUNCHING SYSTEM           
+============================================================
+
+[LAUNCHER] Patient: shayan_forthFile_123
+[LAUNCHER] Session 1 on 2026-06-03
+[LAUNCHER] Intake record: metadata.json
+
+[CONFIG] Active Data Source: MOCK (recorded file, in-house adaptive detector)
+[CONFIG] To change: Edit src/config.py and set DATA_SOURCE
+
+[LAUNCHER] ① Starting Data Acquisition Layer...
+[LAUNCHER]    (Initializing data source...)
+
+[LAUNCHER] (2) Starting signal processing pipeline...
+[LAUNCHER]     Patient: shayan_forthFile_123
+[LAUNCHER]     The pipeline will wait for you to click
+[LAUNCHER]     'Start Baseline' on the dashboard.
+
+[LAUNCHER] (3) Starting clinical dashboard...
+[LAUNCHER]     The dashboard hosts the Start / Stop / Reset
+[LAUNCHER]     buttons that drive the rest of the pipeline.
+
+============================================================
+  SYSTEM ONLINE - Patient: shayan_forthFile_123
+============================================================
+
+Dashboard is open. Click 'Start Baseline' to begin the 120-second
+calibration; once baseline finishes, click 'Start Live Session'.
+Session data will be saved to: data/session_*.csv
+
+To shutdown: Close the Dashboard window or press Ctrl+C below.
+
+
+[DASHBOARD] Starting Clinical Dashboard...
+[DASHBOARD] Waiting for data stream from main.py...
+
+[DASHBOARD] Searching for Biofeedback_State stream...
+2026-06-03 16:44:49.343 (   0.009s) [        FBE8A354]      netinterfaces.cpp:36    INFO| netif '{214A57BF-DAE3-414C-8BAE-7A325BDED1DB}' (status: 2, multicast: 1
+2026-06-03 16:44:49.344 (   0.010s) [        FBE8A354]      netinterfaces.cpp:36    INFO| netif '{D0B2D441-4180-4D9D-B961-C196EA0DE847}' (status: 2, multicast: 1
+2026-06-03 16:44:49.344 (   0.010s) [        FBE8A354]      netinterfaces.cpp:36    INFO| netif '{77F528BF-AD52-4FB8-A8E5-7DB8EE6448EC}' (status: 1, multicast: 1
+2026-06-03 16:44:49.344 (   0.010s) [        FBE8A354]      netinterfaces.cpp:58    INFO|       IPv6 ifindex 14
+2026-06-03 16:44:49.344 (   0.010s) [        FBE8A354]      netinterfaces.cpp:36    INFO| netif '{BB5D37D6-8AF6-11EE-891B-806E6F6E6963}' (status: 1, multicast: 1
+2026-06-03 16:44:49.344 (   0.010s) [        FBE8A354]      netinterfaces.cpp:58    INFO|       IPv6 ifindex 1
+2026-06-03 16:44:49.344 (   0.010s) [        FBE8A354]      netinterfaces.cpp:36    INFO| netif '{4ADE504E-6BC7-454D-A61F-866C5C2BA6AF}' (status: 1, multicast: 1
+2026-06-03 16:44:49.344 (   0.010s) [        FBE8A354]      netinterfaces.cpp:58    INFO|       IPv6 ifindex 24
+2026-06-03 16:44:49.344 (   0.011s) [        FBE8A354]         api_config.cpp:270   INFO| Loaded default config
+==================================================
+  BIOFEEDBACK DATA STREAMER (UNIVERSAL)           
+==================================================
+
+[STREAMER] Configuration: DATA_SOURCE = 'mock'
+[STREAMER] Broadcasting on LSL: 'Biofeedback_Raw'
+
+[DATA SOURCE] Initializing MockDataSource (PDF-aligned)...
+==================================================
+  BIOFEEDBACK PIPELINE STARTING
+==================================================
+
+
+[SESSION] ==========================================================
+[SESSION] New session started
+[SESSION]   Patient            : shayan_123
+[SESSION]   Start time         : 2026-06-03 16:44:57
+[SESSION]   Session folder     : shayan_forthFile_Session1_2026-06-03_F
+[SESSION]   Phase              : BASELINE
+[SESSION]   Baseline duration  : 120s (6000 ticks)
+[SESSION] ==========================================================
+
+2026-06-03 16:44:57.954 (  11.129s) [        34B1971B]      netinterfaces.cpp:36    INFO| netif '{214A57BF-DAE3-414C-8BAE-7A325BDED1DB}' (status: 2, multicast: 1
+2026-06-03 16:44:57.954 (  11.130s) [        34B1971B]      netinterfaces.cpp:36    INFO| netif '{D0B2D441-4180-4D9D-B961-C196EA0DE847}' (status: 2, multicast: 1
+2026-06-03 16:44:57.954 (  11.130s) [        34B1971B]      netinterfaces.cpp:36    INFO| netif '{77F528BF-AD52-4FB8-A8E5-7DB8EE6448EC}' (status: 1, multicast: 1
+2026-06-03 16:44:57.954 (  11.130s) [        34B1971B]      netinterfaces.cpp:58    INFO|       IPv6 ifindex 14
+2026-06-03 16:44:57.954 (  11.130s) [        34B1971B]      netinterfaces.cpp:36    INFO| netif '{BB5D37D6-8AF6-11EE-891B-806E6F6E6963}' (status: 1, multicast: 1
+2026-06-03 16:44:57.955 (  11.130s) [        34B1971B]      netinterfaces.cpp:58    INFO|       IPv6 ifindex 1
+2026-06-03 16:44:57.955 (  11.130s) [        34B1971B]      netinterfaces.cpp:36    INFO| netif '{4ADE504E-6BC7-454D-A61F-866C5C2BA6AF}' (status: 1, multicast: 1
+2026-06-03 16:44:57.955 (  11.130s) [        34B1971B]      netinterfaces.cpp:58    INFO|       IPv6 ifindex 24
+2026-06-03 16:44:57.955 (  11.130s) [        34B1971B]         api_config.cpp:270   INFO| Loaded default config
+2026-06-03 16:44:57.956 (  11.131s) [        34B1971B]             common.cpp:65    INFO| git:6ca188c266c21f7228dc67077303fa6abaf2e8be/branch:refs/tags/v1.16.2/build:Release/compiler:MSVC-19.0.24245.0/link:SHARED
+2026-06-03 16:44:57.961 (  11.136s) [        34B1971B]         udp_server.cpp:82    WARN| Could not bind multicast responder for ff02:113d:6fdd:2c17:a643:ffe2:1bd1:3cd2 to interface ::1 (An invalid argument was supplied.)
+2026-06-03 16:44:57.961 (  11.136s) [        34B1971B]         udp_server.cpp:82    WARN| Could not bind multicast responder for ff02:113d:6fdd:2c17:a643:ffe2:1bd1:3cd2 to interface 172.22.128.1 (An invalid argument was supplied.)
+2026-06-03 16:44:57.961 (  11.136s) [        34B1971B]         udp_server.cpp:82    WARN| Could not bind multicast responder for ff05:113d:6fdd:2c17:a643:ffe2:1bd1:3cd2 to interface ::1 (An invalid argument was supplied.)
+2026-06-03 16:44:57.961 (  11.137s) [        34B1971B]         udp_server.cpp:82    WARN| Could not bind multicast responder for ff05:113d:6fdd:2c17:a643:ffe2:1bd1:3cd2 to interface 172.22.128.1 (An invalid argument was supplied.)
+[OUTPUT] LSL outlet 'Biofeedback_State' opened (24 channels).
+[UNITY] Audit log: unity_udp.csv
+[UNITY] UDP bridge ready: target 127.0.0.1:5005, throttle 1.0s, gate warmup 1.5s.
+[CONTROL] Resolving 'Biofeedback_Control'...
+2026-06-03 16:44:58.462 (   9.128s) [        FBE8A354]             common.cpp:65    INFO| git:6ca188c266c21f7228dc67077303fa6abaf2e8be/branch:refs/tags/v1.16.2/build:Release/compiler:MSVC-19.0.24245.0/link:SHARED
+[DASHBOARD] Connected to output stream.
+[DASHBOARD] ECG side stream not yet present; will retry every 2s in the update loop.
+2026-06-03 16:44:58.664 (   9.331s) [        FBE8A354]         udp_server.cpp:82    WARN| Could not bind multicast responder for ff02:113d:6fdd:2c17:a643:ffe2:1bd1:3cd2 to interface ::1 (An invalid argument was supplied.)
+2026-06-03 16:44:58.664 (   9.331s) [        FBE8A354]         udp_server.cpp:82    WARN| Could not bind multicast responder for ff02:113d:6fdd:2c17:a643:ffe2:1bd1:3cd2 to interface 172.22.128.1 (An invalid argument was supplied.)
+2026-06-03 16:44:58.664 (   9.331s) [        FBE8A354]         udp_server.cpp:82    WARN| Could not bind multicast responder for ff05:113d:6fdd:2c17:a643:ffe2:1bd1:3cd2 to interface ::1 (An invalid argument was supplied.)
+2026-06-03 16:44:58.665 (   9.331s) [        FBE8A354]         udp_server.cpp:82    WARN| Could not bind multicast responder for ff05:113d:6fdd:2c17:a643:ffe2:1bd1:3cd2 to interface 172.22.128.1 (An invalid argument was supplied.)
+[CONTROL] Publisher ready on 'Biofeedback_Control'.
+[DATA SOURCE]   file = 4_2026-05-13_15-30-08.txt
+[DATA SOURCE]   fs   = 1000 Hz
+[DATA SOURCE]   EDA  = column 2, ECG = column 3
+[DATA SOURCE]   267600 samples (267.6 s)
+[DATA SOURCE]   Pre-deriving HR + RMSSD via NeuroKit2 (simulating PDF streaming chain)...
+f:\Biofeedback\src\data_sources.py:719: RuntimeWarning: Mean of empty slice
+  hr_val = float(np.nanmean(rate))
+f:\Biofeedback\src\data_sources.py:719: RuntimeWarning: Mean of empty slice
+  hr_val = float(np.nanmean(rate))
+[CONTROL] Subscriber connected.
+[SYSTEM] Scanning network for LSL Stream: Biofeedback_Raw...
+[DATA SOURCE]   HR valid in 265600/267600 samples, RMSSD valid in 208100/267600.
+[DATA SOURCE]   Pre-derivation took 0.2 s.
+2026-06-03 16:44:59.012 (  13.031s) [        C0517670]      netinterfaces.cpp:36    INFO| netif '{214A57BF-DAE3-414C-8BAE-7A325BDED1DB}' (status: 2, multicast: 1
+2026-06-03 16:44:59.013 (  13.031s) [        C0517670]      netinterfaces.cpp:36    INFO| netif '{D0B2D441-4180-4D9D-B961-C196EA0DE847}' (status: 2, multicast: 1
+2026-06-03 16:44:59.013 (  13.031s) [        C0517670]      netinterfaces.cpp:36    INFO| netif '{77F528BF-AD52-4FB8-A8E5-7DB8EE6448EC}' (status: 1, multicast: 1
+2026-06-03 16:44:59.013 (  13.031s) [        C0517670]      netinterfaces.cpp:58    INFO|       IPv6 ifindex 14
+2026-06-03 16:44:59.013 (  13.031s) [        C0517670]      netinterfaces.cpp:36    INFO| netif '{BB5D37D6-8AF6-11EE-891B-806E6F6E6963}' (status: 1, multicast: 1
+2026-06-03 16:44:59.013 (  13.031s) [        C0517670]      netinterfaces.cpp:58    INFO|       IPv6 ifindex 1
+2026-06-03 16:44:59.013 (  13.031s) [        C0517670]      netinterfaces.cpp:36    INFO| netif '{4ADE504E-6BC7-454D-A61F-866C5C2BA6AF}' (status: 1, multicast: 1
+2026-06-03 16:44:59.013 (  13.031s) [        C0517670]      netinterfaces.cpp:58    INFO|       IPv6 ifindex 24
+2026-06-03 16:44:59.013 (  13.031s) [        C0517670]         api_config.cpp:270   INFO| Loaded default config
+2026-06-03 16:44:59.013 (  13.032s) [        C0517670]             common.cpp:65    INFO| git:6ca188c266c21f7228dc67077303fa6abaf2e8be/branch:refs/tags/v1.16.2/build:Release/compiler:MSVC-19.0.24245.0/link:SHARED
+2026-06-03 16:44:59.015 (  13.033s) [        C0517670]         udp_server.cpp:82    WARN| Could not bind multicast responder for ff02:113d:6fdd:2c17:a643:ffe2:1bd1:3cd2 to interface ::1 (An invalid argument was supplied.)
+2026-06-03 16:44:59.015 (  13.033s) [        C0517670]         udp_server.cpp:82    WARN| Could not bind multicast responder for ff02:113d:6fdd:2c17:a643:ffe2:1bd1:3cd2 to interface 172.22.128.1 (An invalid argument was supplied.)
+2026-06-03 16:44:59.015 (  13.033s) [        C0517670]         udp_server.cpp:82    WARN| Could not bind multicast responder for ff05:113d:6fdd:2c17:a643:ffe2:1bd1:3cd2 to interface ::1 (An invalid argument was supplied.)
+2026-06-03 16:44:59.015 (  13.034s) [        C0517670]         udp_server.cpp:82    WARN| Could not bind multicast responder for ff05:113d:6fdd:2c17:a643:ffe2:1bd1:3cd2 to interface 172.22.128.1 (An invalid argument was supplied.)
+2026-06-03 16:44:59.021 (  13.039s) [        C0517670]         udp_server.cpp:82    WARN| Could not bind multicast responder for ff02:113d:6fdd:2c17:a643:ffe2:1bd1:3cd2 to interface ::1 (An invalid argument was supplied.)
+2026-06-03 16:44:59.021 (  13.039s) [        C0517670]         udp_server.cpp:82    WARN| Could not bind multicast responder for ff02:113d:6fdd:2c17:a643:ffe2:1bd1:3cd2 to interface 172.22.128.1 (An invalid argument was supplied.)
+2026-06-03 16:44:59.021 (  13.039s) [        C0517670]         udp_server.cpp:82    WARN| Could not bind multicast responder for ff05:113d:6fdd:2c17:a643:ffe2:1bd1:3cd2 to interface ::1 (An invalid argument was supplied.)
+2026-06-03 16:44:59.021 (  13.039s) [        C0517670]         udp_server.cpp:82    WARN| Could not bind multicast responder for ff05:113d:6fdd:2c17:a643:ffe2:1bd1:3cd2 to interface 172.22.128.1 (An invalid argument was supplied.)
+[DATA SOURCE]   Outlet ready on LSL 'Biofeedback_Raw' (1000 Hz) + side stream 'OpenSignals_ECG'.
+[DATA SOURCE]   Waiting for acquisition consumer...
+[SUCCESS] Connected to 'Biofeedback_Raw'. Inlet flushed and ready.
+
+[MAIN] All modules online. Waiting for operator commands from the dashboard.
+[MAIN] Logging to: samples.csv
+
+[DATA SOURCE]   Consumer attached, streaming from sample 0.
+[STREAMER] Ready to stream. Press Ctrl+C to stop.
+
+[DASHBOARD] Connected to ECG side stream 'OpenSignals_ECG'. (lazy retry succeeded)
+[TICK 00050] NEW_DATA  | raw EDA:  20.30 uS | raw HR:   --   BPM | raw HRV:   --   ms
+[CONTROL] sent BASELINE_START
+[STATE] IDLE -> BASELINE
+[TICK 00100] NEW_DATA  | raw EDA:  20.91 uS | raw HR:  92.08 BPM | raw HRV:   --   ms
+[TICK 00150] NEW_DATA  | raw EDA:  21.23 uS | raw HR:  92.21 BPM | raw HRV:   --   ms
+[TICK 00200] NEW_DATA  | raw EDA:  21.12 uS | raw HR:  92.55 BPM | raw HRV:   --   ms
+[TICK 00250] NEW_DATA  | raw EDA:  20.97 uS | raw HR:  92.40 BPM | raw HRV:   --   ms
+[TICK 00300] NEW_DATA  | raw EDA:  20.88 uS | raw HR:  92.05 BPM | raw HRV:   --   ms
+[TICK 00350] NEW_DATA  | raw EDA:  20.85 uS | raw HR:  92.02 BPM | raw HRV:   --   ms
+[TICK 00400] NEW_DATA  | raw EDA:  20.84 uS | raw HR:  92.51 BPM | raw HRV:   --   ms
+[TICK 00450] NEW_DATA  | raw EDA:  20.86 uS | raw HR:  93.30 BPM | raw HRV:   --   ms
+[TICK 00500] NEW_DATA  | raw EDA:  20.88 uS | raw HR:  93.69 BPM | raw HRV:   --   ms
+[TICK 00550] NEW_DATA  | raw EDA:  20.89 uS | raw HR:  94.73 BPM | raw HRV:   --   ms
+[TICK 00600] NEW_DATA  | raw EDA:  20.95 uS | raw HR:  95.78 BPM | raw HRV:   --   ms
+[TICK 00650] NEW_DATA  | raw EDA:  21.05 uS | raw HR:  96.53 BPM | raw HRV:   --   ms
+[TICK 00700] NEW_DATA  | raw EDA:  21.08 uS | raw HR:  96.83 BPM | raw HRV:   --   ms
+[TICK 00750] NEW_DATA  | raw EDA:  21.10 uS | raw HR:  97.02 BPM | raw HRV:   --   ms
+[PROCESSOR] EDA-CLAMP: implausible phasic +8.69 µS rejected (> 1.0 µS = decomposition artifact, not a real SCR). Count: 1.
+[TICK 00800] NEW_DATA  | raw EDA:  21.08 uS | raw HR:  96.94 BPM | raw HRV:   --   ms
+[TICK 00850] NEW_DATA  | raw EDA:  21.05 uS | raw HR:  96.83 BPM | raw HRV:   --   ms
+[TICK 00900] NEW_DATA  | raw EDA:  21.09 uS | raw HR:  96.75 BPM | raw HRV:   --   ms
+[TICK 00950] NEW_DATA  | raw EDA:  21.10 uS | raw HR:  96.76 BPM | raw HRV:   --   ms
+[TICK 01000] NEW_DATA  | raw EDA:  21.13 uS | raw HR:  97.05 BPM | raw HRV:   --   ms
+[TICK 01050] NEW_DATA  | raw EDA:  21.30 uS | raw HR:  97.43 BPM | raw HRV:   --   ms
+[TICK 01100] NEW_DATA  | raw EDA:  21.44 uS | raw HR:  97.51 BPM | raw HRV:   --   ms
+[TICK 01150] NEW_DATA  | raw EDA:  21.49 uS | raw HR:  97.35 BPM | raw HRV:   --   ms
+[TICK 01200] NEW_DATA  | raw EDA:  21.53 uS | raw HR:  97.19 BPM | raw HRV:   --   ms
+[TICK 01250] NEW_DATA  | raw EDA:  21.85 uS | raw HR:  96.61 BPM | raw HRV:   --   ms
+[TICK 01300] NEW_DATA  | raw EDA:  21.78 uS | raw HR:  96.31 BPM | raw HRV:   --   ms
+[TICK 01350] NEW_DATA  | raw EDA:  21.64 uS | raw HR:  95.95 BPM | raw HRV:   --   ms
+[TICK 01400] NEW_DATA  | raw EDA:  21.54 uS | raw HR:  95.27 BPM | raw HRV:   --   ms
+[TICK 01450] NEW_DATA  | raw EDA:  21.52 uS | raw HR:  94.92 BPM | raw HRV:   --   ms
+[TICK 01500] NEW_DATA  | raw EDA:  22.02 uS | raw HR:  94.80 BPM | raw HRV:   --   ms
+[TICK 01550] NEW_DATA  | raw EDA:  22.28 uS | raw HR:  94.57 BPM | raw HRV:   --   ms
+[TICK 01600] NEW_DATA  | raw EDA:  22.12 uS | raw HR:  94.52 BPM | raw HRV:   --   ms
+[TICK 01650] NEW_DATA  | raw EDA:  21.97 uS | raw HR:  94.22 BPM | raw HRV:   --   ms
+[TICK 01700] NEW_DATA  | raw EDA:  21.91 uS | raw HR:  94.20 BPM | raw HRV:   --   ms
+[TICK 01750] NEW_DATA  | raw EDA:  21.84 uS | raw HR:  94.03 BPM | raw HRV:   --   ms
+[TICK 01800] NEW_DATA  | raw EDA:  21.83 uS | raw HR:  94.01 BPM | raw HRV:   --   ms
+[TICK 01850] NEW_DATA  | raw EDA:  21.82 uS | raw HR:  93.91 BPM | raw HRV:   --   ms
+[TICK 01900] NEW_DATA  | raw EDA:  21.87 uS | raw HR:  93.72 BPM | raw HRV:   --   ms
+[TICK 01950] NEW_DATA  | raw EDA:  21.99 uS | raw HR:  93.35 BPM | raw HRV:   --   ms
+[TICK 02000] NEW_DATA  | raw EDA:  22.12 uS | raw HR:  92.75 BPM | raw HRV:   --   ms
+[TICK 02050] NEW_DATA  | raw EDA:  22.08 uS | raw HR:  91.81 BPM | raw HRV:   --   ms
+[TICK 02100] NEW_DATA  | raw EDA:  21.97 uS | raw HR:  91.20 BPM | raw HRV:   --   ms
+[TICK 02150] NEW_DATA  | raw EDA:  21.89 uS | raw HR:  90.91 BPM | raw HRV:   --   ms
+[TICK 02200] NEW_DATA  | raw EDA:  21.97 uS | raw HR:  90.71 BPM | raw HRV:   --   ms
+[TICK 02250] NEW_DATA  | raw EDA:  22.01 uS | raw HR:  90.92 BPM | raw HRV:   --   ms
+[TICK 02300] NEW_DATA  | raw EDA:  21.95 uS | raw HR:  90.95 BPM | raw HRV:   --   ms
+[TICK 02350] NEW_DATA  | raw EDA:  21.92 uS | raw HR:  91.20 BPM | raw HRV:   --   ms
+[TICK 02400] NEW_DATA  | raw EDA:  21.90 uS | raw HR:  91.31 BPM | raw HRV:   --   ms
+[TICK 02450] NEW_DATA  | raw EDA:  21.98 uS | raw HR:  90.93 BPM | raw HRV:   --   ms
+[TICK 02500] NEW_DATA  | raw EDA:  21.96 uS | raw HR:  90.55 BPM | raw HRV:   --   ms
+[TICK 02550] NEW_DATA  | raw EDA:  21.88 uS | raw HR:  90.42 BPM | raw HRV:   --   ms
+[TICK 02600] NEW_DATA  | raw EDA:  21.84 uS | raw HR:  90.47 BPM | raw HRV:   --   ms
+[TICK 02650] NEW_DATA  | raw EDA:  21.82 uS | raw HR:  90.78 BPM | raw HRV:   --   ms
+[TICK 02700] NEW_DATA  | raw EDA:  21.83 uS | raw HR:  91.19 BPM | raw HRV:   --   ms
+[TICK 02750] NEW_DATA  | raw EDA:  22.73 uS | raw HR:  91.66 BPM | raw HRV:   --   ms
+[TICK 02800] NEW_DATA  | raw EDA:  22.73 uS | raw HR:  92.44 BPM | raw HRV:   --   ms
+[TICK 02850] NEW_DATA  | raw EDA:  22.70 uS | raw HR:  92.72 BPM | raw HRV:   --   ms
+[TICK 02900] NEW_DATA  | raw EDA:  22.38 uS | raw HR:  93.79 BPM | raw HRV:  15.91 ms
+[WARN] Possible electrode disconnect: HRV signal(s) pinned for >15s.
+[TICK 02950] NEW_DATA  | raw EDA:  22.15 uS | raw HR:  94.45 BPM | raw HRV:  15.83 ms
+[TICK 03000] NEW_DATA  | raw EDA:  22.06 uS | raw HR:  94.94 BPM | raw HRV:  15.76 ms
+[TICK 03050] NEW_DATA  | raw EDA:  22.04 uS | raw HR:  95.48 BPM | raw HRV:  15.85 ms
+[TICK 03100] NEW_DATA  | raw EDA:  22.09 uS | raw HR:  95.71 BPM | raw HRV:  16.99 ms
+[TICK 03150] NEW_DATA  | raw EDA:  22.63 uS | raw HR:  95.73 BPM | raw HRV:  17.08 ms
+[TICK 03200] NEW_DATA  | raw EDA:  22.63 uS | raw HR:  95.98 BPM | raw HRV:  18.21 ms
+[TICK 03250] NEW_DATA  | raw EDA:  22.42 uS | raw HR:  96.00 BPM | raw HRV:  18.17 ms
+[TICK 03300] NEW_DATA  | raw EDA:  22.35 uS | raw HR:  96.06 BPM | raw HRV:  18.30 ms
+[TICK 03350] NEW_DATA  | raw EDA:  22.37 uS | raw HR:  96.27 BPM | raw HRV:  18.72 ms
+[TICK 03400] NEW_DATA  | raw EDA:  22.33 uS | raw HR:  96.52 BPM | raw HRV:  19.06 ms
+[TICK 03450] NEW_DATA  | raw EDA:  22.28 uS | raw HR:  96.52 BPM | raw HRV:  19.20 ms
+[TICK 03500] NEW_DATA  | raw EDA:  22.23 uS | raw HR:  96.90 BPM | raw HRV:  19.18 ms
+[TICK 03550] NEW_DATA  | raw EDA:  22.18 uS | raw HR:  96.87 BPM | raw HRV:  19.73 ms
+[TICK 03600] NEW_DATA  | raw EDA:  22.16 uS | raw HR:  96.64 BPM | raw HRV:  19.59 ms
+[TICK 03650] NEW_DATA  | raw EDA:  22.13 uS | raw HR:  96.50 BPM | raw HRV:  19.58 ms
+[TICK 03700] NEW_DATA  | raw EDA:  22.11 uS | raw HR:  96.18 BPM | raw HRV:  19.94 ms
+[TICK 03750] NEW_DATA  | raw EDA:  22.08 uS | raw HR:  95.88 BPM | raw HRV:  19.95 ms
+[TICK 03800] NEW_DATA  | raw EDA:  22.07 uS | raw HR:  95.69 BPM | raw HRV:  19.94 ms
+[TICK 03850] NEW_DATA  | raw EDA:  22.12 uS | raw HR:  95.52 BPM | raw HRV:  19.78 ms
+[TICK 03900] NEW_DATA  | raw EDA:  22.73 uS | raw HR:  95.40 BPM | raw HRV:  20.17 ms
+[TICK 03950] NEW_DATA  | raw EDA:  22.73 uS | raw HR:  95.27 BPM | raw HRV:  20.48 ms
+[TICK 04000] NEW_DATA  | raw EDA:  22.73 uS | raw HR:  94.92 BPM | raw HRV:  20.42 ms
+[TICK 04050] NEW_DATA  | raw EDA:  22.64 uS | raw HR:  94.58 BPM | raw HRV:  20.43 ms
+[TICK 04100] NEW_DATA  | raw EDA:  22.63 uS | raw HR:  94.14 BPM | raw HRV:  20.29 ms
+[TICK 04150] NEW_DATA  | raw EDA:  22.62 uS | raw HR:  93.49 BPM | raw HRV:  20.04 ms
+[TICK 04200] NEW_DATA  | raw EDA:  22.54 uS | raw HR:  93.10 BPM | raw HRV:  20.10 ms
+[TICK 04250] NEW_DATA  | raw EDA:  22.50 uS | raw HR:  92.72 BPM | raw HRV:  20.15 ms
+[TICK 04300] NEW_DATA  | raw EDA:  22.62 uS | raw HR:  92.45 BPM | raw HRV:  20.12 ms
+[TICK 04350] NEW_DATA  | raw EDA:  22.57 uS | raw HR:  92.12 BPM | raw HRV:  19.30 ms
+[TICK 04400] NEW_DATA  | raw EDA:  22.73 uS | raw HR:  91.65 BPM | raw HRV:  19.30 ms
+[TICK 04450] NEW_DATA  | raw EDA:  22.73 uS | raw HR:  91.57 BPM | raw HRV:  19.20 ms
+[TICK 04500] NEW_DATA  | raw EDA:  22.73 uS | raw HR:  91.24 BPM | raw HRV:  19.21 ms
+[TICK 04550] NEW_DATA  | raw EDA:  22.73 uS | raw HR:  91.28 BPM | raw HRV:  19.22 ms
+[TICK 04600] NEW_DATA  | raw EDA:  22.61 uS | raw HR:  91.35 BPM | raw HRV:  19.64 ms
+[TICK 04650] NEW_DATA  | raw EDA:  22.58 uS | raw HR:  90.80 BPM | raw HRV:  20.44 ms
+[TICK 04700] NEW_DATA  | raw EDA:  22.73 uS | raw HR:  91.03 BPM | raw HRV:  23.89 ms
+[TICK 04750] NEW_DATA  | raw EDA:  22.73 uS | raw HR:  90.96 BPM | raw HRV:  24.02 ms
+[TICK 04800] NEW_DATA  | raw EDA:  22.73 uS | raw HR:  90.92 BPM | raw HRV:  24.97 ms
+[TICK 04850] NEW_DATA  | raw EDA:  22.73 uS | raw HR:  90.01 BPM | raw HRV:  25.20 ms
+[TICK 04900] NEW_DATA  | raw EDA:  22.73 uS | raw HR:  89.60 BPM | raw HRV:  25.05 ms
+[TICK 04950] NEW_DATA  | raw EDA:  22.73 uS | raw HR:  90.09 BPM | raw HRV:  25.01 ms
+[TICK 05000] NEW_DATA  | raw EDA:  22.73 uS | raw HR:  90.13 BPM | raw HRV:  26.22 ms
+[TICK 05050] NEW_DATA  | raw EDA:  22.73 uS | raw HR:  90.26 BPM | raw HRV:  26.23 ms
+[TICK 05100] NEW_DATA  | raw EDA:  22.73 uS | raw HR:  90.08 BPM | raw HRV:  26.89 ms
+[TICK 05150] NEW_DATA  | raw EDA:  22.73 uS | raw HR:  89.90 BPM | raw HRV:  26.96 ms
+[TICK 05200] NEW_DATA  | raw EDA:  22.73 uS | raw HR:  89.82 BPM | raw HRV:  28.90 ms
+[TICK 05250] NEW_DATA  | raw EDA:  22.73 uS | raw HR:  89.75 BPM | raw HRV:  28.83 ms
+[TICK 05300] NEW_DATA  | raw EDA:  22.73 uS | raw HR:  89.13 BPM | raw HRV:  31.35 ms
+[TICK 05350] NEW_DATA  | raw EDA:  22.73 uS | raw HR:  89.24 BPM | raw HRV:  33.25 ms
+[TICK 05400] NEW_DATA  | raw EDA:  22.73 uS | raw HR:  89.69 BPM | raw HRV:  33.09 ms
+[WARN] Possible electrode disconnect: EDA signal(s) pinned for >15s.
+[TICK 05450] NEW_DATA  | raw EDA:  22.73 uS | raw HR:  89.93 BPM | raw HRV:  33.29 ms
+[TICK 05500] NEW_DATA  | raw EDA:  22.73 uS | raw HR:  89.74 BPM | raw HRV:  34.29 ms
+[TICK 05550] NEW_DATA  | raw EDA:  22.73 uS | raw HR:  89.87 BPM | raw HRV:  34.60 ms
+[TICK 05600] NEW_DATA  | raw EDA:  22.73 uS | raw HR:  89.74 BPM | raw HRV:  34.67 ms
+[TICK 05650] NEW_DATA  | raw EDA:  22.73 uS | raw HR:  89.63 BPM | raw HRV:  34.87 ms
+[TICK 05700] NEW_DATA  | raw EDA:  22.73 uS | raw HR:  89.34 BPM | raw HRV:  34.36 ms
+[TICK 05750] NEW_DATA  | raw EDA:  22.73 uS | raw HR:  89.18 BPM | raw HRV:  34.40 ms
+[TICK 05800] NEW_DATA  | raw EDA:  22.73 uS | raw HR:  88.85 BPM | raw HRV:  34.39 ms
+[TICK 05850] NEW_DATA  | raw EDA:  22.73 uS | raw HR:  88.73 BPM | raw HRV:  34.62 ms
+[TICK 05900] NEW_DATA  | raw EDA:  22.73 uS | raw HR:  88.77 BPM | raw HRV:  34.60 ms
+
+[PROCESSOR] Wall-clock 120 s reached with 5841/6000 samples (97.3%). Finalizing baseline on what we have.
+
+[PROCESSOR] 120-Second Buffer Full. Executing 3-Sigma Cleaning...
+  -> EDA: Removed 0 artifacts. Baseline Avg = 22.10
+[PROCESSOR] HR: dropped 8 warm-up samples (NaN); averaging 5833 real samples (116.7 s).
+  -> HR: Removed 0 artifacts. Baseline Avg = 93.15
+[PROCESSOR] HRV: dropped 2808 warm-up samples (NaN); averaging 3033 real samples (60.7 s).
+  -> HRV: Removed 0 artifacts. Baseline Avg = 23.65
+  -> EDA PHASIC: kept 5716/5841 samples; mean=+0.0047 uS
+[PROCESSOR] Calibration Complete. Switching to Live Therapy Mode.
+
+[FUSION] Per-signal baselines (for z-scoring):
+         EDA phasic: mean=+0.0049 uS, sigma=0.0617 uS  (n=3033)
+         HR  delta : mean=+0.79%, sigma=2.39%  (n=3033 real samples)
+         HRV delta : mean=-0.00%, sigma=26.32%  (n=3033 real samples after 60 s warm-up)
+[FUSION] Baseline S_t (over 3033 fully-valid samples): mean=-0.0019, sigma_raw=0.6136 (used), sigma_smoothed=0.5753 (reference only)
+[FUSION] Thresholds locked -> mean_baseline: -0.002 | mild: +0.784 | high: +1.428 (sigma_baseline=0.6136)
+[SESSION] Personal Baselines:
+  -> EDA:  22.10 uS
+  -> HR:   93.15 BPM
+  -> HRV:  23.65 ms
+[SESSION] Baseline captured into metadata.json
+[STATE] BASELINE -> BASELINE_DONE (operator: click Start on the Live panel)
+[TICK 05950] NEW_DATA  | raw EDA:  22.73 uS | raw HR:  88.41 BPM | raw HRV:  34.95 ms
+[TICK 06000] NEW_DATA  | raw EDA:  22.73 uS | raw HR:  88.52 BPM | raw HRV:  34.61 ms
+[TICK 06050] NEW_DATA  | raw EDA:  22.73 uS | raw HR:  89.04 BPM | raw HRV:  33.94 ms
+[TICK 06100] NEW_DATA  | raw EDA:  22.73 uS | raw HR:  89.33 BPM | raw HRV:  34.04 ms
+[TICK 06150] NEW_DATA  | raw EDA:  22.73 uS | raw HR:  89.54 BPM | raw HRV:  34.18 ms
+[TICK 06200] NEW_DATA  | raw EDA:  22.73 uS | raw HR:  89.26 BPM | raw HRV:  35.04 ms
+[CONTROL] sent LIVE_START
+[STATE] BASELINE_DONE -> LIVE
+[UNITY] sent 'start'
+2026-06-03 16:47:07 | [LIVE] EDA=22.727uS  HR=89.1BPM  RMSSD=35.0ms  phasicEDA=+0.000uS  dHR=-4.3%  dHRV=-47.9%  S_t=+0.00  state=calm
+[TICK 06250] NEW_DATA  | raw EDA:  22.73 uS | raw HR:  89.85 BPM | raw HRV:  34.99 ms
+2026-06-03 16:47:08 | [LIVE] EDA=22.727uS  HR=90.0BPM  RMSSD=34.9ms  phasicEDA=+0.000uS  dHR=-3.4%  dHRV=-47.4%  S_t=-0.95  state=calm
+[TICK 06300] NEW_DATA  | raw EDA:  22.73 uS | raw HR:  90.76 BPM | raw HRV:  34.84 ms
+[UNITY] gate opened: first calm reading (1.5s after start). 0 commands held during wait.
+[UNITY] sent 'increase' (state=calm)
+2026-06-03 16:47:09 | [LIVE] EDA=22.727uS  HR=90.8BPM  RMSSD=34.9ms  phasicEDA=+0.000uS  dHR=-2.6%  dHRV=-47.7%  S_t=-0.87  state=calm
+[TICK 06350] NEW_DATA  | raw EDA:  22.73 uS | raw HR:  90.39 BPM | raw HRV:  35.57 ms
+[UNITY] sent 'increase' (state=calm)
+2026-06-03 16:47:10 | [LIVE] EDA=22.727uS  HR=90.1BPM  RMSSD=35.2ms  phasicEDA=+0.000uS  dHR=-3.3%  dHRV=-48.9%  S_t=-0.93  state=calm
+[TICK 06400] NEW_DATA  | raw EDA:  22.73 uS | raw HR:  89.94 BPM | raw HRV:  35.08 ms
+[UNITY] sent 'increase' (state=calm)
+2026-06-03 16:47:11 | [LIVE] EDA=22.727uS  HR=90.0BPM  RMSSD=35.3ms  phasicEDA=+0.000uS  dHR=-3.4%  dHRV=-49.1%  S_t=-0.95  state=calm
+[TICK 06450] NEW_DATA  | raw EDA:  22.73 uS | raw HR:  89.91 BPM | raw HRV:  35.48 ms
+[UNITY] sent 'increase' (state=calm)
+2026-06-03 16:47:12 | [LIVE] EDA=22.727uS  HR=89.8BPM  RMSSD=35.3ms  phasicEDA=+0.000uS  dHR=-3.6%  dHRV=-49.4%  S_t=-0.97  state=calm
+[UNITY] sent 'increase' (state=calm)
+[TICK 06500] NEW_DATA  | raw EDA:  22.73 uS | raw HR:  89.96 BPM | raw HRV:  35.71 ms
+2026-06-03 16:47:13 | [LIVE] EDA=22.727uS  HR=90.0BPM  RMSSD=35.7ms  phasicEDA=-0.000uS  dHR=-3.4%  dHRV=-51.0%  S_t=-0.97  state=calm
+[UNITY] sent 'increase' (state=calm)
+[TICK 06550] NEW_DATA  | raw EDA:  22.73 uS | raw HR:  89.97 BPM | raw HRV:  35.36 ms
+2026-06-03 16:47:14 | [LIVE] EDA=22.727uS  HR=90.0BPM  RMSSD=35.4ms  phasicEDA=-0.000uS  dHR=-3.4%  dHRV=-49.5%  S_t=-0.96  state=calm
+[UNITY] sent 'increase' (state=calm)
+[TICK 06600] NEW_DATA  | raw EDA:  22.73 uS | raw HR:  90.11 BPM | raw HRV:  35.60 ms
+2026-06-03 16:47:15 | [LIVE] EDA=22.727uS  HR=90.1BPM  RMSSD=35.6ms  phasicEDA=-0.000uS  dHR=-3.3%  dHRV=-50.5%  S_t=-0.95  state=calm
+[UNITY] sent 'increase' (state=calm)
+[TICK 06650] NEW_DATA  | raw EDA:  22.73 uS | raw HR:  89.94 BPM | raw HRV:  35.43 ms
+2026-06-03 16:47:16 | [LIVE] EDA=22.727uS  HR=89.9BPM  RMSSD=35.4ms  phasicEDA=-0.000uS  dHR=-3.4%  dHRV=-49.8%  S_t=-0.96  state=calm
+[UNITY] sent 'increase' (state=calm)
+[TICK 06700] NEW_DATA  | raw EDA:  22.73 uS | raw HR:  90.28 BPM | raw HRV:  35.70 ms
+2026-06-03 16:47:17 | [LIVE] EDA=22.727uS  HR=90.3BPM  RMSSD=35.7ms  phasicEDA=-0.000uS  dHR=-3.1%  dHRV=-50.9%  S_t=-0.95  state=calm
+[UNITY] sent 'increase' (state=calm)
+[TICK 06750] NEW_DATA  | raw EDA:  22.73 uS | raw HR:  90.88 BPM | raw HRV:  35.53 ms
+2026-06-03 16:47:18 | [LIVE] EDA=22.727uS  HR=91.1BPM  RMSSD=35.3ms  phasicEDA=-0.000uS  dHR=-2.2%  dHRV=-49.3%  S_t=-0.90  state=calm
+[UNITY] sent 'increase' (state=calm)
+[TICK 06800] NEW_DATA  | raw EDA:  22.73 uS | raw HR:  91.17 BPM | raw HRV:  35.23 ms
+2026-06-03 16:47:19 | [LIVE] EDA=22.727uS  HR=91.0BPM  RMSSD=35.3ms  phasicEDA=-0.000uS  dHR=-2.3%  dHRV=-49.4%  S_t=-0.85  state=calm
+[UNITY] sent 'increase' (state=calm)
+[TICK 06850] NEW_DATA  | raw EDA:  22.73 uS | raw HR:  90.98 BPM | raw HRV:  35.48 ms
+2026-06-03 16:47:20 | [LIVE] EDA=22.727uS  HR=91.2BPM  RMSSD=35.3ms  phasicEDA=-0.000uS  dHR=-2.1%  dHRV=-49.1%  S_t=-0.87  state=calm
+[UNITY] sent 'increase' (state=calm)
+[TICK 06900] NEW_DATA  | raw EDA:  22.73 uS | raw HR:  91.14 BPM | raw HRV:  35.28 ms
+2026-06-03 16:47:21 | [LIVE] EDA=22.727uS  HR=91.4BPM  RMSSD=35.4ms  phasicEDA=-0.000uS  dHR=-1.9%  dHRV=-49.8%  S_t=-0.85  state=calm
+[UNITY] sent 'increase' (state=calm)
+[TICK 06950] NEW_DATA  | raw EDA:  22.73 uS | raw HR:  91.58 BPM | raw HRV:  35.30 ms
+2026-06-03 16:47:22 | [LIVE] EDA=22.727uS  HR=91.5BPM  RMSSD=35.3ms  phasicEDA=-0.000uS  dHR=-1.8%  dHRV=-49.3%  S_t=-0.82  state=calm
+[UNITY] sent 'increase' (state=calm)
+[TICK 07000] NEW_DATA  | raw EDA:  22.73 uS | raw HR:  91.58 BPM | raw HRV:  35.32 ms
+2026-06-03 16:47:23 | [LIVE] EDA=22.727uS  HR=91.8BPM  RMSSD=35.3ms  phasicEDA=-0.000uS  dHR=-1.4%  dHRV=-49.3%  S_t=-0.81  state=calm
+[UNITY] sent 'increase' (state=calm)
+[TICK 07050] NEW_DATA  | raw EDA:  22.73 uS | raw HR:  91.75 BPM | raw HRV:  35.30 ms
+2026-06-03 16:47:24 | [LIVE] EDA=22.727uS  HR=91.9BPM  RMSSD=35.3ms  phasicEDA=-0.000uS  dHR=-1.3%  dHRV=-49.2%  S_t=-0.79  state=calm
+[UNITY] sent 'increase' (state=calm)
+[TICK 07100] NEW_DATA  | raw EDA:  22.73 uS | raw HR:  92.13 BPM | raw HRV:  35.28 ms
+2026-06-03 16:47:25 | [LIVE] EDA=22.727uS  HR=92.1BPM  RMSSD=35.3ms  phasicEDA=-0.000uS  dHR=-1.1%  dHRV=-49.2%  S_t=-0.77  state=calm
+[UNITY] sent 'increase' (state=calm)
+[TICK 07150] NEW_DATA  | raw EDA:  22.73 uS | raw HR:  92.35 BPM | raw HRV:  35.34 ms
+2026-06-03 16:47:26 | [LIVE] EDA=22.727uS  HR=92.5BPM  RMSSD=35.2ms  phasicEDA=-0.000uS  dHR=-0.7%  dHRV=-49.0%  S_t=-0.75  state=calm
+[UNITY] sent 'increase' (state=calm)
+[TICK 07200] NEW_DATA  | raw EDA:  22.73 uS | raw HR:  92.60 BPM | raw HRV:  35.05 ms
+2026-06-03 16:47:27 | [LIVE] EDA=22.727uS  HR=92.7BPM  RMSSD=35.2ms  phasicEDA=+0.000uS  dHR=-0.5%  dHRV=-48.6%  S_t=-0.71  state=calm
+[UNITY] sent 'increase' (state=calm)
+[TICK 07250] NEW_DATA  | raw EDA:  22.73 uS | raw HR:  92.76 BPM | raw HRV:  35.32 ms
+2026-06-03 16:47:28 | [LIVE] EDA=22.727uS  HR=92.9BPM  RMSSD=35.3ms  phasicEDA=+0.000uS  dHR=-0.3%  dHRV=-49.4%  S_t=-0.70  state=calm
+[UNITY] sent 'increase' (state=calm)
+[TICK 07300] NEW_DATA  | raw EDA:  22.73 uS | raw HR:  92.74 BPM | raw HRV:  35.49 ms
+2026-06-03 16:47:29 | [LIVE] EDA=22.727uS  HR=92.7BPM  RMSSD=35.3ms  phasicEDA=+0.000uS  dHR=-0.5%  dHRV=-49.2%  S_t=-0.71  state=calm
+[UNITY] sent 'increase' (state=calm)
+[TICK 07350] NEW_DATA  | raw EDA:  22.73 uS | raw HR:  92.59 BPM | raw HRV:  35.50 ms
+2026-06-03 16:47:30 | [LIVE] EDA=22.727uS  HR=92.6BPM  RMSSD=35.5ms  phasicEDA=+0.000uS  dHR=-0.6%  dHRV=-50.1%  S_t=-0.72  state=calm
+[UNITY] sent 'increase' (state=calm)
+[TICK 07400] NEW_DATA  | raw EDA:  22.73 uS | raw HR:  92.51 BPM | raw HRV:  35.52 ms
+2026-06-03 16:47:31 | [LIVE] EDA=22.727uS  HR=92.5BPM  RMSSD=35.5ms  phasicEDA=+0.000uS  dHR=-0.7%  dHRV=-50.1%  S_t=-0.73  state=calm
+[UNITY] sent 'increase' (state=calm)
+[TICK 07450] NEW_DATA  | raw EDA:  22.73 uS | raw HR:  92.43 BPM | raw HRV:  35.29 ms
+2026-06-03 16:47:32 | [LIVE] EDA=22.727uS  HR=92.4BPM  RMSSD=35.3ms  phasicEDA=+0.000uS  dHR=-0.8%  dHRV=-49.2%  S_t=-0.74  state=calm
+[UNITY] sent 'increase' (state=calm)
+[TICK 07500] NEW_DATA  | raw EDA:  22.73 uS | raw HR:  92.13 BPM | raw HRV:  34.77 ms
+2026-06-03 16:47:33 | [LIVE] EDA=22.727uS  HR=92.1BPM  RMSSD=34.8ms  phasicEDA=+0.000uS  dHR=-1.1%  dHRV=-47.0%  S_t=-0.73  state=calm
+[UNITY] sent 'increase' (state=calm)
+[TICK 07550] NEW_DATA  | raw EDA:  22.73 uS | raw HR:  91.99 BPM | raw HRV:  34.75 ms
+2026-06-03 16:47:34 | [LIVE] EDA=22.727uS  HR=92.0BPM  RMSSD=34.8ms  phasicEDA=+0.000uS  dHR=-1.3%  dHRV=-46.9%  S_t=-0.74  state=calm
+[UNITY] sent 'increase' (state=calm)
+[TICK 07600] NEW_DATA  | raw EDA:  22.73 uS | raw HR:  91.67 BPM | raw HRV:  32.31 ms
+2026-06-03 16:47:35 | [LIVE] EDA=22.727uS  HR=91.7BPM  RMSSD=32.3ms  phasicEDA=+0.000uS  dHR=-1.6%  dHRV=-36.6%  S_t=-0.69  state=calm
+[UNITY] sent 'increase' (state=calm)
+2026-06-03 16:47:36 | [LIVE] EDA=22.727uS  HR=91.6BPM  RMSSD=31.5ms  phasicEDA=+0.000uS  dHR=-1.7%  dHRV=-33.3%  S_t=-0.64  state=calm
+[TICK 07650] NEW_DATA  | raw EDA:  22.73 uS | raw HR:  91.58 BPM | raw HRV:  31.54 ms
+[UNITY] sent 'increase' (state=calm)
+2026-06-03 16:47:37 | [LIVE] EDA=22.727uS  HR=91.3BPM  RMSSD=31.4ms  phasicEDA=+0.000uS  dHR=-2.0%  dHRV=-32.7%  S_t=-0.63  state=calm
+[TICK 07700] NEW_DATA  | raw EDA:  22.73 uS | raw HR:  91.30 BPM | raw HRV:  31.39 ms
+[UNITY] sent 'increase' (state=calm)
+2026-06-03 16:47:38 | [LIVE] EDA=22.727uS  HR=91.3BPM  RMSSD=31.3ms  phasicEDA=+0.000uS  dHR=-2.0%  dHRV=-32.1%  S_t=-0.65  state=calm
+[TICK 07750] NEW_DATA  | raw EDA:  22.73 uS | raw HR:  91.27 BPM | raw HRV:  31.25 ms
+[UNITY] sent 'increase' (state=calm)
+2026-06-03 16:47:39 | [LIVE] EDA=22.727uS  HR=91.3BPM  RMSSD=31.1ms  phasicEDA=+0.000uS  dHR=-2.0%  dHRV=-31.3%  S_t=-0.64  state=calm
+[TICK 07800] NEW_DATA  | raw EDA:  22.73 uS | raw HR:  91.28 BPM | raw HRV:  31.06 ms
+[UNITY] sent 'increase' (state=calm)
+2026-06-03 16:47:40 | [LIVE] EDA=22.727uS  HR=91.4BPM  RMSSD=30.1ms  phasicEDA=+0.000uS  dHR=-1.8%  dHRV=-27.3%  S_t=-0.62  state=calm
+[TICK 07850] NEW_DATA  | raw EDA:  22.73 uS | raw HR:  91.45 BPM | raw HRV:  30.10 ms
+[UNITY] sent 'increase' (state=calm)
+2026-06-03 16:47:41 | [LIVE] EDA=22.727uS  HR=91.7BPM  RMSSD=30.0ms  phasicEDA=+0.000uS  dHR=-1.6%  dHRV=-26.7%  S_t=-0.57  state=calm
+[TICK 07900] NEW_DATA  | raw EDA:  22.73 uS | raw HR:  91.65 BPM | raw HRV:  29.96 ms
+[UNITY] sent 'increase' (state=calm)
+2026-06-03 16:47:42 | [LIVE] EDA=22.727uS  HR=91.7BPM  RMSSD=29.4ms  phasicEDA=+0.000uS  dHR=-1.5%  dHRV=-24.2%  S_t=-0.53  state=calm
+[TICK 07950] NEW_DATA  | raw EDA:  22.73 uS | raw HR:  91.72 BPM | raw HRV:  29.38 ms
+[UNITY] sent 'increase' (state=calm)
+2026-06-03 16:47:43 | [LIVE] EDA=22.727uS  HR=91.7BPM  RMSSD=29.2ms  phasicEDA=+0.000uS  dHR=-1.6%  dHRV=-23.6%  S_t=-0.51  state=calm
+[TICK 08000] NEW_DATA  | raw EDA:  22.73 uS | raw HR:  91.69 BPM | raw HRV:  29.24 ms
+[UNITY] sent 'increase' (state=calm)
+2026-06-03 16:47:44 | [LIVE] EDA=22.727uS  HR=91.6BPM  RMSSD=27.5ms  phasicEDA=+0.000uS  dHR=-1.6%  dHRV=-16.1%  S_t=-0.49  state=calm
+[TICK 08050] NEW_DATA  | raw EDA:  22.73 uS | raw HR:  91.63 BPM | raw HRV:  27.47 ms
+[UNITY] sent 'increase' (state=calm)
+2026-06-03 16:47:45 | [LIVE] EDA=22.727uS  HR=91.5BPM  RMSSD=27.4ms  phasicEDA=+0.000uS  dHR=-1.8%  dHRV=-15.8%  S_t=-0.43  state=calm
+[TICK 08100] NEW_DATA  | raw EDA:  22.73 uS | raw HR:  91.46 BPM | raw HRV:  27.38 ms
+[UNITY] sent 'increase' (state=calm)
+2026-06-03 16:47:46 | [LIVE] EDA=22.727uS  HR=91.3BPM  RMSSD=24.7ms  phasicEDA=+0.000uS  dHR=-2.0%  dHRV=-4.2%  S_t=-0.35  state=calm
+[TICK 08150] NEW_DATA  | raw EDA:  22.73 uS | raw HR:  91.32 BPM | raw HRV:  24.65 ms
+[UNITY] sent 'increase' (state=calm)
+2026-06-03 16:47:47 | [LIVE] EDA=22.727uS  HR=90.9BPM  RMSSD=22.1ms  phasicEDA=+0.000uS  dHR=-2.4%  dHRV=+6.5%  S_t=-0.31  state=calm
+[TICK 08200] NEW_DATA  | raw EDA:  22.73 uS | raw HR:  90.88 BPM | raw HRV:  22.12 ms
+[UNITY] sent 'increase' (state=calm)
+2026-06-03 16:47:48 | [LIVE] EDA=22.727uS  HR=90.5BPM  RMSSD=22.1ms  phasicEDA=+0.000uS  dHR=-2.8%  dHRV=+6.6%  S_t=-0.25  state=calm
+[TICK 08250] NEW_DATA  | raw EDA:  22.73 uS | raw HR:  90.52 BPM | raw HRV:  22.10 ms
+[UNITY] sent 'increase' (state=calm)
+2026-06-03 16:47:49 | [LIVE] EDA=22.727uS  HR=90.6BPM  RMSSD=22.0ms  phasicEDA=+0.000uS  dHR=-2.7%  dHRV=+6.9%  S_t=-0.26  state=calm
+[TICK 08300] NEW_DATA  | raw EDA:  22.73 uS | raw HR:  90.61 BPM | raw HRV:  22.02 ms
+[UNITY] sent 'increase' (state=calm)
+2026-06-03 16:47:50 | [LIVE] EDA=22.727uS  HR=90.7BPM  RMSSD=20.3ms  phasicEDA=+0.000uS  dHR=-2.6%  dHRV=+14.2%  S_t=-0.19  state=calm
+[TICK 08350] NEW_DATA  | raw EDA:  22.73 uS | raw HR:  90.86 BPM | raw HRV:  20.18 ms
+[UNITY] sent 'increase' (state=calm)
+2026-06-03 16:47:51 | [LIVE] EDA=22.727uS  HR=91.0BPM  RMSSD=20.0ms  phasicEDA=+0.000uS  dHR=-2.3%  dHRV=+15.3%  S_t=-0.15  state=calm
+[TICK 08400] NEW_DATA  | raw EDA:  22.73 uS | raw HR:  91.17 BPM | raw HRV:  20.05 ms
+[UNITY] sent 'increase' (state=calm)
+2026-06-03 16:47:52 | [LIVE] EDA=22.727uS  HR=91.3BPM  RMSSD=20.0ms  phasicEDA=+0.000uS  dHR=-2.0%  dHRV=+15.2%  S_t=-0.11  state=calm
+[TICK 08450] NEW_DATA  | raw EDA:  22.73 uS | raw HR:  91.44 BPM | raw HRV:  20.03 ms
+[UNITY] sent 'increase' (state=calm)
+2026-06-03 16:47:53 | [LIVE] EDA=22.727uS  HR=91.5BPM  RMSSD=20.1ms  phasicEDA=+0.000uS  dHR=-1.8%  dHRV=+15.2%  S_t=-0.09  state=calm
+[TICK 08500] NEW_DATA  | raw EDA:  22.73 uS | raw HR:  91.55 BPM | raw HRV:  20.03 ms
+[UNITY] sent 'increase' (state=calm)
+2026-06-03 16:47:54 | [LIVE] EDA=22.727uS  HR=91.6BPM  RMSSD=20.0ms  phasicEDA=+0.000uS  dHR=-1.7%  dHRV=+15.3%  S_t=-0.08  state=calm
+[TICK 08550] NEW_DATA  | raw EDA:  22.73 uS | raw HR:  91.48 BPM | raw HRV:  19.92 ms
+[UNITY] sent 'increase' (state=calm)
+2026-06-03 16:47:55 | [LIVE] EDA=22.727uS  HR=91.4BPM  RMSSD=19.9ms  phasicEDA=+0.000uS  dHR=-1.9%  dHRV=+15.9%  S_t=-0.08  state=calm
+[TICK 08600] NEW_DATA  | raw EDA:  22.73 uS | raw HR:  91.32 BPM | raw HRV:  19.79 ms
+[UNITY] sent 'increase' (state=calm)
+2026-06-03 16:47:56 | [LIVE] EDA=22.727uS  HR=91.3BPM  RMSSD=19.9ms  phasicEDA=+0.000uS  dHR=-2.0%  dHRV=+15.9%  S_t=-0.09  state=calm
+[TICK 08650] NEW_DATA  | raw EDA:  22.73 uS | raw HR:  91.04 BPM | raw HRV:  19.82 ms
+[UNITY] sent 'increase' (state=calm)
+2026-06-03 16:47:57 | [LIVE] EDA=22.727uS  HR=90.9BPM  RMSSD=19.7ms  phasicEDA=+0.000uS  dHR=-2.4%  dHRV=+16.6%  S_t=-0.11  state=calm
+[TICK 08700] NEW_DATA  | raw EDA:  22.73 uS | raw HR:  90.82 BPM | raw HRV:  19.70 ms
+[UNITY] sent 'increase' (state=calm)
+2026-06-03 16:47:58 | [LIVE] EDA=22.727uS  HR=90.8BPM  RMSSD=19.5ms  phasicEDA=+0.000uS  dHR=-2.5%  dHRV=+17.6%  S_t=-0.12  state=calm
+[TICK 08750] NEW_DATA  | raw EDA:  22.73 uS | raw HR:  90.76 BPM | raw HRV:  19.50 ms
+[UNITY] sent 'increase' (state=calm)
+2026-06-03 16:47:59 | [LIVE] EDA=22.727uS  HR=90.8BPM  RMSSD=19.4ms  phasicEDA=+0.000uS  dHR=-2.6%  dHRV=+17.9%  S_t=-0.12  state=calm
+[TICK 08800] NEW_DATA  | raw EDA:  22.73 uS | raw HR:  90.74 BPM | raw HRV:  18.74 ms
+[UNITY] sent 'increase' (state=calm)
+2026-06-03 16:48:00 | [LIVE] EDA=22.727uS  HR=90.7BPM  RMSSD=18.6ms  phasicEDA=+0.000uS  dHR=-2.6%  dHRV=+21.4%  S_t=-0.09  state=calm
+[TICK 08850] NEW_DATA  | raw EDA:  22.73 uS | raw HR:  90.71 BPM | raw HRV:  18.66 ms
+[UNITY] sent 'increase' (state=calm)
+2026-06-03 16:48:01 | [LIVE] EDA=22.727uS  HR=90.7BPM  RMSSD=18.6ms  phasicEDA=+0.000uS  dHR=-2.6%  dHRV=+21.6%  S_t=-0.08  state=calm
+[TICK 08900] NEW_DATA  | raw EDA:  22.73 uS | raw HR:  90.74 BPM | raw HRV:  18.52 ms
+[UNITY] sent 'increase' (state=calm)
+2026-06-03 16:48:02 | [LIVE] EDA=22.727uS  HR=90.8BPM  RMSSD=18.4ms  phasicEDA=+0.000uS  dHR=-2.5%  dHRV=+22.3%  S_t=-0.07  state=calm
+[TICK 08950] NEW_DATA  | raw EDA:  22.73 uS | raw HR:  90.74 BPM | raw HRV:  18.47 ms
+[UNITY] sent 'increase' (state=calm)
+2026-06-03 16:48:03 | [LIVE] EDA=22.727uS  HR=90.8BPM  RMSSD=18.5ms  phasicEDA=+0.000uS  dHR=-2.5%  dHRV=+21.9%  S_t=-0.07  state=calm
+[TICK 09000] NEW_DATA  | raw EDA:  22.73 uS | raw HR:  90.92 BPM | raw HRV:  17.89 ms
+[UNITY] sent 'increase' (state=calm)
+2026-06-03 16:48:04 | [LIVE] EDA=22.727uS  HR=90.9BPM  RMSSD=17.9ms  phasicEDA=+0.000uS  dHR=-2.4%  dHRV=+24.4%  S_t=-0.04  state=calm
+[UNITY] sent 'increase' (state=calm)
+[TICK 09050] NEW_DATA  | raw EDA:  22.73 uS | raw HR:  90.95 BPM | raw HRV:  15.56 ms
+2026-06-03 16:48:05 | [LIVE] EDA=22.727uS  HR=91.0BPM  RMSSD=15.6ms  phasicEDA=+0.000uS  dHR=-2.3%  dHRV=+34.2%  S_t=+0.07  state=calm
+[UNITY] sent 'increase' (state=calm)
+[TICK 09100] NEW_DATA  | raw EDA:  22.73 uS | raw HR:  91.11 BPM | raw HRV:  15.57 ms
+2026-06-03 16:48:06 | [LIVE] EDA=22.727uS  HR=91.3BPM  RMSSD=15.4ms  phasicEDA=+0.000uS  dHR=-2.0%  dHRV=+34.9%  S_t=+0.11  state=calm
+[UNITY] sent 'increase' (state=calm)
+[TICK 09150] NEW_DATA  | raw EDA:  22.73 uS | raw HR:  91.34 BPM | raw HRV:  15.40 ms
+2026-06-03 16:48:07 | [LIVE] EDA=22.727uS  HR=91.4BPM  RMSSD=15.5ms  phasicEDA=+0.000uS  dHR=-1.9%  dHRV=+34.5%  S_t=+0.13  state=calm
+[UNITY] sent 'increase' (state=calm)
+[TICK 09200] NEW_DATA  | raw EDA:  22.73 uS | raw HR:  91.39 BPM | raw HRV:  14.03 ms
+2026-06-03 16:48:08 | [LIVE] EDA=22.727uS  HR=91.5BPM  RMSSD=14.0ms  phasicEDA=+0.000uS  dHR=-1.8%  dHRV=+40.6%  S_t=+0.19  state=calm
+[UNITY] sent 'increase' (state=calm)
+[TICK 09250] NEW_DATA  | raw EDA:  22.73 uS | raw HR:  91.57 BPM | raw HRV:  13.91 ms
+2026-06-03 16:48:09 | [LIVE] EDA=22.727uS  HR=91.6BPM  RMSSD=13.9ms  phasicEDA=+0.000uS  dHR=-1.7%  dHRV=+41.2%  S_t=+0.22  state=calm
+[UNITY] sent 'increase' (state=calm)
+[TICK 09300] NEW_DATA  | raw EDA:  22.73 uS | raw HR:  91.68 BPM | raw HRV:  13.26 ms
+2026-06-03 16:48:10 | [LIVE] EDA=22.727uS  HR=91.7BPM  RMSSD=13.3ms  phasicEDA=+0.000uS  dHR=-1.6%  dHRV=+43.9%  S_t=+0.25  state=calm
+[UNITY] sent 'increase' (state=calm)
+[TICK 09350] NEW_DATA  | raw EDA:  22.73 uS | raw HR:  91.71 BPM | raw HRV:  12.68 ms
+2026-06-03 16:48:11 | [LIVE] EDA=22.727uS  HR=91.7BPM  RMSSD=12.7ms  phasicEDA=+0.000uS  dHR=-1.6%  dHRV=+46.4%  S_t=+0.27  state=calm
+[UNITY] sent 'increase' (state=calm)
+[TICK 09400] NEW_DATA  | raw EDA:  22.73 uS | raw HR:  91.74 BPM | raw HRV:  12.55 ms
+2026-06-03 16:48:12 | [LIVE] EDA=22.727uS  HR=91.7BPM  RMSSD=12.6ms  phasicEDA=+0.000uS  dHR=-1.5%  dHRV=+46.9%  S_t=+0.30  state=calm
+[UNITY] sent 'increase' (state=calm)
+[TICK 09450] NEW_DATA  | raw EDA:  22.73 uS | raw HR:  91.91 BPM | raw HRV:  12.55 ms
+2026-06-03 16:48:13 | [LIVE] EDA=22.727uS  HR=91.9BPM  RMSSD=12.5ms  phasicEDA=+0.000uS  dHR=-1.3%  dHRV=+47.0%  S_t=+0.31  state=calm
+[UNITY] sent 'increase' (state=calm)
+[TICK 09500] NEW_DATA  | raw EDA:  22.73 uS | raw HR:  91.94 BPM | raw HRV:  12.46 ms
+2026-06-03 16:48:14 | [LIVE] EDA=22.727uS  HR=91.9BPM  RMSSD=12.5ms  phasicEDA=+0.000uS  dHR=-1.3%  dHRV=+47.3%  S_t=+0.32  state=calm
+[UNITY] sent 'increase' (state=calm)
+[TICK 09550] NEW_DATA  | raw EDA:  22.73 uS | raw HR:  92.16 BPM | raw HRV:  12.34 ms
+2026-06-03 16:48:15 | [LIVE] EDA=22.727uS  HR=92.2BPM  RMSSD=12.3ms  phasicEDA=+0.000uS  dHR=-1.1%  dHRV=+47.8%  S_t=+0.34  state=calm
+[UNITY] sent 'increase' (state=calm)
+[TICK 09600] NEW_DATA  | raw EDA:  22.73 uS | raw HR:  92.25 BPM | raw HRV:  12.13 ms
+2026-06-03 16:48:16 | [LIVE] EDA=22.727uS  HR=92.2BPM  RMSSD=12.1ms  phasicEDA=+0.000uS  dHR=-1.0%  dHRV=+48.7%  S_t=+0.36  state=calm
+[UNITY] sent 'increase' (state=calm)
+[TICK 09650] NEW_DATA  | raw EDA:  22.73 uS | raw HR:  92.43 BPM | raw HRV:  12.20 ms
+2026-06-03 16:48:17 | [LIVE] EDA=22.727uS  HR=92.4BPM  RMSSD=12.2ms  phasicEDA=+0.000uS  dHR=-0.8%  dHRV=+48.4%  S_t=+0.38  state=calm
+[UNITY] sent 'increase' (state=calm)
+[TICK 09700] NEW_DATA  | raw EDA:  22.73 uS | raw HR:  92.43 BPM | raw HRV:  11.52 ms
+2026-06-03 16:48:18 | [LIVE] EDA=22.727uS  HR=92.4BPM  RMSSD=11.5ms  phasicEDA=+0.000uS  dHR=-0.8%  dHRV=+51.3%  S_t=+0.39  state=calm
+[UNITY] sent 'increase' (state=calm)
+[TICK 09750] NEW_DATA  | raw EDA:  22.73 uS | raw HR:  92.47 BPM | raw HRV:  11.80 ms
+2026-06-03 16:48:19 | [LIVE] EDA=22.727uS  HR=92.5BPM  RMSSD=11.8ms  phasicEDA=+0.000uS  dHR=-0.7%  dHRV=+50.1%  S_t=+0.41  state=calm
+[UNITY] sent 'increase' (state=calm)
+[TICK 09800] NEW_DATA  | raw EDA:  22.73 uS | raw HR:  92.33 BPM | raw HRV:  13.06 ms
+2026-06-03 16:48:20 | [LIVE] EDA=22.727uS  HR=92.3BPM  RMSSD=13.1ms  phasicEDA=+0.000uS  dHR=-0.9%  dHRV=+44.8%  S_t=+0.34  state=calm
+[UNITY] sent 'increase' (state=calm)
+[TICK 09850] NEW_DATA  | raw EDA:  22.73 uS | raw HR:  92.06 BPM | raw HRV:  12.97 ms
+2026-06-03 16:48:21 | [LIVE] EDA=22.727uS  HR=92.1BPM  RMSSD=13.0ms  phasicEDA=+0.000uS  dHR=-1.2%  dHRV=+45.2%  S_t=+0.32  state=calm
+[UNITY] sent 'increase' (state=calm)
+[TICK 09900] NEW_DATA  | raw EDA:  22.73 uS | raw HR:  91.97 BPM | raw HRV:  12.64 ms
+2026-06-03 16:48:22 | [LIVE] EDA=22.727uS  HR=92.0BPM  RMSSD=12.6ms  phasicEDA=+0.000uS  dHR=-1.3%  dHRV=+46.6%  S_t=+0.31  state=calm
+[UNITY] sent 'increase' (state=calm)
+[TICK 09950] NEW_DATA  | raw EDA:  22.73 uS | raw HR:  91.93 BPM | raw HRV:  12.89 ms
+2026-06-03 16:48:23 | [LIVE] EDA=22.727uS  HR=91.9BPM  RMSSD=12.9ms  phasicEDA=+0.000uS  dHR=-1.3%  dHRV=+45.5%  S_t=+0.31  state=calm
+[UNITY] sent 'increase' (state=calm)
+[TICK 10000] NEW_DATA  | raw EDA:  22.73 uS | raw HR:  92.05 BPM | raw HRV:  12.62 ms
+2026-06-03 16:48:24 | [LIVE] EDA=22.727uS  HR=92.0BPM  RMSSD=12.6ms  phasicEDA=+0.000uS  dHR=-1.2%  dHRV=+46.6%  S_t=+0.31  state=calm
+[UNITY] sent 'increase' (state=calm)
+[TICK 10050] NEW_DATA  | raw EDA:  22.73 uS | raw HR:  92.16 BPM | raw HRV:  12.55 ms
+2026-06-03 16:48:25 | [LIVE] EDA=22.727uS  HR=92.2BPM  RMSSD=12.5ms  phasicEDA=+0.000uS  dHR=-1.1%  dHRV=+47.0%  S_t=+0.33  state=calm
+[UNITY] sent 'increase' (state=calm)
+2026-06-03 16:48:26 | [LIVE] EDA=22.727uS  HR=92.3BPM  RMSSD=12.3ms  phasicEDA=+0.000uS  dHR=-0.9%  dHRV=+47.8%  S_t=+0.36  state=calm
+[TICK 10100] NEW_DATA  | raw EDA:  22.73 uS | raw HR:  92.34 BPM | raw HRV:  12.34 ms
+[UNITY] sent 'increase' (state=calm)
+2026-06-03 16:48:27 | [LIVE] EDA=22.727uS  HR=92.5BPM  RMSSD=12.0ms  phasicEDA=+0.000uS  dHR=-0.7%  dHRV=+49.2%  S_t=+0.38  state=calm
+[TICK 10150] NEW_DATA  | raw EDA:  22.73 uS | raw HR:  92.49 BPM | raw HRV:  12.02 ms
+[UNITY] sent 'increase' (state=calm)
+2026-06-03 16:48:28 | [LIVE] EDA=22.727uS  HR=92.5BPM  RMSSD=12.1ms  phasicEDA=+0.000uS  dHR=-0.7%  dHRV=+48.9%  S_t=+0.39  state=calm
+[TICK 10200] NEW_DATA  | raw EDA:  22.73 uS | raw HR:  92.56 BPM | raw HRV:  12.10 ms
+[UNITY] sent 'increase' (state=calm)
+2026-06-03 16:48:29 | [LIVE] EDA=22.727uS  HR=92.6BPM  RMSSD=12.0ms  phasicEDA=+0.000uS  dHR=-0.6%  dHRV=+49.2%  S_t=+0.40  state=calm
+[TICK 10250] NEW_DATA  | raw EDA:  22.73 uS | raw HR:  92.55 BPM | raw HRV:  11.98 ms
+[UNITY] sent 'increase' (state=calm)
+2026-06-03 16:48:31 | [LIVE] EDA=22.727uS  HR=92.5BPM  RMSSD=11.9ms  phasicEDA=+0.000uS  dHR=-0.7%  dHRV=+49.6%  S_t=+0.40  state=calm
+[TICK 10300] NEW_DATA  | raw EDA:  22.73 uS | raw HR:  92.53 BPM | raw HRV:  12.00 ms
+[UNITY] sent 'increase' (state=calm)
+2026-06-03 16:48:32 | [LIVE] EDA=22.727uS  HR=92.5BPM  RMSSD=12.1ms  phasicEDA=+0.000uS  dHR=-0.7%  dHRV=+49.0%  S_t=+0.40  state=calm
+[TICK 10350] NEW_DATA  | raw EDA:  22.73 uS | raw HR:  92.49 BPM | raw HRV:  12.02 ms
+[UNITY] sent 'increase' (state=calm)
+2026-06-03 16:48:33 | [LIVE] EDA=22.727uS  HR=92.4BPM  RMSSD=12.0ms  phasicEDA=+0.000uS  dHR=-0.8%  dHRV=+49.2%  S_t=+0.39  state=calm
+[TICK 10400] NEW_DATA  | raw EDA:  22.73 uS | raw HR:  92.42 BPM | raw HRV:  12.04 ms
+[UNITY] sent 'increase' (state=calm)
+2026-06-03 16:48:34 | [LIVE] EDA=22.727uS  HR=92.3BPM  RMSSD=12.0ms  phasicEDA=+0.000uS  dHR=-0.9%  dHRV=+49.3%  S_t=+0.39  state=calm
+[TICK 10450] NEW_DATA  | raw EDA:  22.73 uS | raw HR:  92.32 BPM | raw HRV:  12.00 ms
+[UNITY] sent 'increase' (state=calm)
+2026-06-03 16:48:35 | [LIVE] EDA=22.727uS  HR=92.4BPM  RMSSD=12.4ms  phasicEDA=+0.000uS  dHR=-0.8%  dHRV=+47.4%  S_t=+0.38  state=calm
+[TICK 10500] NEW_DATA  | raw EDA:  22.73 uS | raw HR:  92.46 BPM | raw HRV:  12.73 ms
+[UNITY] sent 'increase' (state=calm)
+2026-06-03 16:48:36 | [LIVE] EDA=22.727uS  HR=92.4BPM  RMSSD=12.7ms  phasicEDA=+0.000uS  dHR=-0.8%  dHRV=+46.5%  S_t=+0.36  state=calm
+[TICK 10550] NEW_DATA  | raw EDA:  22.73 uS | raw HR:  92.43 BPM | raw HRV:  12.66 ms
+[UNITY] sent 'increase' (state=calm)
+2026-06-03 16:48:37 | [LIVE] EDA=22.727uS  HR=92.8BPM  RMSSD=13.0ms  phasicEDA=+0.000uS  dHR=-0.4%  dHRV=+44.9%  S_t=+0.36  state=calm
+[TICK 10600] NEW_DATA  | raw EDA:  22.73 uS | raw HR:  92.79 BPM | raw HRV:  13.04 ms
+[UNITY] sent 'increase' (state=calm)
+2026-06-03 16:48:38 | [LIVE] EDA=22.727uS  HR=93.4BPM  RMSSD=13.3ms  phasicEDA=+0.000uS  dHR=+0.2%  dHRV=+43.6%  S_t=+0.38  state=calm
+[TICK 10650] NEW_DATA  | raw EDA:  22.73 uS | raw HR:  93.37 BPM | raw HRV:  13.34 ms
+[UNITY] sent 'increase' (state=calm)
+2026-06-03 16:48:39 | [LIVE] EDA=22.727uS  HR=93.5BPM  RMSSD=13.6ms  phasicEDA=+0.000uS  dHR=+0.4%  dHRV=+42.5%  S_t=+0.41  state=calm
+[TICK 10700] NEW_DATA  | raw EDA:  22.73 uS | raw HR:  93.55 BPM | raw HRV:  13.61 ms
+[UNITY] sent 'increase' (state=calm)
+2026-06-03 16:48:40 | [LIVE] EDA=22.727uS  HR=93.6BPM  RMSSD=15.4ms  phasicEDA=+0.000uS  dHR=+0.5%  dHRV=+34.9%  S_t=+0.42  state=calm
+[TICK 10750] NEW_DATA  | raw EDA:  22.73 uS | raw HR:  93.65 BPM | raw HRV:  15.39 ms
+[UNITY] sent 'increase' (state=calm)
+2026-06-03 16:48:41 | [LIVE] EDA=22.727uS  HR=93.8BPM  RMSSD=15.5ms  phasicEDA=+0.000uS  dHR=+0.7%  dHRV=+34.4%  S_t=+0.34  state=calm
+[TICK 10800] NEW_DATA  | raw EDA:  22.73 uS | raw HR:  93.79 BPM | raw HRV:  15.52 ms
+[UNITY] sent 'increase' (state=calm)
+2026-06-03 16:48:42 | [LIVE] EDA=22.727uS  HR=93.8BPM  RMSSD=16.3ms  phasicEDA=+0.000uS  dHR=+0.7%  dHRV=+31.2%  S_t=+0.34  state=calm
+[TICK 10850] NEW_DATA  | raw EDA:  22.73 uS | raw HR:  93.78 BPM | raw HRV:  16.28 ms
+[UNITY] sent 'increase' (state=calm)
+2026-06-03 16:48:43 | [LIVE] EDA=22.727uS  HR=93.8BPM  RMSSD=16.4ms  phasicEDA=+0.000uS  dHR=+0.7%  dHRV=+30.8%  S_t=+0.30  state=calm
+[TICK 10900] NEW_DATA  | raw EDA:  22.73 uS | raw HR:  93.81 BPM | raw HRV:  16.36 ms
+[UNITY] sent 'increase' (state=calm)
+2026-06-03 16:48:44 | [LIVE] EDA=22.727uS  HR=93.7BPM  RMSSD=16.3ms  phasicEDA=+0.000uS  dHR=+0.6%  dHRV=+31.3%  S_t=+0.30  state=calm
+[TICK 10950] NEW_DATA  | raw EDA:  22.73 uS | raw HR:  93.72 BPM | raw HRV:  16.26 ms
+[UNITY] sent 'increase' (state=calm)
+2026-06-03 16:48:45 | [LIVE] EDA=22.727uS  HR=93.7BPM  RMSSD=16.8ms  phasicEDA=+0.000uS  dHR=+0.6%  dHRV=+28.8%  S_t=+0.30  state=calm
+[TICK 11000] NEW_DATA  | raw EDA:  22.73 uS | raw HR:  93.70 BPM | raw HRV:  16.84 ms
+[UNITY] sent 'increase' (state=calm)
+2026-06-03 16:48:46 | [LIVE] EDA=22.727uS  HR=93.6BPM  RMSSD=16.8ms  phasicEDA=+0.000uS  dHR=+0.5%  dHRV=+28.8%  S_t=+0.27  state=calm
+[TICK 11050] NEW_DATA  | raw EDA:  22.73 uS | raw HR:  93.64 BPM | raw HRV:  16.83 ms
+[UNITY] sent 'increase' (state=calm)
+2026-06-03 16:48:47 | [LIVE] EDA=22.727uS  HR=93.4BPM  RMSSD=16.8ms  phasicEDA=+0.000uS  dHR=+0.2%  dHRV=+29.0%  S_t=+0.26  state=calm
+[TICK 11100] NEW_DATA  | raw EDA:  22.73 uS | raw HR:  93.36 BPM | raw HRV:  16.79 ms
+[UNITY] sent 'increase' (state=calm)
+2026-06-03 16:48:48 | [LIVE] EDA=22.727uS  HR=93.3BPM  RMSSD=16.9ms  phasicEDA=+0.000uS  dHR=+0.2%  dHRV=+28.4%  S_t=+0.24  state=calm
+[TICK 11150] NEW_DATA  | raw EDA:  22.73 uS | raw HR:  93.32 BPM | raw HRV:  16.95 ms
+[UNITY] sent 'increase' (state=calm)
+2026-06-03 16:48:49 | [LIVE] EDA=22.727uS  HR=93.2BPM  RMSSD=16.9ms  phasicEDA=+0.000uS  dHR=+0.1%  dHRV=+28.5%  S_t=+0.23  state=calm
+[TICK 11200] NEW_DATA  | raw EDA:  22.73 uS | raw HR:  93.30 BPM | raw HRV:  17.00 ms
+[UNITY] sent 'increase' (state=calm)
+2026-06-03 16:48:50 | [LIVE] EDA=22.727uS  HR=93.4BPM  RMSSD=16.9ms  phasicEDA=+0.000uS  dHR=+0.3%  dHRV=+28.4%  S_t=+0.23  state=calm
+[TICK 11250] NEW_DATA  | raw EDA:  22.73 uS | raw HR:  93.33 BPM | raw HRV:  16.95 ms
+[UNITY] sent 'increase' (state=calm)
+2026-06-03 16:48:51 | [LIVE] EDA=22.727uS  HR=93.4BPM  RMSSD=16.8ms  phasicEDA=+0.000uS  dHR=+0.2%  dHRV=+28.9%  S_t=+0.24  state=calm
+[TICK 11300] NEW_DATA  | raw EDA:  22.73 uS | raw HR:  93.38 BPM | raw HRV:  16.82 ms
+[UNITY] sent 'increase' (state=calm)
+2026-06-03 16:48:52 | [LIVE] EDA=22.727uS  HR=93.4BPM  RMSSD=16.9ms  phasicEDA=+0.000uS  dHR=+0.2%  dHRV=+28.7%  S_t=+0.24  state=calm
+[TICK 11350] NEW_DATA  | raw EDA:  22.73 uS | raw HR:  93.25 BPM | raw HRV:  17.15 ms
+[UNITY] sent 'increase' (state=calm)
+2026-06-03 16:48:53 | [LIVE] EDA=22.727uS  HR=93.2BPM  RMSSD=17.1ms  phasicEDA=+0.000uS  dHR=+0.0%  dHRV=+27.6%  S_t=+0.23  state=calm
+[TICK 11400] NEW_DATA  | raw EDA:  22.73 uS | raw HR:  93.18 BPM | raw HRV:  17.21 ms
+[UNITY] sent 'increase' (state=calm)
+2026-06-03 16:48:54 | [LIVE] EDA=22.702uS  HR=93.0BPM  RMSSD=17.1ms  phasicEDA=+0.000uS  dHR=-0.2%  dHRV=+27.6%  S_t=+0.21  state=calm
+[TICK 11450] NEW_DATA  | raw EDA:  22.66 uS | raw HR:  92.89 BPM | raw HRV:  17.27 ms
+[UNITY] sent 'increase' (state=calm)
+2026-06-03 16:48:55 | [LIVE] EDA=22.608uS  HR=92.8BPM  RMSSD=17.3ms  phasicEDA=+0.030uS  dHR=-0.3%  dHRV=+26.8%  S_t=+0.34  state=calm
+[TICK 11500] NEW_DATA  | raw EDA:  22.50 uS | raw HR:  92.80 BPM | raw HRV:  17.42 ms
+[UNITY] sent 'increase' (state=calm)
+2026-06-03 16:48:56 | [LIVE] EDA=22.414uS  HR=92.8BPM  RMSSD=17.5ms  phasicEDA=+0.044uS  dHR=-0.4%  dHRV=+25.9%  S_t=+0.47  state=calm
+[TICK 11550] NEW_DATA  | raw EDA:  22.36 uS | raw HR:  92.86 BPM | raw HRV:  17.46 ms
+[UNITY] sent 'increase' (state=calm)
+2026-06-03 16:48:57 | [LIVE] EDA=22.358uS  HR=92.9BPM  RMSSD=17.4ms  phasicEDA=+0.007uS  dHR=-0.3%  dHRV=+26.2%  S_t=+0.37  state=calm
+[UNITY] sent 'increase' (state=calm)
+[TICK 11600] NEW_DATA  | raw EDA:  22.32 uS | raw HR:  92.98 BPM | raw HRV:  17.46 ms
+2026-06-03 16:48:58 | [LIVE] EDA=22.294uS  HR=93.0BPM  RMSSD=17.5ms  phasicEDA=-0.033uS  dHR=-0.1%  dHRV=+25.8%  S_t=-0.09  state=calm
+[UNITY] sent 'increase' (state=calm)
+[TICK 11650] NEW_DATA  | raw EDA:  22.25 uS | raw HR:  92.96 BPM | raw HRV:  18.13 ms
+2026-06-03 16:48:59 | [LIVE] EDA=22.227uS  HR=92.8BPM  RMSSD=18.3ms  phasicEDA=-0.026uS  dHR=-0.4%  dHRV=+22.6%  S_t=-0.07  state=calm
+[UNITY] sent 'increase' (state=calm)
+[TICK 11700] NEW_DATA  | raw EDA:  22.17 uS | raw HR:  92.82 BPM | raw HRV:  18.33 ms
+2026-06-03 16:49:00 | [LIVE] EDA=22.121uS  HR=92.7BPM  RMSSD=18.5ms  phasicEDA=-0.012uS  dHR=-0.5%  dHRV=+21.9%  S_t=-0.03  state=calm
+[UNITY] sent 'increase' (state=calm)
+[TICK 11750] NEW_DATA  | raw EDA:  22.14 uS | raw HR:  92.52 BPM | raw HRV:  18.59 ms
+2026-06-03 16:49:01 | [LIVE] EDA=22.122uS  HR=92.5BPM  RMSSD=18.7ms  phasicEDA=-0.042uS  dHR=-0.7%  dHRV=+21.0%  S_t=-0.08  state=calm
+[UNITY] sent 'increase' (state=calm)
+[TICK 11800] NEW_DATA  | raw EDA:  22.08 uS | raw HR:  92.33 BPM | raw HRV:  18.67 ms
+2026-06-03 16:49:02 | [LIVE] EDA=22.056uS  HR=92.1BPM  RMSSD=18.7ms  phasicEDA=-0.003uS  dHR=-1.1%  dHRV=+21.1%  S_t=-0.13  state=calm
+[UNITY] sent 'increase' (state=calm)
+[TICK 11850] NEW_DATA  | raw EDA:  21.99 uS | raw HR:  92.02 BPM | raw HRV:  18.76 ms
+2026-06-03 16:49:03 | [LIVE] EDA=21.970uS  HR=92.0BPM  RMSSD=18.8ms  phasicEDA=+0.002uS  dHR=-1.2%  dHRV=+20.7%  S_t=+0.04  state=calm
+[UNITY] sent 'increase' (state=calm)
+[TICK 11900] NEW_DATA  | raw EDA:  21.90 uS | raw HR:  91.91 BPM | raw HRV:  18.80 ms
+2026-06-03 16:49:04 | [LIVE] EDA=21.864uS  HR=91.7BPM  RMSSD=18.8ms  phasicEDA=+0.004uS  dHR=-1.5%  dHRV=+20.4%  S_t=+0.05  state=calm
+[UNITY] sent 'increase' (state=calm)
+[TICK 11950] NEW_DATA  | raw EDA:  21.82 uS | raw HR:  91.65 BPM | raw HRV:  18.86 ms
+2026-06-03 16:49:05 | [LIVE] EDA=21.795uS  HR=91.6BPM  RMSSD=18.9ms  phasicEDA=+0.005uS  dHR=-1.7%  dHRV=+20.3%  S_t=+0.03  state=calm
+[UNITY] sent 'increase' (state=calm)
+[TICK 12000] NEW_DATA  | raw EDA:  21.74 uS | raw HR:  91.59 BPM | raw HRV:  18.86 ms
+2026-06-03 16:49:06 | [LIVE] EDA=21.723uS  HR=91.5BPM  RMSSD=18.9ms  phasicEDA=-0.010uS  dHR=-1.8%  dHRV=+20.1%  S_t=-0.04  state=calm
+[UNITY] sent 'increase' (state=calm)
+[TICK 12050] NEW_DATA  | raw EDA:  21.66 uS | raw HR:  91.33 BPM | raw HRV:  18.89 ms
+2026-06-03 16:49:07 | [LIVE] EDA=21.634uS  HR=91.0BPM  RMSSD=19.0ms  phasicEDA=-0.006uS  dHR=-2.3%  dHRV=+19.7%  S_t=-0.12  state=calm
+[UNITY] sent 'increase' (state=calm)
+[TICK 12100] NEW_DATA  | raw EDA:  21.56 uS | raw HR:  90.43 BPM | raw HRV:  18.94 ms
+2026-06-03 16:49:08 | [LIVE] EDA=21.540uS  HR=90.4BPM  RMSSD=18.9ms  phasicEDA=+0.008uS  dHR=-2.9%  dHRV=+19.9%  S_t=-0.13  state=calm
+[UNITY] sent 'increase' (state=calm)
+[TICK 12150] NEW_DATA  | raw EDA:  21.46 uS | raw HR:  90.15 BPM | raw HRV:  19.06 ms
+2026-06-03 16:49:09 | [LIVE] EDA=21.447uS  HR=90.2BPM  RMSSD=19.1ms  phasicEDA=-0.002uS  dHR=-3.2%  dHRV=+19.4%  S_t=-0.10  state=calm
+[UNITY] sent 'increase' (state=calm)
+[TICK 12200] NEW_DATA  | raw EDA:  21.38 uS | raw HR:  90.13 BPM | raw HRV:  19.06 ms
+2026-06-03 16:49:10 | [LIVE] EDA=21.365uS  HR=90.1BPM  RMSSD=19.1ms  phasicEDA=-0.010uS  dHR=-3.2%  dHRV=+19.4%  S_t=-0.17  state=calm
+[UNITY] sent 'increase' (state=calm)
+[TICK 12250] NEW_DATA  | raw EDA:  21.32 uS | raw HR:  89.96 BPM | raw HRV:  19.32 ms
+2026-06-03 16:49:11 | [LIVE] EDA=21.303uS  HR=90.0BPM  RMSSD=19.3ms  phasicEDA=-0.009uS  dHR=-3.4%  dHRV=+18.3%  S_t=-0.24  state=calm
+[UNITY] sent 'increase' (state=calm)
+[TICK 12300] NEW_DATA  | raw EDA:  21.24 uS | raw HR:  89.97 BPM | raw HRV:  19.21 ms
+2026-06-03 16:49:12 | [LIVE] EDA=21.235uS  HR=90.0BPM  RMSSD=19.2ms  phasicEDA=-0.004uS  dHR=-3.4%  dHRV=+18.8%  S_t=-0.26  state=calm
+[UNITY] sent 'increase' (state=calm)
+[TICK 12350] NEW_DATA  | raw EDA:  21.19 uS | raw HR:  89.98 BPM | raw HRV:  19.30 ms
+2026-06-03 16:49:13 | [LIVE] EDA=21.181uS  HR=90.0BPM  RMSSD=19.3ms  phasicEDA=-0.011uS  dHR=-3.4%  dHRV=+18.4%  S_t=-0.19  state=calm
+[UNITY] sent 'increase' (state=calm)
+[TICK 12400] NEW_DATA  | raw EDA:  21.13 uS | raw HR:  89.93 BPM | raw HRV:  19.45 ms
+2026-06-03 16:49:14 | [LIVE] EDA=21.121uS  HR=89.9BPM  RMSSD=19.4ms  phasicEDA=+0.001uS  dHR=-3.5%  dHRV=+17.8%  S_t=-0.27  state=calm
+[UNITY] sent 'increase' (state=calm)
+[TICK 12450] NEW_DATA  | raw EDA:  21.06 uS | raw HR:  89.92 BPM | raw HRV:  19.43 ms
+2026-06-03 16:49:15 | [LIVE] EDA=21.052uS  HR=89.9BPM  RMSSD=19.4ms  phasicEDA=+0.010uS  dHR=-3.5%  dHRV=+17.9%  S_t=-0.15  state=calm
+[UNITY] sent 'increase' (state=calm)
+[TICK 12500] NEW_DATA  | raw EDA:  20.96 uS | raw HR:  89.95 BPM | raw HRV:  19.37 ms
+2026-06-03 16:49:16 | [LIVE] EDA=20.963uS  HR=89.9BPM  RMSSD=19.4ms  phasicEDA=+0.015uS  dHR=-3.4%  dHRV=+18.1%  S_t=-0.11  state=calm
+[UNITY] sent 'increase' (state=calm)
+[TICK 12550] NEW_DATA  | raw EDA:  20.90 uS | raw HR:  89.93 BPM | raw HRV:  19.51 ms
+2026-06-03 16:49:17 | [LIVE] EDA=20.891uS  HR=89.9BPM  RMSSD=19.5ms  phasicEDA=+0.001uS  dHR=-3.5%  dHRV=+17.5%  S_t=-0.13  state=calm
+[UNITY] sent 'increase' (state=calm)
+[TICK 12600] NEW_DATA  | raw EDA:  20.80 uS | raw HR:  89.89 BPM | raw HRV:  19.42 ms
+2026-06-03 16:49:18 | [LIVE] EDA=20.802uS  HR=89.9BPM  RMSSD=19.4ms  phasicEDA=+0.006uS  dHR=-3.5%  dHRV=+17.9%  S_t=-0.13  state=calm
+[UNITY] sent 'increase' (state=calm)
+[TICK 12650] NEW_DATA  | raw EDA:  20.74 uS | raw HR:  89.71 BPM | raw HRV:  18.39 ms
+2026-06-03 16:49:19 | [LIVE] EDA=20.744uS  HR=89.7BPM  RMSSD=18.4ms  phasicEDA=-0.007uS  dHR=-3.7%  dHRV=+22.3%  S_t=-0.19  state=calm
+[UNITY] sent 'increase' (state=calm)
+2026-06-03 16:49:20 | [LIVE] EDA=20.671uS  HR=89.7BPM  RMSSD=18.6ms  phasicEDA=-0.002uS  dHR=-3.7%  dHRV=+21.3%  S_t=-0.22  state=calm
+[TICK 12700] NEW_DATA  | raw EDA:  20.66 uS | raw HR:  89.73 BPM | raw HRV:  18.62 ms
+[UNITY] sent 'increase' (state=calm)
+2026-06-03 16:49:21 | [LIVE] EDA=20.570uS  HR=89.7BPM  RMSSD=18.6ms  phasicEDA=+0.013uS  dHR=-3.7%  dHRV=+21.4%  S_t=-0.13  state=calm
+[TICK 12750] NEW_DATA  | raw EDA:  20.56 uS | raw HR:  89.68 BPM | raw HRV:  18.59 ms
+[UNITY] sent 'increase' (state=calm)
+2026-06-03 16:49:22 | [LIVE] EDA=20.499uS  HR=89.8BPM  RMSSD=18.5ms  phasicEDA=-0.010uS  dHR=-3.6%  dHRV=+21.8%  S_t=-0.15  state=calm
+[TICK 12800] NEW_DATA  | raw EDA:  20.50 uS | raw HR:  89.79 BPM | raw HRV:  18.49 ms
+[UNITY] sent 'increase' (state=calm)
+2026-06-03 16:49:23 | [LIVE] EDA=20.421uS  HR=90.1BPM  RMSSD=18.3ms  phasicEDA=-0.003uS  dHR=-3.2%  dHRV=+22.5%  S_t=-0.19  state=calm
+[TICK 12850] NEW_DATA  | raw EDA:  20.41 uS | raw HR:  90.15 BPM | raw HRV:  18.34 ms
+[UNITY] sent 'increase' (state=calm)
+2026-06-03 16:49:24 | [LIVE] EDA=20.341uS  HR=90.2BPM  RMSSD=18.5ms  phasicEDA=+0.001uS  dHR=-3.1%  dHRV=+21.9%  S_t=-0.14  state=calm
+[TICK 12900] NEW_DATA  | raw EDA:  20.33 uS | raw HR:  90.24 BPM | raw HRV:  18.48 ms
+[UNITY] sent 'increase' (state=calm)
+2026-06-03 16:49:25 | [LIVE] EDA=20.258uS  HR=90.2BPM  RMSSD=18.3ms  phasicEDA=-0.005uS  dHR=-3.2%  dHRV=+22.5%  S_t=-0.14  state=calm
+[TICK 12950] NEW_DATA  | raw EDA:  20.25 uS | raw HR:  90.20 BPM | raw HRV:  18.34 ms
+[UNITY] sent 'increase' (state=calm)
+2026-06-03 16:49:26 | [LIVE] EDA=20.180uS  HR=90.1BPM  RMSSD=18.4ms  phasicEDA=+0.001uS  dHR=-3.2%  dHRV=+22.3%  S_t=-0.13  state=calm
+[TICK 13000] NEW_DATA  | raw EDA:  20.17 uS | raw HR:  90.04 BPM | raw HRV:  18.37 ms
+[UNITY] sent 'increase' (state=calm)
+[DATA SOURCE] MOCK: end of file reached (267600 samples). Halting stream — acquisition deadman will fire in 5s.
+2026-06-03 16:49:27 | [LIVE] EDA=20.121uS  HR=90.0BPM  RMSSD=18.4ms  phasicEDA=+0.000uS  dHR=-3.3%  dHRV=+22.3%  S_t=-0.12  state=calm
+[TICK 13050] HOLD_LAST | raw EDA:  20.12 uS | raw HR:  90.04 BPM | raw HRV:  18.37 ms
+[UNITY] sent 'increase' (state=calm)
+2026-06-03 16:49:28 | [LIVE] EDA=20.121uS  HR=90.0BPM  RMSSD=18.4ms  phasicEDA=-0.031uS  dHR=-3.3%  dHRV=+22.3%  S_t=-0.27  state=calm
+[TICK 13100] HOLD_LAST | raw EDA:  20.12 uS | raw HR:  90.04 BPM | raw HRV:  18.37 ms
+[UNITY] sent 'increase' (state=calm)
+2026-06-03 16:49:29 | [LIVE] EDA=20.121uS  HR=90.0BPM  RMSSD=18.4ms  phasicEDA=-0.014uS  dHR=-3.3%  dHRV=+22.3%  S_t=-0.30  state=calm
+[TICK 13150] HOLD_LAST | raw EDA:  20.12 uS | raw HR:  90.04 BPM | raw HRV:  18.37 ms
+[UNITY] sent 'increase' (state=calm)
+2026-06-03 16:49:30 | [LIVE] EDA=20.121uS  HR=90.0BPM  RMSSD=18.4ms  phasicEDA=-0.003uS  dHR=-3.3%  dHRV=+22.3%  S_t=-0.19  state=calm
+[TICK 13200] HOLD_LAST | raw EDA:  20.12 uS | raw HR:  90.04 BPM | raw HRV:  18.37 ms
+[UNITY] sent 'increase' (state=calm)
+2026-06-03 16:49:31 | [LIVE] EDA=20.121uS  HR=90.0BPM  RMSSD=18.4ms  phasicEDA=+0.005uS  dHR=-3.3%  dHRV=+22.3%  S_t=-0.12  state=calm
+[TICK 13250] HOLD_LAST | raw EDA:  20.12 uS | raw HR:  90.04 BPM | raw HRV:  18.37 ms
+[UNITY] sent 'increase' (state=calm)
+
+==================================================
+  SIGNAL ACQUISITION LOST
+==================================================
+
+
+[CRITICAL ERROR] Stream Lost: No new data received for 5.0 seconds. Check PLUX device connection and battery.
+[SESSION] Output saved to: samples.csv
+[UNITY] sent 'stop'
+2026-06-03 16:49:32.336 ( 283.003s) [R_Biofeedback_  ]      data_receiver.cpp:344    ERR| Stream transmission broke off (Input stream error.); re-connecting...
+[CONTROL] sent LIVE_STOP
+[CONTROL] sent SHUTDOWN_SAVE_BOTH
+
+
+[LAUNCHER] dashboard closed (exit 0). Shutting down all subsystems...
+[LAUNCHER] All systems offline.
+[LAUNCHER] Goodbye.

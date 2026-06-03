@@ -54,38 +54,43 @@ In mock mode, `MockDataSource` (or `MockDataSource2`) reads the file, does the c
 
 `BiofeedbackAcquisition` (inside `main.py`) consumes that stream at the pipeline rate of 50 Hz. It drains the inlet to the most recent sample each tick rather than reading one-at-a-time, which keeps it from falling behind when the device streams faster than 50 Hz. Every incoming sample is validated here: NaN or infinite values are rejected, physiologically impossible values are rejected, and if a signal goes flat for more than 15 seconds it flags a probable electrode disconnect. If the stream goes silent for 5 seconds it raises a connection error and the session ends cleanly with whatever was recorded saved.
 
-## Layer 4: smoothing and the baseline
+## Layer 4: phasic-EDA decomposition + baseline buffering
 
-`SignalProcessor` applies a one-pole exponential moving average to each signal:
+`SignalProcessor` does **no smoothing** anymore — per the PDF, raw values are passed through unchanged. What this layer still does:
 
-```
-y_t = alpha * x_t + (1 - alpha) * y_(t-1)
-```
-
-with alpha 0.05 for EDA, 0.10 for HR, 0.05 for HRV. Lower alpha means heavier smoothing. The EMA runs every tick, regardless of state, so the dashboard's signal charts stay continuous.
-
-For the 120 seconds inside the BASELINE state the smoothed samples accumulate in buffers. The patient sits still; no stress math runs yet. Accumulation is gated by `accumulate_baseline` (set to True only while the state machine is in BASELINE), so samples from IDLE never leak into the baseline.
+1. **Phasic EDA decomposition.** Every tick, raw EDA is appended to a rolling 60-second window. Every `EDA_PHASIC_UPDATE_INTERVAL_SEC` (default 0.5 s), `nk.eda_phasic` runs on the window to extract the current phasic component (tonic drift removed). The value is held between recomputes. A plausibility ceiling (`EDA_PHASIC_MAX_US` = 1 µS) rejects filter-ringing artifacts from the resampler edge.
+2. **Baseline buffering.** For the 120 seconds inside the BASELINE state, raw EDA / HR / HRV values accumulate in per-signal buffers. Phasic EDA values are also captured per-tick into a separate baseline buffer. Accumulation is gated by `accumulate_baseline` (True only while state == BASELINE), so samples from IDLE never leak in.
 
 At the 120-second mark, `_compute_personal_baselines()` runs once:
 
-1. For each signal, drop any sample more than 3 standard deviations from the mean (motion spikes, glitches). If a signal is perfectly flat the filter is skipped with a warning rather than rejecting everything.
+1. For each signal, drop any sample more than 3 standard deviations from the mean (motion spikes, glitches). HR/HRV NaN warm-up samples are also dropped here so personal averages reflect only real measurements. If a signal is perfectly flat the filter is skipped with a warning rather than rejecting everything.
 2. Average what is left. Those three averages are the patient's personal resting baseline.
-3. Keep the cleaned arrays around so the next layer can compute the noise floor.
+3. Keep the cleaned arrays around so the next layer can compute the noise floor and per-signal z-score stats.
 
 A wall-clock safety net runs alongside: if 120 seconds of BASELINE has elapsed but the main loop ran slower than nominal 50 Hz and the buffer hasn't quite filled to 6000 samples, `finalize_baseline_now()` forces the computation on whatever is there. The lock therefore always fires at 02:00 on the dashboard counter, even on slower machines.
 
 The baseline is per-person and computed fresh every session. Two different people produce two different baselines, which is the whole point: everything afterward is measured relative to this patient at rest, not against population norms.
 
-## Layer 5: the noise floor (sigma)
+## Layer 5: the noise floor (sigma) and per-signal z-score stats
 
-To know what counts as a real stress response, the pipeline needs to know how much the stress index naturally jitters when the patient is just sitting there. `calculate_baseline_sigma()` in `src/fusion.py` does this by running the cleaned baseline samples through the same stress math the live phase will use (layers 6 and 7 below), then taking the standard deviation of the result. That number is sigma_baseline.
+To know what counts as a real stress response, the pipeline needs to know how much the stress index naturally jitters when the patient is at rest. `calculate_baseline_sigma()` in `src/fusion.py` is a two-pass computation:
 
-The two thresholds come from it:
+**Pass 1** — for each baseline sample, build raw per-signal deltas (phasic EDA in µS, HR percent, HRV percent inverted). Compute each signal's own mean + sigma. Apply per-signal sigma floors (HR ≥ 2%, HRV ≥ 5%, EDA phasic ≥ 0.02 µS) so a flukey baseline can't make tiny live wobbles z-score huge.
+
+**Pass 2** — z-score each delta against its own baseline, weight (0.5 / 0.3 / 0.2), accumulate the raw `S_inst` series, smooth to `S_t` with the 1-second rolling mean used live. **Only fully-valid windows** (both HR and HRV non-NaN, i.e. past the 60 s warm-up) contribute.
+
+Then:
+- `mean_baseline = mean(s_t_series)` — the centring point for the bands
+- `sigma_baseline = std(s_instant_series)` — the spread of the RAW series, not the smoothed one (PDF Bug 7: smoothing shrinks variance ~√N, would collapse the bands)
+
+The two thresholds come from these:
 
 ```
-thresh_mild = 1.33 * sigma_baseline   (calm / stressed boundary)
-thresh_high = 2.28 * sigma_baseline   (stressed / ultra boundary)
+thresh_mild = mean_baseline + 1.28 * sigma_baseline   (true 90th-pct z)
+thresh_high = mean_baseline + 2.33 * sigma_baseline   (true 99th-pct z)
 ```
+
+Centring on `mean_baseline` (PDF Bug 6) rather than zero matters: resting S_t is generally not zero, so measuring from zero flags calm participants whose resting drift is slightly positive.
 
 Both are frozen for the rest of the session. If they adapted live, a big stress response would inflate sigma, raise the bar, and mask itself. There is also a guard: if the baseline was degenerate (flat signal, sigma near zero) it falls back to a safe default and logs a warning rather than setting the thresholds to zero, which would label everything ultra-stressed.
 
@@ -220,7 +225,7 @@ There is no automatic time cap. The session runs as long as the clinical situati
 - `src/patient_intake.py`: modal demographic dialog before the dashboard
 - `src/data_sources.py`: file / device adapters (two derivation methods each), ADC conversion, NeuroKit2 R-peak detection, LSL channel auto-detection for live PLUX
 - `src/acquisition.py`: 50 Hz consumer, sample validation, disconnect detection
-- `src/processing.py`: EMA smoothing, baseline buffering, 3-sigma cleaning, wall-clock-safety finalization
+- `src/processing.py`: phasic EDA decomposition (rolling `nk.eda_phasic`), baseline buffering, 3-sigma cleaning, wall-clock-safety finalization. No EMA smoothing (removed per PDF — raw values flow straight through).
 - `src/fusion.py`: sigma, thresholds, stress fusion, state classification
 - `src/session_control.py`: Command enum, SessionState enum, control LSL bus
 - `src/output.py`: the 24-channel LSL output

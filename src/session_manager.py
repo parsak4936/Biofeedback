@@ -113,9 +113,10 @@ class SessionManager:
     # actually written (not pipeline ticks; rows are decimated per
     # Config.DIAGNOSTIC_CSV_RATE_HZ). Pipeline frequency itself is
     # unchanged (50 Hz); only the disk-write rate is throttled.
+    # The old smooth_eda/hr/hrv columns were dropped — with EMA removed
+    # per PDF, "smoothed" was identical to "raw" so they were just clutter.
     _DIAGNOSTIC_HEADER = ("tick_n,phase,status,"
-                          "raw_eda,raw_hr,raw_hrv,"
-                          "smooth_eda,smooth_hr,smooth_hrv\n")
+                          "raw_eda,raw_hr,raw_hrv\n")
 
     def __init__(self, patient_name: str = "PATIENT", patient_id: str = "000"):
         # Load metadata from the session folder (launcher wrote it).
@@ -323,8 +324,7 @@ class SessionManager:
         )
 
     def log_diagnostic_row(self, status: str,
-                            raw_eda: float, raw_hr: float, raw_hrv: float,
-                            smooth_eda: float, smooth_hr: float, smooth_hrv: float):
+                            raw_eda: float, raw_hr: float, raw_hrv: float):
         """
         Append one row to diagnostic.csv. Called by main.py once per tick
         with the raw (from acquisition) and smoothed (from processing)
@@ -355,8 +355,7 @@ class SessionManager:
 
         self._diagnostic_handle.write(
             f"{self._diagnostic_row_n},{self.phase},{status},"
-            f"{_f(raw_eda)},{_f(raw_hr)},{_f(raw_hrv)},"
-            f"{_f(smooth_eda)},{_f(smooth_hr)},{_f(smooth_hrv)}\n"
+            f"{_f(raw_eda)},{_f(raw_hr)},{_f(raw_hrv)}\n"
         )
 
     # ---------- in-memory history (for dashboard / summary) -----------------
@@ -434,9 +433,7 @@ class SessionManager:
             },
             "source": source_label,
             "pipeline_constants": {
-                "ema_alpha_eda": Config.EMA_ALPHA_EDA,
-                "ema_alpha_hr":  Config.EMA_ALPHA_HR,
-                "ema_alpha_hrv": Config.EMA_ALPHA_HRV,
+                # EMA smoothing removed per PDF — no ema_alpha_* keys here.
                 "artifact_sigma_multiplier": Config.ARTIFACT_SIGMA_MULTIPLIER,
                 "weight_eda": Config.WEIGHT_EDA,
                 "weight_hrv": Config.WEIGHT_HRV,
