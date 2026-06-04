@@ -66,6 +66,12 @@ class SignalProcessor:
         # operator has even clicked Start Baseline.
         self.accumulate_baseline = False
         self.baseline_complete = False
+        # Cached running mean of the BASELINE buffer, refreshed by
+        # running_baseline_averages() at the cadence main.py polls it
+        # (default every 10 s). Stays {} until the buffer has any data.
+        # Distinct from `personal_averages` which is only populated after
+        # the 3-sigma cleaning at the 120 s lock.
+        self.running_averages = {}
         # Phase string used in the processing audit log. main.py sets this
         # via set_phase() on every state transition; "IDLE" is the safe
         # default before the operator clicks anything.
@@ -128,6 +134,7 @@ class SignalProcessor:
         self.accumulate_baseline = False
         self.baseline_complete = False
         self.personal_averages = {}
+        self.running_averages = {}
         self.artifacts_removed = {'eda': 0, 'hr': 0, 'hrv': 0}
         self.cleaned_baseline_buffers = {'eda': None, 'hr': None, 'hrv': None}
         self._raw_eda_window.clear()
@@ -254,6 +261,38 @@ class SignalProcessor:
         # Check if the buffer has reached exactly 120 seconds (6000 samples)
         if len(self.buffers['eda']) == self.target_buffer_size:
             self._compute_personal_baselines()
+
+    def running_baseline_averages(self) -> dict:
+        """
+        Recompute the running mean of the (still-accumulating) baseline
+        buffer and cache it on `self.running_averages`. Called by main.py
+        every ~10 s during BASELINE so the operator can watch the
+        averages refine in real time on the dashboard cards, instead
+        of staring at "--" for the full two minutes.
+
+        Returns the cached dict (eda, hr, hrv) in microsiemens / BPM / ms.
+        Empty dict if the buffer has fewer than 1 s of data.
+        Once the baseline is locked, `personal_averages` becomes the
+        source of truth and this method just returns whatever was last
+        cached.
+        """
+        if self.baseline_complete:
+            return self.running_averages
+        if not self.buffers or not self.buffers.get('eda'):
+            return {}
+        # >=50 samples = 1 s @ 50 Hz; below that the mean is too noisy
+        # to be informative.
+        n = len(self.buffers['eda'])
+        if n < int(Config.PIPELINE_RATE):
+            return {}
+        # np.mean over a Python list is fine here; called at most once
+        # per ~10 s so cost is negligible against the per-tick loop.
+        self.running_averages = {
+            'eda': float(np.mean(self.buffers['eda'])),
+            'hr':  float(np.mean(self.buffers['hr'])),
+            'hrv': float(np.mean(self.buffers['hrv'])),
+        }
+        return self.running_averages
 
     def finalize_baseline_now(self) -> bool:
         """

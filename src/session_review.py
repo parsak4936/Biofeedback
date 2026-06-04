@@ -287,8 +287,9 @@ def render(df: pd.DataFrame, summary: dict, csv_path: str,
     """Build the matplotlib review figure. If save_path is given, write it
     to disk (PNG/PDF per file extension) instead of (or in addition to)
     popping a window."""
-    fig, axes = plt.subplots(4, 1, figsize=(14, 9), sharex=True,
-                             gridspec_kw={'height_ratios': [3, 1, 1, 1]})
+    # 5 rows: stress index (large), EDA, HR, HRV, balloon height.
+    fig, axes = plt.subplots(5, 1, figsize=(14, 10), sharex=True,
+                             gridspec_kw={'height_ratios': [3, 1, 1, 1, 1]})
     fig.suptitle(
         f"Session Review — {summary['patient_full']} "
         f"(ID {summary['patient_id']}, {summary['gender']}, "
@@ -338,14 +339,30 @@ def render(df: pd.DataFrame, summary: dict, csv_path: str,
                    color=state_colors.get(prev_state, '#222'), alpha=0.55)
     ax.set_ylabel("S_t", color='#dddddd')
 
-    # --- Smoothed EDA / HR / HRV ---
+    # --- EDA / HR / HRV ---
     for ax, col, color, label in (
-        (axes[1], 'eda', '#00ff66', 'EDA (μS)'),
+        (axes[1], 'eda', '#00ff66', 'EDA (uS)'),
         (axes[2], 'hr',  '#ff9933', 'HR (BPM)'),
         (axes[3], 'hrv', '#33aaff', 'HRV (ms)'),
     ):
         ax.plot(t, df[col], color=color, linewidth=1.1)
         ax.set_ylabel(label, fontsize=9, color='#dddddd')
+
+    # --- Balloon height (from Unity height telemetry) ---
+    ax = axes[4]
+    if 'height_m' in df.columns:
+        h = pd.to_numeric(df['height_m'], errors='coerce')
+        if h.notna().any():
+            ax.plot(t, h, color='#ffaa00', linewidth=1.2)
+        else:
+            ax.text(0.5, 0.5, 'no height telemetry recorded',
+                    transform=ax.transAxes, ha='center', va='center',
+                    color='#666666', fontsize=10)
+    else:
+        ax.text(0.5, 0.5, 'height column not present in this CSV',
+                transform=ax.transAxes, ha='center', va='center',
+                color='#666666', fontsize=10)
+    ax.set_ylabel('Height (m)', fontsize=9, color='#dddddd')
     axes[-1].set_xlabel("time (s)", color='#dddddd')
 
     # --- Summary text box ---

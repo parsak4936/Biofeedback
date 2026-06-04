@@ -96,6 +96,12 @@ def run_pipeline():
     # trivial to correlate UDP packets with the recorded stress trace
     # and the diagnostic per-tick log.
     unity = UnityUDPBridge(audit_log_path=session.unity_udp_path)
+    # Background thread listens on UDP for Unity's height telemetry
+    # ("height,N.NNN" packets, default port 5006). The latest value
+    # is read each tick and broadcast on LSL channel 24 + written
+    # to the samples CSV.
+    from height_receiver import HeightReceiver
+    height_rx = HeightReceiver()
     control = ControlSubscriber()  # blocks until dashboard publishes
     acq = BiofeedbackAcquisition()
     proc = SignalProcessor()
@@ -250,6 +256,10 @@ def run_pipeline():
             unity.send_raw("stop")
             session.phase = "STOPPED"
             session.print_session_summary()
+            # Produce the XLSX sidecar (frozen header + autofit cols) so
+            # the operator can scroll the data with the column names
+            # always visible.
+            session.write_samples_xlsx()
 
     def _handle_shutdown(cmd):
         """Process an out-of-band SHUTDOWN_* command. Cleans up files
@@ -287,7 +297,10 @@ def run_pipeline():
             session.discard_diagnostic_log(final=True)
         elif cmd == Command.SHUTDOWN_SAVE_BOTH:
             # Just close handles cleanly; nothing is deleted. The whole
-            # session folder stays with all its files.
+            # session folder stays with all its files. Also write the
+            # XLSX sidecar so the operator can scroll with a frozen
+            # header row.
+            session.write_samples_xlsx()
             session.close_all()
         return True
 
@@ -452,9 +465,29 @@ def run_pipeline():
             # IDLE / BASELINE_DONE / STOPPED: no extra work, defaults emitted.
 
             # ---- Phase E: LSL broadcast (always) ----
-            avg_eda = proc.personal_averages.get('eda', 0.0) if proc.personal_averages else 0.0
-            avg_hr = proc.personal_averages.get('hr', 0.0) if proc.personal_averages else 0.0
-            avg_hrv = proc.personal_averages.get('hrv', 0.0) if proc.personal_averages else 0.0
+            # avg_* sources:
+            #   1. After baseline lock: proc.personal_averages (cleaned mean).
+            #   2. During BASELINE: refresh the running mean every 10 s so
+            #      the dashboard cards update live instead of waiting for
+            #      the 02:00 lock. Refresh granularity is set by
+            #      `Config.RUNNING_BASELINE_REFRESH_SEC` (default 10).
+            if proc.personal_averages:
+                avg_eda = proc.personal_averages.get('eda', 0.0)
+                avg_hr  = proc.personal_averages.get('hr',  0.0)
+                avg_hrv = proc.personal_averages.get('hrv', 0.0)
+            else:
+                refresh_n = int(getattr(Config, 'RUNNING_BASELINE_REFRESH_SEC', 10)
+                                * Config.PIPELINE_RATE)
+                if state == SessionState.BASELINE and acq.tick_counter % max(1, refresh_n) == 0:
+                    proc.running_baseline_averages()
+                running = proc.running_averages or {}
+                avg_eda = running.get('eda', 0.0)
+                avg_hr  = running.get('hr',  0.0)
+                avg_hrv = running.get('hrv', 0.0)
+            # Pull the latest balloon height from Unity if it's streaming
+            # back; None when no telemetry has arrived (channel encodes
+            # that as NaN; CSV writer leaves the cell empty).
+            current_height = height_rx.get_height()
             out.broadcast_state(
                 s_t, state_label, dashboard,
                 smoothed_vector[0], smoothed_vector[1], smoothed_vector[2],
@@ -471,6 +504,7 @@ def run_pipeline():
                 elapsed_live_sec=_live_elapsed_now(),
                 unity_last_command_code=unity.last_command_code(),
                 unity_commands_sent=unity.commands_sent,
+                height_m=current_height,
             )
 
             # ---- Phase F: CSV writes (samples.csv + diagnostic.csv) ----
@@ -489,14 +523,18 @@ def run_pipeline():
             if state == SessionState.LIVE:
                 session.log_sample(smoothed_vector[0], smoothed_vector[1], smoothed_vector[2],
                                    deltas['eda'], deltas['hr'], deltas['hrv'],
-                                   s_inst, s_t, state_label, dashboard)
+                                   s_inst, s_t, state_label, dashboard,
+                                   height_m=current_height)
             elif state == SessionState.BASELINE:
                 # `state` column is "baseline" during the calibration phase
                 # (not the default "unknown"), so post-hoc tools and
                 # downstream consumers can shade / filter the baseline band
                 # by name. Stress fields stay zero — fusion isn't running yet.
+                # height_m is also captured during baseline if Unity is
+                # streaming (it usually is not pre-Start-Live, so cell is empty).
                 session.log_sample(smoothed_vector[0], smoothed_vector[1], smoothed_vector[2],
-                                   state="baseline")
+                                   state="baseline",
+                                   height_m=current_height)
             # else (IDLE / BASELINE_DONE / STOPPED): no samples.csv row.
 
             session.log_diagnostic_row(
@@ -534,6 +572,10 @@ def run_pipeline():
         except Exception:
             pass
         unity.close()
+        try:
+            height_rx.close()
+        except Exception:
+            pass
 
 
 if __name__ == "__main__":

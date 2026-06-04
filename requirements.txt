@@ -28,6 +28,11 @@ matplotlib==3.10.9
 # Pillow is matplotlib's image backend; needed for --save *.png / *.jpg.
 pillow==12.2.0
 
+# --- XLSX sidecar with frozen header + autofit columns ---
+# session_manager writes a .xlsx mirror of samples.csv at session end so
+# the operator can scroll through the data with the header row pinned.
+openpyxl==3.1.5
+
 # --- Optional: reading the docx specs in the repo root ---
 # Not imported by the runtime pipeline, but useful for anyone who wants
 # to load shayans_biofeedback_math_pipeline.docx / walkthrough.docx

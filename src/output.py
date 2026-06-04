@@ -9,7 +9,7 @@ LSL stream is for the dashboard, the audit pipeline, and any future
 analysis tools.
 
 The channel layout is fixed and lives below as a class attribute. Any
-consumer can rely on it by index. 24 channels total.
+consumer can rely on it by index. 25 channels total.
 """
 
 from pylsl import StreamInfo, StreamOutlet
@@ -19,8 +19,11 @@ from config import Config
 class UnityBridge:
     """Per-tick broadcast on LSL stream `Biofeedback_State`."""
 
-    # Channel layout (index -> meaning). 24 channels.
-    # No balloon altitude, no mode (Unity handles both on its side).
+    # Channel layout (index -> meaning). 25 channels.
+    # Channel 24 carries the balloon height telemetry that Unity streams
+    # back to Python (UDP port 5006, see height_receiver.py). NaN when
+    # no telemetry has arrived yet (Unity not running, or telemetry
+    # disabled in the Unity .cs file).
     CHANNELS = [
         's_t',                      # 0  smoothed stress index
         'state_enum',               # 1  0=calm, 1=stressed, 2=ultra_stressed
@@ -46,6 +49,7 @@ class UnityBridge:
         'elapsed_live_sec',         # 21 seconds in the LIVE state (frozen at stop)
         'unity_last_command_code',  # 22 0=none, 1=increase, 2=decrease, 3=start, 4=stop
         'unity_commands_sent',      # 23 running total of UDP packets actually sent
+        'height_m',                 # 24 balloon altitude from Unity (m); NaN if not streaming
     ]
 
     def __init__(self):
@@ -74,8 +78,11 @@ class UnityBridge:
                         session_state: int = 0,
                         elapsed_live_sec: float = 0.0,
                         unity_last_command_code: int = 0,
-                        unity_commands_sent: int = 0):
-        """Encode and push one 24-channel sample."""
+                        unity_commands_sent: int = 0,
+                        height_m=None):
+        """Encode and push one 25-channel sample. height_m=None becomes
+        NaN on the wire (LSL float32) — downstream consumers should
+        treat NaN as "no Unity telemetry yet"."""
         if state_label == "calm":
             state_enum = 0.0
         elif state_label == "stressed":
@@ -97,5 +104,6 @@ class UnityBridge:
             float(elapsed_live_sec),
             float(int(unity_last_command_code)),
             float(int(unity_commands_sent)),
+            float('nan') if height_m is None else float(height_m),
         ]
         self.outlet.push_sample(vector)

@@ -124,6 +124,13 @@ class Config:
 
     BASELINE_SEC = 120  # math-pipeline Step 2
 
+    # Cadence at which proc.running_baseline_averages() is recomputed
+    # during the BASELINE state. The dashboard's three EDA/HR/HRV cards
+    # show the running mean so the operator can watch the baseline
+    # refine instead of waiting at "--" for the full 120 s. Lower this
+    # for a more responsive readout (cheap, just np.mean over a list).
+    RUNNING_BASELINE_REFRESH_SEC = 10
+
     # Math-pipeline Step 3: outlier rejection radius. 3.0 = Gaussian 99.7% interval.
     ARTIFACT_SIGMA_MULTIPLIER = 3.0
 
@@ -295,12 +302,20 @@ class Config:
     # listenPort in BioFeedbackMiddleware.cs (5005).
     UNITY_UDP_HOST = '127.0.0.1'
     UNITY_UDP_PORT = 5005
-    # Minimum gap between two consecutive state-driven commands. The Unity
-    # middleware steps the balloon by stepAmount (default 1 m) per packet,
-    # so flooding would move the balloon impossibly fast. One per second
-    # gives 1 m/s under sustained state, which the visual lerp on the Unity
-    # side then smooths. Tune lower for snappier reaction, higher for gentler.
-    UNITY_COMMAND_INTERVAL_SEC = 1.0
+    # Minimum gap (in seconds) between two consecutive state-driven
+    # commands sent to Unity. Pipeline runs at 50 Hz but the bridge
+    # holds back increase/decrease packets until at least this many
+    # seconds have passed since the last one. So with 2.0, the maximum
+    # outbound rate is one packet every 2 seconds (= 0.5 Hz). Stressed
+    # state still sends nothing.
+    #
+    # Unit conversions if changing this:
+    #   0.1  -> 10 Hz (10 packets per second)
+    #   0.5  ->  2 Hz
+    #   1.0  ->  1 Hz (one per second)
+    #   2.0  ->  0.5 Hz (one per two seconds)  <-- current default
+    #   5.0  ->  0.2 Hz (one per five seconds)
+    UNITY_COMMAND_INTERVAL_SEC = 2.0
     # Wait-for-calm gate: after "start" is sent, the bridge holds all
     # state-driven commands until the patient hits the calm state. This
     # window is the period we wait *before* checking for calm, so the
@@ -308,6 +323,19 @@ class Config:
     # warmup doesn't trigger a false open. Default 1.5 s gives the buffer
     # plenty of time to fill with real samples.
     UDP_GATE_WARMUP_SEC = 1.5
+
+    # ============================================
+    # HEIGHT TELEMETRY (Unity -> Python, balloon altitude in meters)
+    # ============================================
+    # Unity's BioFeedbackMiddleware.SendHeightTelemetry sends UDP packets
+    # of the form "height,12.345" to the host/port below at telemetryRateHz
+    # (default 10 Hz, set in the Unity .cs file). The Python side opens a
+    # UDP socket here, parses incoming packets, exposes the latest height
+    # to main.py (broadcast on LSL channel 24 + written to samples.csv).
+    HEIGHT_TELEMETRY_ENABLED = True       # listen for Unity height packets
+    HEIGHT_TELEMETRY_HOST = '0.0.0.0'     # bind address; 0.0.0.0 = any interface
+    HEIGHT_TELEMETRY_PORT = 5006          # must match Unity's telemetryPort
+    HEIGHT_TELEMETRY_STALE_SEC = 5.0      # if no packet for this long, hold last
 
     # ============================================
     # REAL PLUX OPENSIGNALS LSL CONFIG
@@ -348,9 +376,15 @@ class Config:
     EDA_PLOT_DEFAULT_RANGE = (0.0, 25.0)      # μS — covers typical resting range
     HR_PLOT_DEFAULT_RANGE = (40.0, 180.0)     # BPM — wide enough for stress excursions
     HRV_PLOT_DEFAULT_RANGE = (0.0, 200.0)     # ms — RMSSD healthy range
-    EDA_PLOT_HALFRANGE = 3.0                  # μS around baseline once known
-    HR_PLOT_HALFRANGE = 25.0                  # BPM
-    HRV_PLOT_HALFRANGE = 30.0                 # ms
+    # Tighter zoom around the patient's baseline so small deviations are
+    # visible on screen. Reduce these to zoom in more, raise them if a
+    # signal pegs against the edge of its chart.
+    EDA_PLOT_HALFRANGE = 1.0                  # uS around baseline once known
+    HR_PLOT_HALFRANGE = 10.0                  # BPM
+    HRV_PLOT_HALFRANGE = 15.0                 # ms
+
+    # Y-axis bounds for the new live-session height chart.
+    HEIGHT_PLOT_DEFAULT_RANGE = (0.0, 150.0)  # meters; matches Unity maxAltitude
 
     # ECG waveform chart shows the last N raw samples. At 200 Hz, 1000 samples ≈ 5 s.
     ECG_PLOT_MAX_HISTORY = 1000

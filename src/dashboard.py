@@ -104,6 +104,7 @@ class ClinicalDashboard:
 
         # ---- Data buffers ----
         self.stress_data = {'x': [], 'y': []}
+        self.height_data = {'x': [], 'y': []}
         self.eda_data    = {'x': [], 'y': []}
         self.hr_data     = {'x': [], 'y': []}
         self.hrv_data    = {'x': [], 'y': []}
@@ -215,26 +216,63 @@ class ClinicalDashboard:
         self.label_baseline_duration.setStyleSheet("color: #ffff00;")
         v.addWidget(self.label_baseline_duration)
 
-        # Captured-values readout (populated when baseline locks)
+        # Captured-values readout (populated when baseline locks).
+        # EDA / HR / HRV get rendered as large card-style labels so they
+        # are visible from across the room. Sigma / thresholds / artifact
+        # counts stay as the smaller summary lines below.
         values = QGroupBox("Personal Baseline (captured)")
         values.setStyleSheet("QGroupBox { color: #888888; border: none; }")
         vv = QVBoxLayout(values)
-        vv.setSpacing(2)
-        self.label_baseline_eda = QLabel("EDA: -- uS")
-        self.label_baseline_hr  = QLabel("HR:  -- BPM")
-        self.label_baseline_hrv = QLabel("HRV: -- ms")
+        vv.setSpacing(6)
+
+        card_row = QHBoxLayout()
+        card_row.setSpacing(10)
+        # Outlined-card style per the sketch: transparent fill, coloured
+        # border + matching text. Reads cleanly against the dark panel
+        # background without the heavy filled-block look.
+        _BASELINE_CARD_QSS = (
+            "QLabel {{"
+            " background-color: transparent;"
+            " border: 2px solid {edge};"
+            " border-radius: 8px;"
+            " padding: 12px 6px;"
+            " color: {edge};"
+            " font-weight: bold;"
+            "}}"
+        )
+        self.label_baseline_eda = QLabel("EDA\n-- uS")
+        self.label_baseline_hr  = QLabel("HR\n-- BPM")
+        self.label_baseline_hrv = QLabel("HRV\n-- ms")
+        for lab, edge in (
+            (self.label_baseline_eda, "#00ff66"),
+            (self.label_baseline_hr,  "#ff9933"),
+            (self.label_baseline_hrv, "#33aaff"),
+        ):
+            lab.setFont(QFont("Arial", 16, QFont.Bold))
+            lab.setAlignment(Qt.AlignCenter)
+            lab.setStyleSheet(_BASELINE_CARD_QSS.format(edge=edge))
+            card_row.addWidget(lab, 1)
+        vv.addLayout(card_row)
+
         self.label_baseline_sigma = QLabel("sigma_baseline: --")
         self.label_baseline_thresh = QLabel("Thresholds: MILD = --, HIGH = --")
         self.label_baseline_artifacts = QLabel("Artifacts: EDA=-- HR=-- HRV=--")
-        for lab in (self.label_baseline_eda, self.label_baseline_hr,
-                    self.label_baseline_hrv, self.label_baseline_sigma,
-                    self.label_baseline_thresh, self.label_baseline_artifacts):
+        for lab in (self.label_baseline_sigma,
+                    self.label_baseline_thresh,
+                    self.label_baseline_artifacts):
             lab.setFont(QFont("Arial", 10))
             lab.setStyleSheet("color: #cccccc;")
             vv.addWidget(lab)
         v.addWidget(values)
 
-        # Signal charts: EDA, HR, HRV, ECG stacked
+        # Signal charts laid out in a 2-row x 2-col grid instead of
+        # the previous tall stack. Each chart now occupies a quarter
+        # of the panel rather than ~1/4 vertical, which roughly doubles
+        # the height available to each curve and keeps them readable
+        # when the panel is short. Charts auto-rescale dynamically
+        # (see _autoscale_signal_chart in update_dashboard) so a
+        # small EDA rise or fall stays visible.
+        from PyQt5.QtWidgets import QGridLayout
         self.plot_eda = self._create_signal_plot("EDA (uS)", "#00ff66",
                                                   y_range=Config.EDA_PLOT_DEFAULT_RANGE)
         self.plot_hr = self._create_signal_plot("HR (BPM)", "#ff9933",
@@ -243,8 +281,13 @@ class ClinicalDashboard:
                                                   y_range=Config.HRV_PLOT_DEFAULT_RANGE)
         self.plot_ecg = self._create_signal_plot("ECG (mV)", "#ff66ff",
                                                   y_range=(-1.5, 1.5))
-        for p in (self.plot_eda, self.plot_hr, self.plot_hrv, self.plot_ecg):
-            v.addWidget(p)
+        signal_grid = QGridLayout()
+        signal_grid.setSpacing(6)
+        signal_grid.addWidget(self.plot_eda, 0, 0)
+        signal_grid.addWidget(self.plot_hr,  0, 1)
+        signal_grid.addWidget(self.plot_hrv, 1, 0)
+        signal_grid.addWidget(self.plot_ecg, 1, 1)
+        v.addLayout(signal_grid, 1)
 
         return group
 
@@ -281,41 +324,108 @@ class ClinicalDashboard:
         self.label_live_duration.setStyleSheet("color: #00ff00;")
         v.addWidget(self.label_live_duration)
 
-        # Numeric strip
+        # Numeric strip. All readouts are outlined-card style now
+        # (transparent fill, coloured border + text), per the sketch.
+        # Layout, top to bottom:
+        #   row 1: three TIME-IN-STATE cards (CALM / STRESSED / ULTRA)
+        #   row 2: three SMALL info cards    (S_t  / Score   / Height)
+        #   row 3: big CURRENT STATE card (sits right above the charts)
+        #   row 4: small summary lines (thresholds / gate / Unity cmd)
         strip = QGroupBox("Current state")
         strip.setStyleSheet("QGroupBox { color: #888888; border: none; }")
         sv = QVBoxLayout(strip)
-        sv.setSpacing(2)
+        sv.setSpacing(8)
+
+        _CARD_QSS = (
+            "QLabel {{"
+            " background-color: transparent;"
+            " border: 2px solid {edge};"
+            " border-radius: 8px;"
+            " padding: {pad};"
+            " color: {edge};"
+            " font-weight: bold;"
+            "}}"
+        )
+
+        # ---- Row 1: time-in-state cards ----
+        time_row = QHBoxLayout()
+        time_row.setSpacing(10)
+        self.label_time_calm   = QLabel("CALM\n00:00")
+        self.label_time_stress = QLabel("STRESSED\n00:00")
+        self.label_time_ultra  = QLabel("ULTRA\n00:00")
+        for lab, edge in (
+            (self.label_time_calm,   "#00ff66"),
+            (self.label_time_stress, "#ffff00"),
+            (self.label_time_ultra,  "#ff6666"),
+        ):
+            lab.setFont(QFont("Arial", 13, QFont.Bold))
+            lab.setAlignment(Qt.AlignCenter)
+            lab.setStyleSheet(_CARD_QSS.format(edge=edge, pad="10px 6px"))
+            time_row.addWidget(lab, 1)
+        sv.addLayout(time_row)
+
+        # ---- Row 2: small info cards (S_t, Score, Height) ----
+        info_row = QHBoxLayout()
+        info_row.setSpacing(10)
+        self.label_s_t_card    = QLabel("S_t\n--")
+        self.label_score_card  = QLabel("Score\n--")
+        self.label_height_card = QLabel("Height\n-- m")
+        for lab, edge in (
+            (self.label_s_t_card,    "#ffffff"),
+            (self.label_score_card,  "#ffffff"),
+            (self.label_height_card, "#ffaa00"),
+        ):
+            lab.setFont(QFont("Arial", 12, QFont.Bold))
+            lab.setAlignment(Qt.AlignCenter)
+            lab.setStyleSheet(_CARD_QSS.format(edge=edge, pad="8px 6px"))
+            info_row.addWidget(lab, 1)
+        sv.addLayout(info_row)
+
+        # ---- Row 3: BIG current-state card, sits right above the charts ----
+        # Border + text recolour each tick to match the live state
+        # (green = calm, yellow = stressed, red = ultra). Set the initial
+        # green styling here; update_dashboard rewrites it on transitions.
         self.label_state = QLabel("CALM")
-        self.label_state.setFont(QFont("Arial", 16, QFont.Bold))
+        self.label_state.setFont(QFont("Arial", 28, QFont.Bold))
         self.label_state.setAlignment(Qt.AlignCenter)
-        self.label_s_t = QLabel("S_t: --   Score: --")
-        self.label_deltas = QLabel("dEDA: -- %   dHR: -- %   dHRV: -- %")
+        self.label_state.setStyleSheet(_CARD_QSS.format(edge="#00ff00", pad="16px"))
+        sv.addWidget(self.label_state)
+
+        # ---- Row 4: smaller summary lines (kept text, no card) ----
+        # These supplement the cards above with the long-form numeric
+        # detail that does not need to be readable from across the room.
+        self.label_s_t = QLabel("dEDA: -- %   dHR: -- %   dHRV: -- %")
         self.label_thresholds = QLabel("Thresholds: MILD = --, HIGH = --")
-        self.label_time_calm   = QLabel("Time CALM:     00:00")
-        self.label_time_stress = QLabel("Time STRESSED: 00:00")
-        self.label_time_ultra  = QLabel("Time ULTRA:    00:00")
         self.label_gate = QLabel("")
-        # Unity command tracker — surfaces what the UDP bridge most
-        # recently sent so the operator can see the throttle is real
-        # (and confirm Unity is being driven by the patient's state).
         self.label_unity = QLabel("Unity: (no commands sent yet)")
-        for lab in (self.label_state, self.label_s_t, self.label_deltas,
-                    self.label_thresholds, self.label_time_calm,
-                    self.label_time_stress, self.label_time_ultra,
+        # `label_deltas` kept as an alias for backwards compat with
+        # update_dashboard which still drives the deltas string.
+        self.label_deltas = self.label_s_t
+        # `label_height` kept as alias so the existing live-height
+        # update code keeps working; it just writes to the height card now.
+        self.label_height = self.label_height_card
+        for lab in (self.label_s_t, self.label_thresholds,
                     self.label_gate, self.label_unity):
-            if lab is not self.label_state:
-                lab.setFont(QFont("Arial", 10))
-                lab.setStyleSheet("color: #cccccc;")
+            lab.setFont(QFont("Arial", 10))
+            lab.setStyleSheet("color: #cccccc;")
             sv.addWidget(lab)
         v.addWidget(strip)
 
-        # Stress chart
+        # ---- Chart grid: row 1 = stress | height (50/50), row 2 = deltas full-width ----
+        # Per the operator's sketch: realtime index and balloon height
+        # side-by-side at the top, component deltas across the bottom.
+        from PyQt5.QtWidgets import QGridLayout
         self.plot_stress = self._create_stress_plot()
-        v.addWidget(self.plot_stress, 2)
-        # Deltas chart
+        self.plot_height = self._create_height_plot()
         self.plot_deltas = self._create_deltas_plot()
-        v.addWidget(self.plot_deltas, 1)
+        chart_grid = QGridLayout()
+        chart_grid.setSpacing(6)
+        chart_grid.addWidget(self.plot_stress, 0, 0)
+        chart_grid.addWidget(self.plot_height, 0, 1)
+        chart_grid.addWidget(self.plot_deltas, 1, 0, 1, 2)  # span both columns
+        chart_grid.setRowStretch(0, 2)
+        chart_grid.setRowStretch(1, 1)
+        v.addLayout(chart_grid, 1)
 
         return group
 
@@ -397,6 +507,27 @@ class ClinicalDashboard:
         self.curve_delta_hr  = plot_widget.plot([], [], pen=pg.mkPen('#ff9933', width=1.5), name='dHR %')
         self.curve_delta_hrv = plot_widget.plot([], [], pen=pg.mkPen('#33aaff', width=1.5), name='dHRV %')
         plot_widget.addLegend(offset=(10, 10))
+        return plot_widget
+
+    def _create_height_plot(self):
+        """Live-session chart of the balloon altitude streamed back from
+        Unity on UDP 5006. NaN cells (Unity not streaming) are simply
+        skipped so the curve does not draw a spurious zero line."""
+        plot_widget = pg.PlotWidget(
+            title="Balloon Height (m, from Unity)",
+            labels={'left': 'Height (m)', 'bottom': 'Time (samples)'}
+        )
+        plot_widget.showGrid(x=True, y=True)
+        plot_widget.setMouseEnabled(x=True, y=False)
+        plot_widget.enableAutoRange(axis=pg.ViewBox.XAxis, enable=False)
+        plot_widget.enableAutoRange(axis=pg.ViewBox.YAxis, enable=False)
+        plot_widget.setYRange(*Config.HEIGHT_PLOT_DEFAULT_RANGE, padding=0)
+        plot_widget.setMenuEnabled(False)
+        plot_widget.hideButtons()
+        plot_widget.setStyleSheet("border: 1px solid #333;")
+        self.curve_height = plot_widget.plot(
+            [], [], pen=pg.mkPen('#ffaa00', width=2)
+        )
         return plot_widget
 
     def _create_signal_plot(self, title: str, color: str, y_range=None):
@@ -495,7 +626,7 @@ class ClinicalDashboard:
             return
         n_samples_drained = len(samples)
         sample = samples[-1]
-        if len(sample) < 24:
+        if len(sample) < 25:
             return
 
         # Channel layout (22 channels — see UnityBridge.CHANNELS):
@@ -523,6 +654,7 @@ class ClinicalDashboard:
         live_elapsed_sec = float(sample[21])
         unity_cmd_code   = int(sample[22])
         unity_cmd_total  = int(sample[23])
+        balloon_height_m = float(sample[24])  # NaN until Unity streams
 
         # If main's state changed, refresh the button enable/disable picture.
         if session_state != self._last_state_observed:
@@ -538,7 +670,22 @@ class ClinicalDashboard:
             state_label, state_color, bg = "ULTRA STRESSED", "#ff0000", self.color_ultra
 
         self.label_state.setText(state_label)
-        self.label_state.setStyleSheet(f"color: {state_color}; font-weight: bold;")
+        # Outlined-card restyle: transparent fill, border + text in the
+        # current state's colour so it pops against the rest of the panel.
+        self.label_state.setStyleSheet(
+            "QLabel {"
+            f" background-color: transparent;"
+            f" border: 3px solid {state_color};"
+            f" border-radius: 10px;"
+            f" padding: 16px;"
+            f" color: {state_color};"
+            f" font-weight: bold;"
+            "}"
+        )
+        # Small info cards: update S_t and Score every tick. (Height
+        # card is updated below in the height-telemetry block.)
+        self.label_s_t_card.setText(f"S_t\n{s_t:+.2f}")
+        self.label_score_card.setText(f"Score\n{dashboard_score:.0f}/100")
         self.label_s_t.setText(f"S_t: {s_t:6.2f}    Score: {dashboard_score:5.1f}/100")
         self.label_deltas.setText(
             f"phEDA: {delta_eda:+6.3f} µS   dHR: {delta_hr:+6.1f} %   dHRV: {delta_hrv:+6.1f} %"
@@ -586,26 +733,35 @@ class ClinicalDashboard:
         # ECG is now drawn by _update_ecg_chart() called at the top of
         # update_dashboard, before the main-inlet early return.
 
-        # ---- Captured baseline display + threshold lines on stress chart ----
-        if avg_eda > 0.0 and avg_hr > 0.0:
-            self.label_baseline_eda.setText(f"EDA: {avg_eda:.2f} uS")
-            self.label_baseline_hr.setText(f"HR:  {avg_hr:.2f} BPM")
-            self.label_baseline_hrv.setText(f"HRV: {avg_hrv:.2f} ms")
+        # ---- Captured baseline display + dynamic signal-chart zoom ----
+        # Update the card text as soon as any non-zero average is
+        # broadcast (channel 9/10/11 carry running averages every
+        # ~10 s during BASELINE, then the locked value once at 02:00).
+        if avg_eda > 0.0 or avg_hr > 0.0 or avg_hrv > 0.0:
+            if avg_eda > 0.0:
+                self.label_baseline_eda.setText(f"EDA\n{avg_eda:.2f} uS")
+            if avg_hr > 0.0:
+                self.label_baseline_hr.setText(f"HR\n{avg_hr:.1f} BPM")
+            if avg_hrv > 0.0:
+                self.label_baseline_hrv.setText(f"HRV\n{avg_hrv:.1f} ms")
 
-            if not self._signal_ranges_centered:
-                eda_range = (max(0.0, avg_eda - Config.EDA_PLOT_HALFRANGE),
-                             avg_eda + Config.EDA_PLOT_HALFRANGE)
-                hr_range  = (max(0.0, avg_hr  - Config.HR_PLOT_HALFRANGE),
-                             avg_hr + Config.HR_PLOT_HALFRANGE)
-                hrv_range = (max(0.0, avg_hrv - Config.HRV_PLOT_HALFRANGE),
-                             avg_hrv + Config.HRV_PLOT_HALFRANGE)
-                self.plot_eda.locked_y_range = eda_range
-                self.plot_hr.locked_y_range  = hr_range
-                self.plot_hrv.locked_y_range = hrv_range
-                self.plot_eda.setYRange(*eda_range, padding=0)
-                self.plot_hr.setYRange(*hr_range, padding=0)
-                self.plot_hrv.setYRange(*hrv_range, padding=0)
-                self._signal_ranges_centered = True
+            # Dynamic auto-rescale per chart: keep the curve centred on
+            # the live mean and expand the half-range to whichever is
+            # bigger between the configured default and the current data
+            # span. Avoids the "EDA jumps and goes off the chart" and
+            # the opposite "flat resting signal zooms to noise" problems.
+            # Updated once per second (every PIPELINE_RATE ticks) so
+            # the chart doesn't visibly jitter.
+            if self.tick_counter % int(Config.PIPELINE_RATE) == 0:
+                self._autoscale_signal(self.plot_eda, self.eda_data['y'],
+                                       avg_eda, Config.EDA_PLOT_HALFRANGE,
+                                       y_floor=0.0)
+                self._autoscale_signal(self.plot_hr,  self.hr_data['y'],
+                                       avg_hr,  Config.HR_PLOT_HALFRANGE,
+                                       y_floor=0.0)
+                self._autoscale_signal(self.plot_hrv, self.hrv_data['y'],
+                                       avg_hrv, Config.HRV_PLOT_HALFRANGE,
+                                       y_floor=0.0)
 
         if thresh_mild > 0.0 and self.mild_line.value() != thresh_mild:
             self.mild_line.setValue(thresh_mild)
@@ -652,6 +808,26 @@ class ClinicalDashboard:
         else:
             self.label_unity.setText("")
 
+        # ---- Balloon-height telemetry from Unity ----
+        # channel 24 carries the height in meters, NaN when Unity isn't
+        # streaming. Skip the chart append when NaN so we don't draw
+        # a spurious zero line, but still update the label.
+        import math
+        # label_height aliases label_height_card; reformat for the card
+        # (two lines, big number) rather than the old inline label form.
+        if math.isfinite(balloon_height_m):
+            self.label_height_card.setText(f"Height\n{balloon_height_m:.1f} m")
+            self.height_data['x'].append(self.tick_counter)
+            self.height_data['y'].append(balloon_height_m)
+            if len(self.height_data['x']) > self.max_history:
+                self.height_data['x'].pop(0); self.height_data['y'].pop(0)
+            self.curve_height.setData(self.height_data['x'], self.height_data['y'])
+        else:
+            self.label_height_card.setText("Height\n-- m")
+        self.plot_height.setXRange(
+            max(0, self.tick_counter - self.view_width), self.tick_counter
+        )
+
         # ---- Time-in-state (LIVE only) ----
         # Count every sample we just drained (not 1 per timer fire),
         # otherwise dropped-frame periods make these counters drift well
@@ -669,9 +845,11 @@ class ClinicalDashboard:
         def _fmt(t):
             s = t // int(Config.PIPELINE_RATE)
             return f"{s // 60:02d}:{s % 60:02d}"
-        self.label_time_calm.setText(f"Time CALM:     {_fmt(self.ticks_calm)}")
-        self.label_time_stress.setText(f"Time STRESSED: {_fmt(self.ticks_stressed)}")
-        self.label_time_ultra.setText(f"Time ULTRA:    {_fmt(self.ticks_ultra)}")
+        # Two-line card format matches the big-card styling applied to
+        # these labels in _build_live_panel.
+        self.label_time_calm.setText(f"CALM\n{_fmt(self.ticks_calm)}")
+        self.label_time_stress.setText(f"STRESSED\n{_fmt(self.ticks_stressed)}")
+        self.label_time_ultra.setText(f"ULTRA\n{_fmt(self.ticks_ultra)}")
 
         # ---- Per-panel durations + QA strip ----
         if self.tick_counter % 10 == 0:
@@ -730,6 +908,49 @@ class ClinicalDashboard:
             if initial:
                 print(f"[DASHBOARD] ECG side stream lookup failed ({e}); "
                       f"will retry in the update loop.")
+
+    def _autoscale_signal(self, plot, ydata, center, default_half,
+                          y_floor=None, view_n=None):
+        """Adaptive Y-range for one signal chart.
+
+        Looks at the last `view_n` samples of `ydata`, centres the chart
+        on `center` (the patient's baseline average, when available) or
+        on the visible mean otherwise, and sets the half-range to
+        whichever is larger between `default_half` and the data span.
+        That gives a stable baseline view when nothing is happening AND
+        keeps the curve fully visible when EDA or HR spike beyond the
+        default range.
+
+        `y_floor`: optional lower clamp (e.g. 0 so EDA does not show
+        physically impossible negative axis).
+        """
+        if not ydata:
+            return
+        if view_n is None:
+            view_n = self.view_width
+        vals = ydata[-view_n:]
+        if not vals:
+            return
+        vmin = min(vals)
+        vmax = max(vals)
+        span = vmax - vmin
+        # Centre: prefer the locked / running baseline average; fall
+        # back to the visible midpoint while no baseline is available.
+        if center is not None and center > 0.0:
+            mid = center
+        else:
+            mid = (vmax + vmin) / 2.0
+        # Half-range: enough to cover the visible span plus 20% padding,
+        # never tighter than the configured default. Hysteresis is light
+        # so the chart can both expand on a spike AND contract back when
+        # the signal settles.
+        half = max(default_half, span * 0.6 + default_half * 0.3)
+        lo = mid - half
+        hi = mid + half
+        if y_floor is not None:
+            lo = max(y_floor, lo)
+        plot.setYRange(lo, hi, padding=0)
+        plot.locked_y_range = (lo, hi)
 
     def _update_ecg_chart(self):
         """Drain the ECG side stream and append every sample to the chart

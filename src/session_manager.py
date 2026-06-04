@@ -91,6 +91,20 @@ def _load_metadata_from_env() -> dict:
 
 # ---------- main class -------------------------------------------------------
 
+def _coerce_xlsx_cell(s: str):
+    """Best-effort string -> int/float for write_samples_xlsx, so Excel
+    treats numeric columns as numbers (sortable, plottable). Empty cells
+    stay empty so they map to Excel's blank semantics."""
+    if s == "" or s is None:
+        return None
+    try:
+        if '.' in s or 'e' in s or 'E' in s:
+            return float(s)
+        return int(s)
+    except (ValueError, TypeError):
+        return s
+
+
 class SessionManager:
     """Centralised session state + per-tick file writing."""
 
@@ -101,12 +115,21 @@ class SessionManager:
     # = one written row per second). The sample_n column gives a clean
     # monotonic index for plotting / aligning across files without the
     # visual clutter of timestamps.
-    _SAMPLES_HEADER = ("sample_n,phase,"
+    # Column groups, in the order they appear in the file:
+    #   1. row index               sample_n
+    #   2. person info             patient_first_name ... session_number
+    #   3. status                  phase, state, dashboard_score
+    #   4. signals                 eda, hr, hrv, delta_eda, delta_hr, delta_hrv,
+    #                              s_instant, s_t
+    #   5. height (from Unity)     height_m
+    #   6. diagnostic counters     artifacts_eda, artifacts_hr, artifacts_hrv
+    _SAMPLES_HEADER = ("sample_n,"
                        "patient_first_name,patient_last_name,patient_id,"
                        "gender,session_date,session_number,"
+                       "phase,state,dashboard_score,"
                        "eda,hr,hrv,"
-                       "delta_eda,delta_hr,delta_hrv,"
-                       "s_instant,s_t,state,dashboard_score,"
+                       "delta_eda,delta_hr,delta_hrv,s_instant,s_t,"
+                       "height_m,"
                        "artifacts_eda,artifacts_hr,artifacts_hrv\n")
 
     # diagnostic.csv header — `tick_n` is a 1-indexed counter of rows
@@ -285,7 +308,8 @@ class SessionManager:
     def log_sample(self, eda: float, hr: float, hrv: float,
                    delta_eda: float = 0.0, delta_hr: float = 0.0, delta_hrv: float = 0.0,
                    s_instant: float = None, s_t: float = None,
-                   state: str = None, dashboard_score: float = None):
+                   state: str = None, dashboard_score: float = None,
+                   height_m=None):
         """
         Append one row to samples.csv (held handle, single fwrite).
 
@@ -308,16 +332,33 @@ class SessionManager:
         self._samples_row_n += 1
 
         p = self.patient
+        # height_m can be None (Unity not streaming yet); empty cell on
+        # disk is the convention pandas / Excel parse as NaN.
+        if height_m is None:
+            height_str = ""
+        else:
+            try:
+                height_str = f"{float(height_m):.3f}"
+            except (TypeError, ValueError):
+                height_str = ""
         self._samples_handle.write(
-            f"{self._samples_row_n},{self.phase},"
+            # 1. row index
+            f"{self._samples_row_n},"
+            # 2. person info
             f"{p['first_name']},{p['last_name']},{p['patient_id']},"
             f"{p['gender']},{p['session_date']},{p['session_number']},"
+            # 3. status
+            f"{self.phase},"
+            f"{state if state else 'unknown'},"
+            f"{dashboard_score if dashboard_score is not None else 0.0:.2f},"
+            # 4. signals
             f"{eda:.4f},{hr:.4f},{hrv:.4f},"
             f"{delta_eda:.4f},{delta_hr:.4f},{delta_hrv:.4f},"
             f"{s_instant if s_instant is not None else 0.0:.4f},"
             f"{s_t if s_t is not None else 0.0:.4f},"
-            f"{state if state else 'unknown'},"
-            f"{dashboard_score if dashboard_score is not None else 0.0:.2f},"
+            # 5. height (from Unity, blank if not streaming)
+            f"{height_str},"
+            # 6. diagnostic counters
             f"{self.artifacts_removed.get('eda', 0)},"
             f"{self.artifacts_removed.get('hr', 0)},"
             f"{self.artifacts_removed.get('hrv', 0)}\n"
@@ -467,6 +508,54 @@ class SessionManager:
     #
     # The old per-file delete helpers stay around as no-ops / partial deletes
     # for back-compat with main.py's existing shutdown branches.
+
+    def write_samples_xlsx(self):
+        """Write samples.csv next to samples.xlsx, with the first row
+        frozen and column widths auto-fitted. Convenience for operators
+        who scroll the file in Excel and want the header always visible.
+
+        Called on graceful session end (LIVE -> STOPPED) and on
+        Save-Both shutdowns. Skipped silently if openpyxl is missing
+        or the CSV does not exist (e.g. discarded session).
+        """
+        try:
+            import openpyxl
+            from openpyxl.utils import get_column_letter
+        except ImportError:
+            return
+        csv_path = self.output_file_path
+        if not csv_path or not os.path.exists(csv_path):
+            return
+        # Flush + close the CSV handle so the read sees every row.
+        self._close_samples()
+        xlsx_path = os.path.splitext(csv_path)[0] + '.xlsx'
+        try:
+            wb = openpyxl.Workbook(write_only=False)
+            ws = wb.active
+            ws.title = "samples"
+            with open(csv_path, 'r', encoding='utf-8', newline='') as f:
+                rows = [line.rstrip('\n').split(',') for line in f if line.strip()]
+            if not rows:
+                return
+            for r in rows:
+                # Coerce numeric-looking cells so Excel sorts and plots
+                # them correctly; leave the rest as strings.
+                ws.append([_coerce_xlsx_cell(c) for c in r])
+            # Freeze the first row + autofit column widths.
+            ws.freeze_panes = 'A2'
+            for col_idx, _ in enumerate(rows[0], start=1):
+                letter = get_column_letter(col_idx)
+                width = max(len(str(r[col_idx - 1])) for r in rows if col_idx - 1 < len(r))
+                ws.column_dimensions[letter].width = min(40, max(8, width + 2))
+            # Bold the header row.
+            from openpyxl.styles import Font
+            for cell in ws[1]:
+                cell.font = Font(bold=True)
+            wb.save(xlsx_path)
+            print(f"[SESSION] Wrote {os.path.basename(xlsx_path)} "
+                  f"(frozen header, autofit columns).")
+        except Exception as e:
+            print(f"[SESSION] WARN: could not write samples.xlsx: {e}")
 
     def delete_session_csv(self):
         """Remove samples.csv (and any rotated samples_NNN.csv) from disk."""
