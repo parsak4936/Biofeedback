@@ -1,0 +1,13 @@
+{
+  "patient": {
+    "first_name": "sad",
+    "last_name": "asd",
+    "patient_id": "asd",
+    "gender": "F",
+    "session_date": "2026-06-05",
+    "session_number": 1
+  },
+  "session_folder": "sad_asd_Session1_2026-06-05_F",
+  "session_timestamp": "20260605_102907",
+  "baseline": null
+}

@@ -388,6 +388,7 @@ def run_pipeline():
                     import numpy as _np
                     _hr_avg = proc.personal_averages.get('hr', float('nan'))
                     _hrv_avg = proc.personal_averages.get('hrv', float('nan'))
+                    _eda_avg = proc.personal_averages.get('eda', float('nan'))
                     if (not _np.isfinite(_hr_avg)) or (not _np.isfinite(_hrv_avg)):
                         print("\n" + "!" * 60)
                         print("!! [MAIN] WARN: baseline produced no valid HR or HRV")
@@ -396,6 +397,36 @@ def run_pipeline():
                         print("!! whole baseline — likely a loose ECG electrode or a")
                         print("!! noise-flooded ECG channel. Restore contact and click")
                         print("!! Start Baseline again before going live.")
+                        print("!" * 60 + "\n")
+
+                    # Plausibility check: the values are finite but might
+                    # still be biologically impossible. Catches the
+                    # "EDA-pinned-to-zero" failure mode from the real1
+                    # session (mis-mapped channels), and any case where
+                    # the recorded baseline could not have come from a
+                    # real adult at rest. WARN only — does not block the
+                    # transition, but the message tells the operator
+                    # exactly which signal is suspect.
+                    _bad = []
+                    if _np.isfinite(_eda_avg) and not (0.1 <= _eda_avg <= 30.0):
+                        _bad.append(f"EDA={_eda_avg:.3f} uS (expected 0.1-30)")
+                    if _np.isfinite(_hr_avg) and not (40.0 <= _hr_avg <= 180.0):
+                        _bad.append(f"HR={_hr_avg:.1f} BPM (expected 40-180)")
+                    if _np.isfinite(_hrv_avg) and not (5.0 <= _hrv_avg <= 300.0):
+                        _bad.append(f"HRV={_hrv_avg:.1f} ms (expected 5-300)")
+                    if _bad:
+                        print("\n" + "!" * 60)
+                        print("!! [MAIN] WARN: captured baseline values are outside")
+                        print("!! the normal physiological range for an adult at rest:")
+                        for _msg in _bad:
+                            print(f"!!   {_msg}")
+                        print("!! Likely causes:")
+                        print("!!   * electrode came loose or has poor skin contact")
+                        print("!!   * EDA gel dried out or fingers slipped off pads")
+                        print("!!   * wrong ECG/EDA channels (check the channel-mapping")
+                        print("!!     line a few seconds after launcher started)")
+                        print("!! Click Start Baseline again after fixing, before")
+                        print("!! moving on to the live session.")
                         print("!" * 60 + "\n")
 
                     mean_b, sigma_b = fusion.calculate_baseline_sigma(

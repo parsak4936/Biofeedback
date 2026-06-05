@@ -250,6 +250,145 @@ def _read_lsl_channel_labels(inlet, timeout_sec=2.0):
     return labels
 
 
+def _resolve_channels_by_content(inlet, n_channels, fs_hz,
+                                  sample_sec=5.0):
+    """
+    Content-based channel auto-detect for the live PLUX stream.
+
+    Pulls ~sample_sec of raw samples and fingerprints each channel
+    against three independent tests:
+
+      1. Variance: a channel with near-zero variance is the device's
+         digital-input line (DI), always 0. Skipped.
+      2. Monotonicity: a channel that strictly increases over time is
+         the sample-sequence counter (nSeq). Skipped.
+      3. Beat-plausibility (PDF §4 Bug 5): treat each candidate channel
+         AS IF it were ECG, clean it with nk.ecg_clean, run nk.ecg_peaks,
+         then measure what fraction of resulting RR intervals fall in
+         the human-plausible 300-1500 ms band (40-200 BPM). Real ECG
+         scores ~1.0; EDA / DI / nSeq force-fed through the detector
+         score near zero.
+      4. EDA-range check: convert the channel as if it were EDA (ADC ->
+         microsiemens). Real resting EDA falls in 0.1-30 uS.
+
+    Picks ECG = channel with the highest beat-plausibility (>= 0.7).
+    Picks EDA = remaining non-DI, non-nSeq channel whose ADC->uS
+                conversion mean falls inside [0.1, 30] uS.
+
+    Returns (eda_idx, ecg_idx, source_string) on success.
+    Raises RuntimeError with a clear operator message on failure
+    (no plausible ECG channel, or no plausible EDA channel) so the
+    session never starts with mis-mapped channels silently producing
+    zero-EDA or impossible-RMSSD output.
+    """
+    print(f"[DATA SOURCE]   Auto-detect: sampling {sample_sec:.1f}s "
+          f"of raw data ({n_channels} channels)...")
+
+    # Pull a chunk. inlet is already open at this point.
+    deadline = time.time() + sample_sec
+    collected = []
+    while time.time() < deadline:
+        try:
+            chunk, _ = inlet.pull_chunk(timeout=0.1,
+                                         max_samples=int(fs_hz))
+            if chunk:
+                collected.extend(chunk)
+        except Exception:
+            break
+    if len(collected) < int(fs_hz):
+        raise RuntimeError(
+            f"channel auto-detect: only got {len(collected)} samples "
+            f"in {sample_sec:.1f}s (need at least {int(fs_hz)}). The "
+            f"PLUX stream looks dead. Is OpenSignals recording?"
+        )
+
+    arr = np.asarray(collected, dtype=float)
+    print(f"[DATA SOURCE]     got {arr.shape[0]} samples, "
+          f"analysing channels...")
+
+    fingerprints = []
+    for ch in range(n_channels):
+        col = arr[:, ch]
+        col_var = float(np.var(col))
+        # Monotonic = sample counter (nSeq). Strict increase + spread > 50%.
+        if col.size >= 2:
+            is_monotonic = bool(np.all(np.diff(col) >= 0)
+                                 and col.max() > col.min() * 1.5
+                                 and col_var > 1e6)
+        else:
+            is_monotonic = False
+        # EDA-as-µS interpretation.
+        eda_uS_mean = float(np.mean(adc_to_eda_uS(col)))
+        # Beat-plausibility: only test channels that have real
+        # signal energy (skip DI and nSeq).
+        beat_plaus = 0.0
+        if not is_monotonic and col_var > 1e3:
+            try:
+                with warnings.catch_warnings():
+                    warnings.simplefilter('ignore')
+                    ecg_mV_col = adc_to_ecg_mV(col)
+                    cleaned = nk.ecg_clean(ecg_mV_col,
+                                            sampling_rate=fs_hz)
+                    _, info = nk.ecg_peaks(cleaned,
+                                            sampling_rate=fs_hz,
+                                            correct_artifacts=True)
+                peaks = np.asarray(info["ECG_R_Peaks"])
+                if peaks.size >= 3:
+                    rr = np.diff(peaks) * 1000.0 / fs_hz
+                    beat_plaus = float(np.mean((rr >= 300)
+                                                & (rr <= 1500)))
+            except Exception:
+                beat_plaus = 0.0
+        fingerprints.append({
+            'ch': ch, 'var': col_var, 'monotonic': is_monotonic,
+            'eda_uS_mean': eda_uS_mean, 'beat_plaus': beat_plaus,
+        })
+        print(f"[DATA SOURCE]     ch{ch}: var={col_var:.2e}  "
+              f"monotonic={'Y' if is_monotonic else 'N'}  "
+              f"EDA-as-uS={eda_uS_mean:.3f}  "
+              f"beat-plaus={beat_plaus:.2f}")
+
+    # ECG = highest beat-plausibility, must clear 0.7.
+    ecg_candidates = [fp for fp in fingerprints if fp['beat_plaus'] >= 0.7]
+    if not ecg_candidates:
+        best = max(fingerprints, key=lambda fp: fp['beat_plaus'])
+        raise RuntimeError(
+            f"channel auto-detect: no channel produced plausible "
+            f"heartbeats (best beat-plausibility = {best['beat_plaus']:.2f} "
+            f"on ch{best['ch']}, threshold 0.7). Check ECG electrode "
+            f"contact and chest-lead placement, then retry."
+        )
+    ecg_choice = max(ecg_candidates, key=lambda fp: fp['beat_plaus'])
+    ecg_idx = ecg_choice['ch']
+
+    # EDA = remaining channel with realistic µS range, not DI, not nSeq.
+    eda_candidates = [
+        fp for fp in fingerprints
+        if fp['ch'] != ecg_idx
+        and not fp['monotonic']
+        and 0.1 <= fp['eda_uS_mean'] <= 30.0
+        and fp['var'] > 1e3
+    ]
+    if not eda_candidates:
+        raise RuntimeError(
+            f"channel auto-detect: picked ECG=ch{ecg_idx} (plaus="
+            f"{ecg_choice['beat_plaus']:.2f}), but no remaining "
+            f"channel has a realistic EDA range "
+            f"(0.1-30 µS after ADC conversion). Check EDA finger-pad "
+            f"contact and gel."
+        )
+    # Among EDA candidates, pick the one with the largest µS mean —
+    # ECG-as-EDA gives near-zero, DI gives 0, real EDA gives 3-10 µS.
+    eda_idx = max(eda_candidates,
+                   key=lambda fp: fp['eda_uS_mean'])['ch']
+
+    return eda_idx, ecg_idx, (
+        f"auto-detect by content (ecg-plaus="
+        f"{ecg_choice['beat_plaus']:.2f}, "
+        f"eda-mean={fingerprints[eda_idx]['eda_uS_mean']:.2f} µS)"
+    )
+
+
 # =============================================================================
 # Malik / Task Force (1996) RR-interval artifact gate
 # =============================================================================
@@ -811,12 +950,48 @@ class RealPLUXDataSource(DataSource):
         self.fs_hz = float(info.nominal_srate()) or 1000.0
         n_channels = info.channel_count()
 
-        labels = _read_lsl_channel_labels(self.inlet)
-        self.eda_ch, self.ecg_ch, source = _resolve_channels_by_label(
-            labels, n_channels,
-        )
         print(f"[DATA SOURCE]   PLUX: {n_channels} channels @ "
               f"{self.fs_hz:.0f} Hz")
+
+        # ----------------------------------------------------------------
+        # Channel resolution: labels first, then content fingerprint.
+        # The earlier real_plux session had EDA pinned to ~0 because the
+        # fixed-index fallback picked the DI line (always zero). Even
+        # with labels, OpenSignals builds disagree on naming, so we now
+        # ALWAYS verify the choice against the live data.
+        # ----------------------------------------------------------------
+        labels = _read_lsl_channel_labels(self.inlet)
+        label_eda, label_ecg, label_source = _resolve_channels_by_label(
+            labels, n_channels,
+        )
+        used_content = False
+        try:
+            # Content-based detect sees the actual samples — it cannot be
+            # fooled by missing or mis-applied labels.
+            c_eda, c_ecg, c_source = _resolve_channels_by_content(
+                self.inlet, n_channels, self.fs_hz, sample_sec=5.0,
+            )
+            if label_source == "labels" and (c_eda != label_eda
+                                              or c_ecg != label_ecg):
+                # Labels said one thing, data says another. Trust data.
+                print(f"[DATA SOURCE]   WARN: label-based mapping "
+                      f"(EDA=ch{label_eda}, ECG=ch{label_ecg}) disagrees "
+                      f"with content-based (EDA=ch{c_eda}, ECG=ch{c_ecg}). "
+                      f"Using content-based to be safe.")
+            self.eda_ch, self.ecg_ch = c_eda, c_ecg
+            source = c_source
+            used_content = True
+        except RuntimeError as e:
+            # Content detection refused: either no plausible ECG or no
+            # plausible EDA was found. Fall back to whatever the labels /
+            # fixed-indices said, but make the operator notice loudly.
+            print(f"[DATA SOURCE]   WARN: {e}")
+            print(f"[DATA SOURCE]   WARN: falling back to "
+                  f"label/fixed-index mapping. Verify EDA values look "
+                  f"physiological (1-20 µS range) once baseline starts.")
+            self.eda_ch, self.ecg_ch = label_eda, label_ecg
+            source = label_source
+
         print(f"[DATA SOURCE]   Channel mapping ({source}): "
               f"EDA=ch{self.eda_ch}, ECG=ch{self.ecg_ch} "
               f"(labels: {labels or 'none'})")
