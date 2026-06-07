@@ -229,10 +229,24 @@ def _resolve_channels_by_label(labels, n_channels):
     if eda_idx is not None and ecg_idx is not None:
         return eda_idx, ecg_idx, "labels"
 
-    # PDF §4 Bug 4 fallback mapping.
+    # PDF §4 Bug 4 fallback mapping. Real-1 session bug: OpenSignals can
+    # publish a 4-channel LSL stream [nSeq, DI, CH1, CH2] when the device
+    # mode includes the digital-input line. The previous code only branched
+    # on `n_channels == 2`, so any other channel count fell through to the
+    # 3-channel default and silently mapped EDA to the digital-input
+    # column (always 0). Result: dashboard EDA reads ~0 the whole session.
     if n_channels == 2:
         return 0, 1, "fallback (2-ch: ch0=EDA, ch1=ECG)"
-    return 1, 2, "fallback (3-ch: ch0=digital, ch1=EDA, ch2=ECG)"
+    if n_channels == 3:
+        return 1, 2, "fallback (3-ch: ch0=digital, ch1=EDA, ch2=ECG)"
+    if n_channels == 4:
+        # OpenSignals 4-ch layout: [nSeq, DI, CH1, CH2] -> CH1=EDA, CH2=ECG.
+        return 2, 3, "fallback (4-ch: nSeq/DI/CH1/CH2 -> ch2=EDA, ch3=ECG)"
+    # Unknown shape — return the last two channels as a best guess but
+    # flag the source loudly so the operator notices on startup.
+    return n_channels - 2, n_channels - 1, (
+        f"fallback (unknown {n_channels}-ch layout: "
+        f"ch{n_channels - 2}=EDA, ch{n_channels - 1}=ECG)")
 
 
 def _read_lsl_channel_labels(inlet, timeout_sec=2.0):
@@ -992,9 +1006,79 @@ class RealPLUXDataSource(DataSource):
             self.eda_ch, self.ecg_ch = label_eda, label_ecg
             source = label_source
 
-        print(f"[DATA SOURCE]   Channel mapping ({source}): "
-              f"EDA=ch{self.eda_ch}, ECG=ch{self.ecg_ch} "
-              f"(labels: {labels or 'none'})")
+        # ----------------------------------------------------------------
+        # Force-print channel mapping in a banner so it cannot be missed,
+        # then post-validate by sampling a short window and confirming
+        # EDA looks physiological (1-30 µS at rest). If EDA stays under
+        # 0.1 µS for >2 s the operator almost certainly has either a
+        # disconnected EDA electrode OR a mis-mapped channel (real-1
+        # session bug). In that case we ABORT before letting the session
+        # start with garbage data being recorded.
+        # ----------------------------------------------------------------
+        eda_min_valid_uS = 0.1     # below this = no skin contact OR wrong channel
+        verify_sec = 3.0
+        try:
+            verify_chunk = []
+            deadline = time.time() + verify_sec
+            while time.time() < deadline:
+                chunk, _ = self.inlet.pull_chunk(timeout=0.1,
+                                                  max_samples=int(self.fs_hz))
+                if chunk:
+                    verify_chunk.extend(chunk)
+            if not verify_chunk:
+                raise RuntimeError(
+                    f"channel-mapping verify: no samples arrived in "
+                    f"{verify_sec:.0f}s. Is OpenSignals still recording?"
+                )
+            v_arr = np.asarray(verify_chunk, dtype=float)
+            eda_samples = v_arr[:, self.eda_ch]
+            ecg_samples = v_arr[:, self.ecg_ch]
+            eda_uS_arr = adc_to_eda_uS(eda_samples)
+            ecg_mV_arr = adc_to_ecg_mV(ecg_samples)
+            eda_uS_mean = float(np.mean(eda_uS_arr))
+            ecg_mV_p2p = float(np.max(ecg_mV_arr) - np.min(ecg_mV_arr))
+
+            print()
+            print("[DATA SOURCE]   " + "=" * 60)
+            print(f"[DATA SOURCE]   CHANNEL MAPPING (verify against OpenSignals UI)")
+            print(f"[DATA SOURCE]   " + "-" * 60)
+            print(f"[DATA SOURCE]   source      : {source}")
+            print(f"[DATA SOURCE]   labels      : {labels or 'none'}")
+            print(f"[DATA SOURCE]   n_channels  : {n_channels}")
+            print(f"[DATA SOURCE]   EDA -> ch{self.eda_ch}"
+                  f"  raw ADC mean={float(np.mean(eda_samples)):.0f}"
+                  f"  -> {eda_uS_mean:.3f} uS")
+            print(f"[DATA SOURCE]   ECG -> ch{self.ecg_ch}"
+                  f"  raw ADC mean={float(np.mean(ecg_samples)):.0f}"
+                  f"  -> peak-to-peak {ecg_mV_p2p:.3f} mV")
+            print("[DATA SOURCE]   " + "=" * 60)
+            print()
+
+            if eda_uS_mean < eda_min_valid_uS:
+                raise RuntimeError(
+                    f"channel-mapping verify FAILED: EDA channel {self.eda_ch} "
+                    f"produced mean {eda_uS_mean:.4f} uS over {verify_sec:.0f}s "
+                    f"(threshold: {eda_min_valid_uS:.2f} uS). Either:\n"
+                    f"  (a) EDA electrode lost contact -- re-seat the finger "
+                    f"pad and retry.\n"
+                    f"  (b) Channel mapping is wrong -- check the OpenSignals "
+                    f"UI for which CH number actually carries EDA, then set "
+                    f"Config.REAL_PLUX_EDA_CHANNEL accordingly.\n"
+                    f"Refusing to start a session with near-zero EDA -- "
+                    f"would record garbage data."
+                )
+        except RuntimeError:
+            # Re-raise (this is the operator-facing abort path).
+            raise
+        except Exception as e:
+            # Verify itself crashed (LSL hiccup, decode error). Don't abort —
+            # the operator can still run the session and catch problems
+            # by eye. Log loudly so it doesn't go unnoticed.
+            print(f"[DATA SOURCE]   WARN: channel-mapping verify skipped "
+                  f"({type(e).__name__}: {e})")
+            print(f"[DATA SOURCE]   Channel mapping ({source}): "
+                  f"EDA=ch{self.eda_ch}, ECG=ch{self.ecg_ch} "
+                  f"(labels: {labels or 'none'})")
 
         # ---- Open our downstream "derived" outlet ----
         # Same shape and channel order as MockDataSource so acquisition.py

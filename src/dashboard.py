@@ -123,10 +123,13 @@ class ClinicalDashboard:
         self.ticks_stressed = 0
         self.ticks_ultra = 0
 
-        # Background colors for the stress chart per state
-        self.color_calm     = pg.mkColor(20, 50, 20)
-        self.color_stressed = pg.mkColor(50, 50, 20)
-        self.color_ultra    = pg.mkColor(50, 20, 20)
+        # Background tints for the stress chart per state. Very subtle --
+        # operator should perceive the state shift from peripheral vision
+        # without being distracted by it. Tuned to roughly match the
+        # desaturated stop-light card palette.
+        self.color_calm     = pg.mkColor(24, 32, 28)
+        self.color_stressed = pg.mkColor(36, 32, 22)
+        self.color_ultra    = pg.mkColor(40, 24, 24)
 
         # Track most recent SessionState we observed
         self._last_state_observed = SessionState.IDLE
@@ -162,37 +165,70 @@ class ClinicalDashboard:
         outer.addLayout(self._build_qa_strip())
 
     def _build_info_bar(self):
-        layout = QHBoxLayout()
+        layout = QVBoxLayout()
         patient_name = os.environ.get('PATIENT_NAME', 'PATIENT')
         patient_id = os.environ.get('PATIENT_ID', '000')
 
+        # ---- Top row: patient / phase / status ----
+        top = QHBoxLayout()
         self.label_patient = QLabel(f"Patient: {patient_name} ({patient_id})")
-        self.label_patient.setFont(QFont("Arial", 14, QFont.Bold))
-        self.label_patient.setStyleSheet("color: #0099ff;")
+        self.label_patient.setFont(QFont("Arial", 13, QFont.Bold))
+        self.label_patient.setStyleSheet("color: #e0e0e0;")
 
         self.label_phase = QLabel("Phase: IDLE")
-        self.label_phase.setFont(QFont("Arial", 12, QFont.Bold))
-        self.label_phase.setStyleSheet("color: #aaaaaa;")
+        self.label_phase.setFont(QFont("Arial", 11, QFont.Bold))
+        self.label_phase.setStyleSheet("color: #9a9a9a;")
 
         # The status banner mirrors the [STATE] transitions printed in the
-        # terminal — so the operator sees the same news on screen.
+        # terminal so the operator sees the same news on screen.
         self.label_status = QLabel("Ready. Click Start Baseline to begin.")
         self.label_status.setFont(QFont("Arial", 11))
-        self.label_status.setStyleSheet("color: #aaaaaa;")
+        self.label_status.setStyleSheet("color: #9a9a9a;")
         self.label_status.setWordWrap(True)
 
-        layout.addWidget(self.label_patient, 2)
-        layout.addWidget(self.label_phase, 1)
-        layout.addWidget(self.label_status, 3)
+        top.addWidget(self.label_patient, 2)
+        top.addWidget(self.label_phase, 1)
+        top.addWidget(self.label_status, 3)
+        layout.addLayout(top)
+
+        # ---- Bottom row: live numeric readout. ALWAYS visible (including
+        # during IDLE / BASELINE) so the operator can confirm signals are
+        # flowing before clicking Start Baseline. Updated every tick with
+        # the latest EDA / HR / HRV / ECG values from the LSL stream. ----
+        live_row = QHBoxLayout()
+        live_row.setSpacing(16)
+        self.label_live_readout_title = QLabel("Live signals")
+        self.label_live_readout_title.setFont(QFont("Arial", 10, QFont.Bold))
+        self.label_live_readout_title.setStyleSheet("color: #6fb3d4;")
+
+        self.label_live_eda = QLabel("EDA: -- uS")
+        self.label_live_hr  = QLabel("HR: -- BPM")
+        self.label_live_hrv = QLabel("HRV: -- ms")
+        self.label_live_ecg = QLabel("ECG: -- mV")
+        self.label_live_phasic = QLabel("phEDA: -- uS")
+        for lab in (self.label_live_eda, self.label_live_hr,
+                    self.label_live_hrv, self.label_live_ecg,
+                    self.label_live_phasic):
+            lab.setFont(QFont("Consolas", 11, QFont.Bold))
+            lab.setStyleSheet("color: #e0e0e0;")
+        live_row.addWidget(self.label_live_readout_title)
+        live_row.addWidget(self.label_live_eda)
+        live_row.addWidget(self.label_live_hr)
+        live_row.addWidget(self.label_live_hrv)
+        live_row.addWidget(self.label_live_phasic)
+        live_row.addWidget(self.label_live_ecg)
+        live_row.addStretch()
+        layout.addLayout(live_row)
+
         return layout
 
     def _build_baseline_panel(self):
         """Left panel: baseline buttons, captured values, signal charts."""
         group = QGroupBox("Baseline Calibration")
-        group.setStyleSheet("QGroupBox { color: #0099ff; font-weight: bold; "
-                            "border: 1px solid #333; border-radius: 4px; "
-                            "margin-top: 8px; padding-top: 14px; }"
-                            "QGroupBox::title { left: 10px; padding: 0 4px; }")
+        # Inherit the global stylesheet (calmer chrome); only override the
+        # title accent so the two panels read as different sections at a
+        # glance.
+        group.setStyleSheet("QGroupBox::title { color: #6fb3d4; }")
         v = QVBoxLayout(group)
         v.setSpacing(8)
 
@@ -227,26 +263,25 @@ class ClinicalDashboard:
 
         card_row = QHBoxLayout()
         card_row.setSpacing(10)
-        # Outlined-card style per the sketch: transparent fill, coloured
-        # border + matching text. Reads cleanly against the dark panel
-        # background without the heavy filled-block look.
+        # Calmer outlined-card style: transparent fill, soft accent border
+        # and text in a single cool palette. No competing primaries.
         _BASELINE_CARD_QSS = (
             "QLabel {{"
             " background-color: transparent;"
-            " border: 2px solid {edge};"
-            " border-radius: 8px;"
+            " border: 1px solid {edge};"
+            " border-radius: 6px;"
             " padding: 12px 6px;"
             " color: {edge};"
-            " font-weight: bold;"
+            " font-weight: 600;"
             "}}"
         )
         self.label_baseline_eda = QLabel("EDA\n-- uS")
         self.label_baseline_hr  = QLabel("HR\n-- BPM")
         self.label_baseline_hrv = QLabel("HRV\n-- ms")
         for lab, edge in (
-            (self.label_baseline_eda, "#00ff66"),
-            (self.label_baseline_hr,  "#ff9933"),
-            (self.label_baseline_hrv, "#33aaff"),
+            (self.label_baseline_eda, "#6fd1a8"),
+            (self.label_baseline_hr,  "#d9a86c"),
+            (self.label_baseline_hrv, "#6fb3d4"),
         ):
             lab.setFont(QFont("Arial", 16, QFont.Bold))
             lab.setAlignment(Qt.AlignCenter)
@@ -273,13 +308,16 @@ class ClinicalDashboard:
         # (see _autoscale_signal_chart in update_dashboard) so a
         # small EDA rise or fall stays visible.
         from PyQt5.QtWidgets import QGridLayout
-        self.plot_eda = self._create_signal_plot("EDA (uS)", "#00ff66",
+        # Calmer monochromatic-with-accent palette: each signal gets a soft
+        # accent colour, all sharing the same lightness so no single chart
+        # dominates the operator's eye. Titles are explicit about the unit.
+        self.plot_eda = self._create_signal_plot("Raw EDA  (uS)", "#6fd1a8",
                                                   y_range=Config.EDA_PLOT_DEFAULT_RANGE)
-        self.plot_hr = self._create_signal_plot("HR (BPM)", "#ff9933",
+        self.plot_hr = self._create_signal_plot("HR  (BPM)", "#d9a86c",
                                                   y_range=Config.HR_PLOT_DEFAULT_RANGE)
-        self.plot_hrv = self._create_signal_plot("HRV (ms)", "#33aaff",
+        self.plot_hrv = self._create_signal_plot("HRV / RMSSD  (ms)", "#6fb3d4",
                                                   y_range=Config.HRV_PLOT_DEFAULT_RANGE)
-        self.plot_ecg = self._create_signal_plot("ECG (mV)", "#ff66ff",
+        self.plot_ecg = self._create_signal_plot("ECG  (mV)", "#c992c9",
                                                   y_range=(-1.5, 1.5))
         signal_grid = QGridLayout()
         signal_grid.setSpacing(6)
@@ -294,10 +332,7 @@ class ClinicalDashboard:
     def _build_live_panel(self):
         """Right panel: live buttons, numeric strip, stress + deltas charts."""
         group = QGroupBox("Live Session")
-        group.setStyleSheet("QGroupBox { color: #ff9933; font-weight: bold; "
-                            "border: 1px solid #333; border-radius: 4px; "
-                            "margin-top: 8px; padding-top: 14px; }"
-                            "QGroupBox::title { left: 10px; padding: 0 4px; }")
+        group.setStyleSheet("QGroupBox::title { color: #d4b86a; }")
         v = QVBoxLayout(group)
         v.setSpacing(8)
 
@@ -339,24 +374,25 @@ class ClinicalDashboard:
         _CARD_QSS = (
             "QLabel {{"
             " background-color: transparent;"
-            " border: 2px solid {edge};"
-            " border-radius: 8px;"
+            " border: 1px solid {edge};"
+            " border-radius: 6px;"
             " padding: {pad};"
             " color: {edge};"
-            " font-weight: bold;"
+            " font-weight: 600;"
             "}}"
         )
 
-        # ---- Row 1: time-in-state cards ----
+        # ---- Row 1: time-in-state cards. Stop-light palette but
+        # desaturated so the room stays calm to look at. ----
         time_row = QHBoxLayout()
         time_row.setSpacing(10)
         self.label_time_calm   = QLabel("CALM\n00:00")
         self.label_time_stress = QLabel("STRESSED\n00:00")
         self.label_time_ultra  = QLabel("ULTRA\n00:00")
         for lab, edge in (
-            (self.label_time_calm,   "#00ff66"),
-            (self.label_time_stress, "#ffff00"),
-            (self.label_time_ultra,  "#ff6666"),
+            (self.label_time_calm,   "#7bc89a"),
+            (self.label_time_stress, "#d4b86a"),
+            (self.label_time_ultra,  "#d68a8a"),
         ):
             lab.setFont(QFont("Arial", 13, QFont.Bold))
             lab.setAlignment(Qt.AlignCenter)
@@ -371,9 +407,9 @@ class ClinicalDashboard:
         self.label_score_card  = QLabel("Score\n--")
         self.label_height_card = QLabel("Height\n-- m")
         for lab, edge in (
-            (self.label_s_t_card,    "#ffffff"),
-            (self.label_score_card,  "#ffffff"),
-            (self.label_height_card, "#ffaa00"),
+            (self.label_s_t_card,    "#a0c4d9"),
+            (self.label_score_card,  "#a0c4d9"),
+            (self.label_height_card, "#d4b86a"),
         ):
             lab.setFont(QFont("Arial", 12, QFont.Bold))
             lab.setAlignment(Qt.AlignCenter)
@@ -433,7 +469,7 @@ class ClinicalDashboard:
         """Bottom-of-screen data-quality counters."""
         layout = QHBoxLayout()
         group = QGroupBox("Data Quality")
-        group.setStyleSheet("QGroupBox { color: #ff6600; font-weight: bold; }")
+        group.setStyleSheet("QGroupBox::title { color: #a0c4d9; }")
         gv = QHBoxLayout(group)
         self.label_samples = QLabel("Samples: 0")
         self.label_qa_invalid = QLabel("Invalid: 0")
@@ -457,55 +493,59 @@ class ClinicalDashboard:
             title="Real-Time Stress Index (S_t)",
             labels={'left': 'Stress Level', 'bottom': 'Time (samples)'}
         )
-        plot_widget.showGrid(x=True, y=True)
+        plot_widget.showGrid(x=True, y=True, alpha=0.25)
         plot_widget.setMouseEnabled(x=True, y=False)
         plot_widget.enableAutoRange(axis=pg.ViewBox.XAxis, enable=False)
         plot_widget.enableAutoRange(axis=pg.ViewBox.YAxis, enable=True)
         plot_widget.setMenuEnabled(False)
         plot_widget.hideButtons()
-        plot_widget.setStyleSheet("border: 1px solid #333;")
+        plot_widget.setStyleSheet("border: 1px solid #2c2c2c;")
         self.mild_line = pg.InfiniteLine(
             angle=0,
-            pen=pg.mkPen('#ffff00', style=pg.QtCore.Qt.DashLine, width=2),
+            pen=pg.mkPen('#d4b86a', style=pg.QtCore.Qt.DashLine, width=2),
             label='MILD = {value:0.2f}',
-            labelOpts={'color': '#ffff00', 'position': 0.92,
+            labelOpts={'color': '#d4b86a', 'position': 0.92,
                        'movable': False, 'fill': (0, 0, 0, 160)})
         self.high_line = pg.InfiniteLine(
             angle=0,
-            pen=pg.mkPen('#ff0000', style=pg.QtCore.Qt.DashLine, width=2),
+            pen=pg.mkPen('#d68a8a', style=pg.QtCore.Qt.DashLine, width=2),
             label='HIGH = {value:0.2f}',
-            labelOpts={'color': '#ff0000', 'position': 0.92,
+            labelOpts={'color': '#d68a8a', 'position': 0.92,
                        'movable': False, 'fill': (0, 0, 0, 160)})
         plot_widget.addItem(self.mild_line)
         plot_widget.addItem(self.high_line)
-        self.curve_stress = plot_widget.plot([], [], pen=pg.mkPen('#ffffff', width=2))
+        self.curve_stress = plot_widget.plot([], [], pen=pg.mkPen('#e6e6e6', width=2))
         self.stress_plot = plot_widget
         return plot_widget
 
     def _create_deltas_plot(self):
+        """Component-deltas chart. Each curve has its own unit but they
+        share an axis -- what matters here is direction over time, not
+        absolute comparison. phasic EDA is the score-driving signal (PDF
+        Cause 1) so it's drawn thicker and gets its own colour band."""
         plot_widget = pg.PlotWidget(
-            title="Component Deltas (% from baseline)",
-            labels={'left': 'Delta (%)', 'bottom': 'Time (samples)'}
+            title="Component Deltas  (phasic EDA in uS, HR/HRV in %)",
+            labels={'left': 'Deviation', 'bottom': 'Time (samples)'}
         )
-        plot_widget.showGrid(x=True, y=True)
+        plot_widget.showGrid(x=True, y=True, alpha=0.25)
         plot_widget.setMouseEnabled(x=True, y=False)
         plot_widget.enableAutoRange(axis=pg.ViewBox.XAxis, enable=False)
         plot_widget.enableAutoRange(axis=pg.ViewBox.YAxis, enable=False)
-        plot_widget.setYRange(-50, 150, padding=0)
+        plot_widget.setYRange(-30, 80, padding=0)
         plot_widget.setMenuEnabled(False)
         plot_widget.hideButtons()
-        plot_widget.setStyleSheet("border: 1px solid #333;")
+        plot_widget.setStyleSheet("border: 1px solid #2c2c2c;")
         zero = pg.InfiniteLine(angle=0, pos=0,
-                                pen=pg.mkPen('#666666',
+                                pen=pg.mkPen('#555555',
                                              style=pg.QtCore.Qt.DashLine, width=1))
         plot_widget.addItem(zero)
-        # phEDA: phasic EDA in microsiemens (PDF Cause 1). dHR / dHRV:
-        # percent deviation from baseline. Different units on the same chart
-        # is intentional — what matters here is each signal's deviation
-        # direction over time, not absolute scale comparison.
-        self.curve_delta_eda = plot_widget.plot([], [], pen=pg.mkPen('#00ff66', width=1.5), name='phEDA µS')
-        self.curve_delta_hr  = plot_widget.plot([], [], pen=pg.mkPen('#ff9933', width=1.5), name='dHR %')
-        self.curve_delta_hrv = plot_widget.plot([], [], pen=pg.mkPen('#33aaff', width=1.5), name='dHRV %')
+        # Calmer palette: cooler hues, phEDA emphasised as the primary curve.
+        self.curve_delta_eda = plot_widget.plot(
+            [], [], pen=pg.mkPen('#6fd1a8', width=2.0), name='phEDA (uS)')
+        self.curve_delta_hr  = plot_widget.plot(
+            [], [], pen=pg.mkPen('#d9a86c', width=1.2), name='dHR (%)')
+        self.curve_delta_hrv = plot_widget.plot(
+            [], [], pen=pg.mkPen('#6fb3d4', width=1.2), name='dHRV (%)')
         plot_widget.addLegend(offset=(10, 10))
         return plot_widget
 
@@ -517,16 +557,16 @@ class ClinicalDashboard:
             title="Balloon Height (m, from Unity)",
             labels={'left': 'Height (m)', 'bottom': 'Time (samples)'}
         )
-        plot_widget.showGrid(x=True, y=True)
+        plot_widget.showGrid(x=True, y=True, alpha=0.25)
         plot_widget.setMouseEnabled(x=True, y=False)
         plot_widget.enableAutoRange(axis=pg.ViewBox.XAxis, enable=False)
         plot_widget.enableAutoRange(axis=pg.ViewBox.YAxis, enable=False)
         plot_widget.setYRange(*Config.HEIGHT_PLOT_DEFAULT_RANGE, padding=0)
         plot_widget.setMenuEnabled(False)
         plot_widget.hideButtons()
-        plot_widget.setStyleSheet("border: 1px solid #333;")
+        plot_widget.setStyleSheet("border: 1px solid #2c2c2c;")
         self.curve_height = plot_widget.plot(
-            [], [], pen=pg.mkPen('#ffaa00', width=2)
+            [], [], pen=pg.mkPen('#d4b86a', width=2)
         )
         return plot_widget
 
@@ -535,7 +575,9 @@ class ClinicalDashboard:
             title=title,
             labels={'left': title, 'bottom': 'Time (samples)'}
         )
-        plot_widget.showGrid(x=True, y=True)
+        # Soft gridlines (alpha 0.25) so the curve reads clearly without
+        # the grid competing for attention. Border tone matches global chrome.
+        plot_widget.showGrid(x=True, y=True, alpha=0.25)
         plot_widget.setMouseEnabled(x=True, y=False)
         plot_widget.enableAutoRange(axis=pg.ViewBox.XAxis, enable=False)
         plot_widget.enableAutoRange(axis=pg.ViewBox.YAxis, enable=False)
@@ -543,8 +585,8 @@ class ClinicalDashboard:
         plot_widget.hideButtons()
         if y_range is not None:
             plot_widget.setYRange(*y_range, padding=0)
-        plot_widget.setStyleSheet("border: 1px solid #333;")
-        curve = plot_widget.plot([], [], pen=pg.mkPen(color, width=1.5))
+        plot_widget.setStyleSheet("border: 1px solid #2c2c2c;")
+        curve = plot_widget.plot([], [], pen=pg.mkPen(color, width=1.8))
         plot_widget.curve = curve
         plot_widget.title_text = title
         plot_widget.locked_y_range = y_range
@@ -555,19 +597,36 @@ class ClinicalDashboard:
     # ------------------------------------------------------------------
 
     def _stylesheet(self):
+        """Restyled per operator request (2026-06): fewer accent colours,
+        gentler grids, calmer chrome. Single cool-blue accent replaces
+        the previous primary-colour mix; signal-state still uses
+        green / amber / red but desaturated so the room stays readable.
+        Typography normalised to one weight family."""
         return """
-        QWidget { background-color: #1a1a1a; color: #ffffff; }
-        QGroupBox { font-weight: bold; }
+        QWidget { background-color: #181a1d; color: #e6e6e6;
+                  font-family: 'Segoe UI', 'Arial', sans-serif; }
+        QGroupBox { font-weight: 600;
+                    border: 1px solid #2c2c2c;
+                    border-radius: 6px;
+                    margin-top: 10px;
+                    padding-top: 14px;
+                    background-color: #1d2024; }
+        QGroupBox::title { left: 12px;
+                           padding: 0 6px;
+                           color: #a0c4d9; }
+        QLabel { color: #e6e6e6; }
         QPushButton {
-            background-color: #2a2a2a; color: #ffffff;
-            border: 1px solid #555; border-radius: 4px;
-            padding: 6px 12px; font-weight: bold;
+            background-color: #262a2f; color: #e6e6e6;
+            border: 1px solid #3a3f44; border-radius: 5px;
+            padding: 7px 14px; font-weight: 600;
         }
-        QPushButton:hover:enabled  { background-color: #3a3a3a; }
-        QPushButton:pressed:enabled { background-color: #0099ff; }
+        QPushButton:hover:enabled   { background-color: #2f343a;
+                                      border-color: #6fb3d4; }
+        QPushButton:pressed:enabled { background-color: #6fb3d4;
+                                      color: #181a1d; }
         QPushButton:disabled {
-            background-color: #1a1a1a; color: #555555;
-            border: 1px solid #333;
+            background-color: #1d2024; color: #555a5f;
+            border: 1px solid #2c2c2c;
         }
         """
 
@@ -662,12 +721,35 @@ class ClinicalDashboard:
             self._last_state_observed = session_state
 
         # ---- State chip + S_t / deltas readout ----
+        # Desaturated stop-light palette matches the rest of the restyled UI.
         if state_enum == 0.0:
-            state_label, state_color, bg = "CALM", "#00ff00", self.color_calm
+            state_label, state_color, bg = "CALM", "#7bc89a", self.color_calm
         elif state_enum == 1.0:
-            state_label, state_color, bg = "STRESSED", "#ffff00", self.color_stressed
+            state_label, state_color, bg = "STRESSED", "#d4b86a", self.color_stressed
         else:
-            state_label, state_color, bg = "ULTRA STRESSED", "#ff0000", self.color_ultra
+            state_label, state_color, bg = "ULTRA STRESSED", "#d68a8a", self.color_ultra
+
+        # ---- Live numeric readout (top bar). Visible in EVERY phase so the
+        # operator can confirm signals are flowing before clicking Start
+        # Baseline. Empty / NaN values show as "--" so the operator sees
+        # exactly when each signal comes online (HR/HRV warm up over ~60 s). ----
+        import math as _math
+        def _fmt_v(v, unit, prec=2):
+            try:
+                return f"{v:.{prec}f} {unit}" if _math.isfinite(v) else f"-- {unit}"
+            except Exception:
+                return f"-- {unit}"
+        self.label_live_eda.setText(f"EDA: {_fmt_v(eda, 'uS', 2)}")
+        self.label_live_hr.setText (f"HR: {_fmt_v(hr,  'BPM', 1)}")
+        self.label_live_hrv.setText(f"HRV: {_fmt_v(hrv, 'ms', 1)}")
+        self.label_live_phasic.setText(f"phEDA: {_fmt_v(delta_eda, 'uS', 3)}")
+        # ECG numeric: instantaneous mV from the side stream. Use the last
+        # value in the side-stream buffer if present (the chart is the
+        # canonical view; this is a quick "is contact good?" check).
+        if self.ecg_data['y']:
+            self.label_live_ecg.setText(f"ECG: {self.ecg_data['y'][-1]:+.3f} mV")
+        else:
+            self.label_live_ecg.setText("ECG: -- mV")
 
         self.label_state.setText(state_label)
         # Outlined-card restyle: transparent fill, border + text in the

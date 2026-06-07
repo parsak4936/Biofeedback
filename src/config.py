@@ -72,7 +72,13 @@ class Config:
     # ============================================
     # FREQUENCIES (Hz)
     # ============================================
-    PIPELINE_RATE = 50.0  # Core loop speed for processing
+    # Per prof's email (2026-06): 200 Hz raw sensor (PLUX default),
+    # 10 Hz for HR/HRV/EDA extraction (PIPELINE_RATE), 1 Hz for Unity
+    # VR updates (UNITY_COMMAND_INTERVAL_SEC = 1.0 below). Dashboard UI
+    # refresh stays at 50 Hz internally (QTimer in dashboard.py) for a
+    # smooth-looking chart, but most timer fires will see zero new LSL
+    # samples at the lower pipeline rate -- that's intentional and harmless.
+    PIPELINE_RATE = 10.0  # Core loop speed for processing (prof: 10 Hz)
     HR_RATE = 1.0         # Heart rate updates roughly once per second
     HRV_RATE = 0.1        # RMSSD updates roughly every 10 seconds
     
@@ -110,8 +116,14 @@ class Config:
     # diagnostic.csv: the forensic raw + smoothed + status trace.
     #                 Same default; crank up if debugging a transient
     #                 detector glitch that you need finer than 1 s on.
-    SAMPLES_CSV_RATE_HZ = 50
-    DIAGNOSTIC_CSV_RATE_HZ = 50
+    # At 10 Hz pipeline (prof's spec) these caps clamp writes to the
+    # pipeline rate. Keep them >= PIPELINE_RATE so every tick writes
+    # one CSV row; with the new 10 Hz pipeline this gives 10 rows/sec
+    # on disk (down from the previous 50 rows/sec at 50 Hz pipeline).
+    # If you want the clinical samples.csv even sparser, drop
+    # SAMPLES_CSV_RATE_HZ to 1 -- physiology really does not need 10 Hz.
+    SAMPLES_CSV_RATE_HZ = 10
+    DIAGNOSTIC_CSV_RATE_HZ = 10
 
     # ============================================
     # PIPELINE MATH & BASELINE PARAMETERS
@@ -315,7 +327,8 @@ class Config:
     #   1.0  ->  1 Hz (one per second)
     #   2.0  ->  0.5 Hz (one per two seconds)  <-- current default
     #   5.0  ->  0.2 Hz (one per five seconds)
-    UNITY_COMMAND_INTERVAL_SEC = 2.0
+    # Per prof's email (2026-06): VR scenario updates at 1 Hz.
+    UNITY_COMMAND_INTERVAL_SEC = 1.0
     # Wait-for-calm gate: after "start" is sent, the bridge holds all
     # state-driven commands until the patient hits the calm state. This
     # window is the period we wait *before* checking for calm, so the
