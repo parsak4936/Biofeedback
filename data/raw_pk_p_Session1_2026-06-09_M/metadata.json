@@ -1,35 +1,35 @@
 {
   "patient": {
-    "first_name": "shayan",
-    "last_name": "forthFile",
-    "patient_id": "123",
-    "gender": "F",
-    "session_date": "2026-06-03",
+    "first_name": "pk",
+    "last_name": "p",
+    "patient_id": "pk",
+    "gender": "M",
+    "session_date": "2026-06-09",
     "session_number": 1
   },
-  "session_folder": "shayan_forthFile_Session1_2026-06-03_F",
-  "session_timestamp": "20260603_164444",
+  "session_folder": "pk_p_Session1_2026-06-09_M",
+  "session_timestamp": "20260609_140623",
   "baseline": {
-    "captured_at": "2026-06-03 16:47:01",
+    "captured_at": "2026-06-09 14:08:47",
     "baseline_duration_sec": 120,
-    "sample_rate_pipeline_hz": 50.0,
+    "sample_rate_pipeline_hz": 10.0,
     "personal_baselines": {
-      "eda_uS": 22.101149274763678,
-      "hr_bpm": 93.15428782384105,
-      "hrv_ms": 23.653975530461512
+      "eda_uS": 4.57996876594517,
+      "hr_bpm": 71.81812479091764,
+      "hrv_ms": 43.91605958178
     },
-    "sigma_baseline": 0.6136356869330082,
+    "sigma_baseline": 0.3077488872132761,
     "thresholds": {
-      "mild": 0.7835692356640386,
-      "high": 1.4278867069436971
+      "mild": 0.405629302885133,
+      "high": 0.7287656344590728
     },
     "hrv_metrics": {},
     "artifacts_removed": {
       "eda": 0,
       "hr": 0,
-      "hrv": 0
+      "hrv": 18
     },
-    "source": "mock:data/4_2026-05-13_15-30-08.txt",
+    "source": "mock:data/real1/opensignals_0007800F319C_2026-06-04_16-02-23.txt",
     "pipeline_constants": {
       "artifact_sigma_multiplier": 3.0,
       "weight_eda": 0.5,

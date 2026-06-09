@@ -214,6 +214,20 @@ class SignalProcessor:
         Returns silently on Exception (the last good value is held — better
         than synthesising a zero on a transient failure).
         """
+        # Backend dispatch -- prof's email asked we expose a
+        # biosignalsnotebooks-style chain as a switchable alternative.
+        if getattr(Config, 'EDA_BACKEND', 'neurokit').lower() == 'bsnb':
+            try:
+                from bsnb_backend import phasic_eda_bsnb
+                val = phasic_eda_bsnb(self._raw_eda_window,
+                                       Config.PIPELINE_RATE)
+            except Exception:
+                return
+            if not math.isfinite(val) or abs(val) > Config.EDA_PHASIC_MAX_US:
+                return
+            self.current_phasic_eda = val
+            return
+
         if not _NEUROKIT_AVAILABLE:
             return
         try:

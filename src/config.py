@@ -40,6 +40,47 @@ class Config:
     # raises on the input.
     # Switching is a one-line change here; nothing downstream needs editing.
     DATA_SOURCE = 'mock'
+
+    # ============================================
+    # HR / HRV / EDA EXTRACTION BACKEND (prof email 2026-06)
+    # ============================================
+    # Prof. La Rosa asked that HR / HRV / EDA be extracted from raw
+    # biosignals using procedures illustrated in
+    # https://github.com/pluxbiosignals/biosignalsnotebooks.
+    # We support both backends side-by-side so we can compare and
+    # switch back if needed:
+    #
+    #   'neurokit' -> existing NeuroKit2 chain (nk.ecg_clean ->
+    #                 nk.ecg_peaks -> nk.ecg_rate / nk.hrv_time["RMSSD"],
+    #                 nk.eda_phasic for phasic EDA).
+    #   'bsnb'     -> biosignalsnotebooks chain (Pan-Tompkins R-peaks
+    #                 via detect.detect_r_peaks, RMSSD via Malik-gated
+    #                 diff(RR), phasic EDA via lowpass-subtraction).
+    #
+    # Switching this flag does NOT touch fusion math, weights, thresholds,
+    # or the data source's channel mapping. It changes only HOW the three
+    # input numbers (EDA uS, HR BPM, RMSSD ms) are derived from raw signals.
+    HR_HRV_BACKEND = 'bsnb'
+    EDA_BACKEND = 'bsnb'
+
+    # Sub-mode for the bsnb EDA backend (only consulted when
+    # EDA_BACKEND == 'bsnb'). Three options:
+    #
+    #   'raw'              (DEFAULT, prof's preferred approach)
+    #       The bsnb EDA path returns the live raw EDA sample without any
+    #       phasic decomposition. Mirrors what DataAnalyze.py does -- it
+    #       uses the rawEDA column from the saved CSV directly and
+    #       baselines it against the resting mean. Simplest, no extra DSP.
+    #
+    #   'lowpass_subtract'  (biosignalsnotebooks EDA tutorial approach)
+    #       phasic = raw - lowpass(raw, 0.05 Hz, Butterworth order 2).
+    #       Same recipe the package's EDA notebook demonstrates for SCR
+    #       detection. Captures event-driven sympathetic responses while
+    #       removing the slow tonic drift (electrode hydration etc).
+    #
+    # Not consulted when EDA_BACKEND == 'neurokit' (NeuroKit2 uses
+    # cvxEDA convex-optimisation decomposition unconditionally).
+    EDA_BSNB_METHOD = 'lowpass_subtract'
     
     # ============================================
     # LSL NETWORK SETTINGS
@@ -407,7 +448,7 @@ class Config:
     # ============================================
     # MockDataSource auto-detects sampling rate AND channel order (ECG vs EDA)
     # from the OpenSignals header JSON — switch files freely, no other edits.
-    MOCK_DATA_FILE = "data/14_minute_test_of_myself_2026-05-26_16-47-36.txt"  # 1000Hz, 6.1min, ECG=col2/EDA=col3
+    MOCK_DATA_FILE = 'data/real1/opensignals_0007800F319C_2026-06-04_16-02-23.txt'
   # MOCK_DATA_FILE = "data/opensignals_2026-05-25_14-57-56.txt"            # 200Hz, 8.7min, ECG=col2/EDA=col3
     # MOCK_DATA_FILE = "data/fake_opensignals_2026-05-13_15-24-44.txt"       # 1000Hz, 42s, EDA=col2/ECG=col3
     # When False (default), MockDataSource stops publishing once the file is

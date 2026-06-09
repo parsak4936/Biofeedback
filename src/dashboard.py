@@ -352,116 +352,115 @@ class ClinicalDashboard:
             lambda: self.control.send(Command.LIVE_STOP))
         v.addLayout(btn_row)
 
-        # Per-panel live duration. Free-running once Start Live is clicked,
-        # freezes on Stop, resets on Restart.
+        # Per-panel live duration. Compact inline label.
         self.label_live_duration = QLabel("Live duration: 00:00")
-        self.label_live_duration.setFont(QFont("Arial", 11, QFont.Bold))
-        self.label_live_duration.setStyleSheet("color: #00ff00;")
+        self.label_live_duration.setFont(QFont("Arial", 10, QFont.Bold))
+        self.label_live_duration.setStyleSheet("color: #7bc89a;")
+        self.label_live_duration.setMaximumHeight(20)
         v.addWidget(self.label_live_duration)
 
-        # Numeric strip. All readouts are outlined-card style now
-        # (transparent fill, coloured border + text), per the sketch.
-        # Layout, top to bottom:
-        #   row 1: three TIME-IN-STATE cards (CALM / STRESSED / ULTRA)
-        #   row 2: three SMALL info cards    (S_t  / Score   / Height)
-        #   row 3: big CURRENT STATE card (sits right above the charts)
-        #   row 4: small summary lines (thresholds / gate / Unity cmd)
-        strip = QGroupBox("Current state")
-        strip.setStyleSheet("QGroupBox { color: #888888; border: none; }")
-        sv = QVBoxLayout(strip)
-        sv.setSpacing(8)
-
+        # ====================================================================
+        # COMPACT INFO STRIP (one row, six cards). Operator request 2026-06:
+        # readouts are for monitoring only -- charts are what matter. So
+        # everything that used to be a giant stacked card now lives in one
+        # compact horizontal strip above the charts:
+        #   CALM 00:00 | STRESSED 00:00 | ULTRA 00:00 | S_t -- | Score -- | Height -- m
+        # The big standalone CALM/STRESSED/ULTRA state pill is gone --
+        # current state is now shown as a TextItem overlay ON the stress
+        # chart (top-left corner), so the operator reads it where they're
+        # already looking. See update_dashboard / _state_overlay below.
+        # ====================================================================
         _CARD_QSS = (
             "QLabel {{"
             " background-color: transparent;"
             " border: 1px solid {edge};"
-            " border-radius: 6px;"
-            " padding: {pad};"
+            " border-radius: 4px;"
+            " padding: 4px 6px;"
             " color: {edge};"
             " font-weight: 600;"
             "}}"
         )
 
-        # ---- Row 1: time-in-state cards. Stop-light palette but
-        # desaturated so the room stays calm to look at. ----
-        time_row = QHBoxLayout()
-        time_row.setSpacing(10)
-        self.label_time_calm   = QLabel("CALM\n00:00")
-        self.label_time_stress = QLabel("STRESSED\n00:00")
-        self.label_time_ultra  = QLabel("ULTRA\n00:00")
+        info_row = QHBoxLayout()
+        info_row.setSpacing(6)
+        self.label_time_calm   = QLabel("CALM 00:00")
+        self.label_time_stress = QLabel("STRESSED 00:00")
+        self.label_time_ultra  = QLabel("ULTRA 00:00")
+        self.label_s_t_card    = QLabel("S_t --")
+        self.label_score_card  = QLabel("Score --")
+        self.label_height_card = QLabel("Height -- m")
         for lab, edge in (
             (self.label_time_calm,   "#7bc89a"),
             (self.label_time_stress, "#d4b86a"),
             (self.label_time_ultra,  "#d68a8a"),
-        ):
-            lab.setFont(QFont("Arial", 13, QFont.Bold))
-            lab.setAlignment(Qt.AlignCenter)
-            lab.setStyleSheet(_CARD_QSS.format(edge=edge, pad="10px 6px"))
-            time_row.addWidget(lab, 1)
-        sv.addLayout(time_row)
-
-        # ---- Row 2: small info cards (S_t, Score, Height) ----
-        info_row = QHBoxLayout()
-        info_row.setSpacing(10)
-        self.label_s_t_card    = QLabel("S_t\n--")
-        self.label_score_card  = QLabel("Score\n--")
-        self.label_height_card = QLabel("Height\n-- m")
-        for lab, edge in (
             (self.label_s_t_card,    "#a0c4d9"),
             (self.label_score_card,  "#a0c4d9"),
             (self.label_height_card, "#d4b86a"),
         ):
-            lab.setFont(QFont("Arial", 12, QFont.Bold))
+            lab.setFont(QFont("Arial", 9, QFont.Bold))
             lab.setAlignment(Qt.AlignCenter)
-            lab.setStyleSheet(_CARD_QSS.format(edge=edge, pad="8px 6px"))
+            lab.setStyleSheet(_CARD_QSS.format(edge=edge))
+            lab.setMaximumHeight(26)
             info_row.addWidget(lab, 1)
-        sv.addLayout(info_row)
+        v.addLayout(info_row)
 
-        # ---- Row 3: BIG current-state card, sits right above the charts ----
-        # Border + text recolour each tick to match the live state
-        # (green = calm, yellow = stressed, red = ultra). Set the initial
-        # green styling here; update_dashboard rewrites it on transitions.
-        self.label_state = QLabel("CALM")
-        self.label_state.setFont(QFont("Arial", 28, QFont.Bold))
-        self.label_state.setAlignment(Qt.AlignCenter)
-        self.label_state.setStyleSheet(_CARD_QSS.format(edge="#00ff00", pad="16px"))
-        sv.addWidget(self.label_state)
+        # Tiny inline diagnostic line: deltas + Unity command, single-line.
+        # Was four separate labels; merged because they're operator
+        # reference only -- they shouldn't compete with the charts.
+        self.label_s_t = QLabel("phEDA: --   dHR: --   dHRV: --   |   "
+                                 "Thresholds: MILD --  HIGH --   |   "
+                                 "Unity: (idle)")
+        self.label_s_t.setFont(QFont("Arial", 9))
+        self.label_s_t.setStyleSheet("color: #888888;")
+        self.label_s_t.setMaximumHeight(18)
+        v.addWidget(self.label_s_t)
 
-        # ---- Row 4: smaller summary lines (kept text, no card) ----
-        # These supplement the cards above with the long-form numeric
-        # detail that does not need to be readable from across the room.
-        self.label_s_t = QLabel("dEDA: -- %   dHR: -- %   dHRV: -- %")
-        self.label_thresholds = QLabel("Thresholds: MILD = --, HIGH = --")
-        self.label_gate = QLabel("")
-        self.label_unity = QLabel("Unity: (no commands sent yet)")
-        # `label_deltas` kept as an alias for backwards compat with
-        # update_dashboard which still drives the deltas string.
+        # Backwards-compat aliases. update_dashboard still writes to these
+        # variable names; we forward them to the merged label or to no-ops.
         self.label_deltas = self.label_s_t
-        # `label_height` kept as alias so the existing live-height
-        # update code keeps working; it just writes to the height card now.
         self.label_height = self.label_height_card
-        for lab in (self.label_s_t, self.label_thresholds,
-                    self.label_gate, self.label_unity):
-            lab.setFont(QFont("Arial", 10))
-            lab.setStyleSheet("color: #cccccc;")
-            sv.addWidget(lab)
-        v.addWidget(strip)
+        self.label_thresholds = self.label_s_t   # rolled into deltas line
+        self.label_gate = self.label_s_t          # rolled into deltas line
+        self.label_unity = self.label_s_t          # rolled into deltas line
 
-        # ---- Chart grid: row 1 = stress | height (50/50), row 2 = deltas full-width ----
-        # Per the operator's sketch: realtime index and balloon height
-        # side-by-side at the top, component deltas across the bottom.
+        # The big standalone state pill is gone. We keep `self.label_state`
+        # as a hidden label so the rest of update_dashboard doesn't crash
+        # when it sets its text. The visible state indicator is the
+        # TextItem on the stress chart, refreshed in update_dashboard.
+        self.label_state = QLabel("")
+        self.label_state.setVisible(False)
+
+        # ====================================================================
+        # CHARTS -- one row, two columns. Side by side. Both maximised.
+        # ====================================================================
         from PyQt5.QtWidgets import QGridLayout
         self.plot_stress = self._create_stress_plot()
         self.plot_height = self._create_height_plot()
+        # plot_deltas is built but not displayed. update_dashboard still
+        # references its curves; they buffer invisibly. Keeps the change
+        # contained to layout only.
         self.plot_deltas = self._create_deltas_plot()
+
+        # State-overlay TextItem on the stress chart -- shows the current
+        # state ("CALM" / "STRESSED" / "ULTRA STRESSED") in the chart's
+        # top-left corner. Updated in update_dashboard. Anchor 0,0 = top-left.
+        self._state_overlay = pg.TextItem(
+            text="CALM", color='#7bc89a', anchor=(0, 0),
+        )
+        font = QFont("Arial", 18, QFont.Bold)
+        self._state_overlay.setFont(font)
+        self.plot_stress.addItem(self._state_overlay)
+        # Position the overlay in chart coordinates. We re-position it
+        # each tick in update_dashboard because the X range slides.
+        self._state_overlay.setPos(0, 0)
+
         chart_grid = QGridLayout()
         chart_grid.setSpacing(6)
         chart_grid.addWidget(self.plot_stress, 0, 0)
         chart_grid.addWidget(self.plot_height, 0, 1)
-        chart_grid.addWidget(self.plot_deltas, 1, 0, 1, 2)  # span both columns
-        chart_grid.setRowStretch(0, 2)
-        chart_grid.setRowStretch(1, 1)
-        v.addLayout(chart_grid, 1)
+        chart_grid.setColumnStretch(0, 1)
+        chart_grid.setColumnStretch(1, 1)
+        v.addLayout(chart_grid, 1)   # all remaining space goes to the charts
 
         return group
 
@@ -496,7 +495,20 @@ class ClinicalDashboard:
         plot_widget.showGrid(x=True, y=True, alpha=0.25)
         plot_widget.setMouseEnabled(x=True, y=False)
         plot_widget.enableAutoRange(axis=pg.ViewBox.XAxis, enable=False)
-        plot_widget.enableAutoRange(axis=pg.ViewBox.YAxis, enable=True)
+        # Y-axis is THRESHOLD-LOCKED (not auto-ranged). Per operator request
+        # 2026-06: the chart must clearly show the MILD/HIGH band for the
+        # person, not auto-zoom out when a single outlier sample comes
+        # through (which was making the curve invisible at scale 1e+27).
+        # Default range below is a placeholder used only before the
+        # baseline locks; once thresholds arrive, _lock_stress_y_to_thresholds
+        # in update_dashboard sets the actual range as:
+        #     y_min = -0.5 * (HIGH - MILD)         (a bit below the MILD band)
+        #     y_max = HIGH + 0.5 * (HIGH - MILD)   (a bit above the ULTRA line)
+        # Stress values above y_max are clipped visually but still counted
+        # numerically by the state-classifier, so an off-scale ULTRA event
+        # still triggers the correct UI state.
+        plot_widget.enableAutoRange(axis=pg.ViewBox.YAxis, enable=False)
+        plot_widget.setYRange(-1.0, 3.0, padding=0)
         plot_widget.setMenuEnabled(False)
         plot_widget.hideButtons()
         plot_widget.setStyleSheet("border: 1px solid #2c2c2c;")
@@ -752,25 +764,30 @@ class ClinicalDashboard:
             self.label_live_ecg.setText("ECG: -- mV")
 
         self.label_state.setText(state_label)
-        # Outlined-card restyle: transparent fill, border + text in the
-        # current state's colour so it pops against the rest of the panel.
-        self.label_state.setStyleSheet(
-            "QLabel {"
-            f" background-color: transparent;"
-            f" border: 3px solid {state_color};"
-            f" border-radius: 10px;"
-            f" padding: 16px;"
-            f" color: {state_color};"
-            f" font-weight: bold;"
-            "}"
-        )
-        # Small info cards: update S_t and Score every tick. (Height
-        # card is updated below in the height-telemetry block.)
-        self.label_s_t_card.setText(f"S_t\n{s_t:+.2f}")
-        self.label_score_card.setText(f"Score\n{dashboard_score:.0f}/100")
-        self.label_s_t.setText(f"S_t: {s_t:6.2f}    Score: {dashboard_score:5.1f}/100")
-        self.label_deltas.setText(
-            f"phEDA: {delta_eda:+6.3f} µS   dHR: {delta_hr:+6.1f} %   dHRV: {delta_hrv:+6.1f} %"
+        # The big standalone state pill is gone. State is shown as a
+        # TextItem overlay on the stress chart -- update the overlay's
+        # text and colour each tick, and re-anchor it to the chart's
+        # current top-left so it sticks to the visible viewport as the
+        # X range slides.
+        try:
+            self._state_overlay.setText(state_label, color=state_color)
+            # Re-anchor: top-left of the *visible* X range, top of Y range.
+            vb = self.plot_stress.getViewBox()
+            (x_min_view, x_max_view), (y_min_view, y_max_view) = vb.viewRange()
+            self._state_overlay.setPos(x_min_view, y_max_view)
+        except Exception:
+            pass
+        # Compact info cards (inline, single-line). Height card is
+        # written below by the Unity telemetry block.
+        self.label_s_t_card.setText(f"S_t {s_t:+.2f}")
+        self.label_score_card.setText(f"Score {dashboard_score:.0f}/100")
+        # Merged diagnostic line -- deltas + thresholds + Unity all in one
+        # compact strip below the cards. Thresholds and Unity text are
+        # filled in further below; we rebuild the whole line each tick.
+        # Stored partial values are recombined further down.
+        self._diag_deltas = (
+            f"phEDA: {delta_eda:+.3f}uS   "
+            f"dHR: {delta_hr:+.1f}%   dHRV: {delta_hrv:+.1f}%"
         )
 
         # ---- Stress chart (only while baseline is locked) ----
@@ -845,50 +862,63 @@ class ClinicalDashboard:
                                        avg_hrv, Config.HRV_PLOT_HALFRANGE,
                                        y_floor=0.0)
 
+        # Threshold lines + baseline-panel labels still update normally;
+        # the live-panel string is now a single merged line further down.
         if thresh_mild > 0.0 and self.mild_line.value() != thresh_mild:
             self.mild_line.setValue(thresh_mild)
         if thresh_high > 0.0 and self.high_line.value() != thresh_high:
             self.high_line.setValue(thresh_high)
         if thresh_mild > 0.0 and thresh_high > 0.0:
             t = f"Thresholds: MILD = {thresh_mild:.2f}, HIGH = {thresh_high:.2f}"
-            self.label_thresholds.setText(t)
             self.label_baseline_sigma.setText(
                 f"sigma_baseline: {thresh_mild / Config.THRESH_MILD_K:.3f}"
             )
             self.label_baseline_thresh.setText(t)
+            thresh_str = f"MILD {thresh_mild:.2f} HIGH {thresh_high:.2f}"
 
-        # ---- UDP gate indicator ----
+            # ---- THRESHOLD-LOCKED Y-AXIS on the stress chart ----
+            # Anchor the Y range to the person's own MILD/HIGH so the
+            # CALM/STRESSED/ULTRA bands fill the visible area. The
+            # range is set once per pair of distinct thresholds (cheap
+            # check via the cached _stress_y_locked_at tuple), so we
+            # don't fight pyqtgraph every frame.
+            band = max(1e-3, thresh_high - thresh_mild)
+            y_min = -0.5 * band
+            y_max = thresh_high + 0.5 * band
+            cache = getattr(self, '_stress_y_locked_at', None)
+            if cache != (thresh_mild, thresh_high):
+                self.stress_plot.setYRange(y_min, y_max, padding=0)
+                self._stress_y_locked_at = (thresh_mild, thresh_high)
+        else:
+            thresh_str = "MILD -- HIGH --"
+
+        # UDP gate status as a compact tag.
         if session_state == SessionState.LIVE and not udp_gate_open:
-            self.label_gate.setText("UDP gate: WAITING for first calm reading")
-            self.label_gate.setStyleSheet("color: #ff9933; font-weight: bold;")
+            gate_str = "GATE:WAIT"
         elif session_state == SessionState.LIVE and udp_gate_open:
-            self.label_gate.setText("UDP gate: ACTIVE -- commands flowing to Unity")
-            self.label_gate.setStyleSheet("color: #888888;")
+            gate_str = "GATE:OPEN"
         else:
-            self.label_gate.setText("")
+            gate_str = ""
 
-        # ---- Unity last-command tracker ----
-        # _CODE_TO_NAME mirrors _COMMAND_CODES in unity_bridge.py; both
-        # decode the integer on channel 22 into the human-readable name.
-        _CODE_TO_NAME = {0: "(none)", 1: "INCREASE", 2: "DECREASE",
-                         3: "START", 4: "STOP"}
+        # Unity last-command compact tag.
+        _CODE_TO_NAME = {0: "idle", 1: "UP", 2: "DOWN", 3: "START", 4: "STOP"}
         cmd_name = _CODE_TO_NAME.get(unity_cmd_code, f"?{unity_cmd_code}")
-        # Per-state-change colouring so increases/decreases stand out
-        # from each other and from lifecycle events.
-        cmd_color = {
-            "INCREASE": "#00ff66",
-            "DECREASE": "#ff6666",
-            "START":    "#0099ff",
-            "STOP":     "#aaaaaa",
-            "(none)":   "#666666",
-        }.get(cmd_name, "#ffffff")
         if session_state in (SessionState.LIVE, SessionState.STOPPED):
-            self.label_unity.setText(
-                f"Unity last command: {cmd_name}     total sent: {unity_cmd_total}"
-            )
-            self.label_unity.setStyleSheet(f"color: {cmd_color}; font-weight: bold;")
+            unity_str = f"Unity:{cmd_name} ({unity_cmd_total} sent)"
         else:
-            self.label_unity.setText("")
+            unity_str = ""
+
+        # Merged single-line diagnostic strip (replaces 4 separate labels).
+        # Uses the deltas computed earlier (self._diag_deltas) plus the
+        # compact threshold / gate / Unity tags built just above.
+        diag_bits = [getattr(self, '_diag_deltas', '')]
+        if thresh_str:
+            diag_bits.append(thresh_str)
+        if gate_str:
+            diag_bits.append(gate_str)
+        if unity_str:
+            diag_bits.append(unity_str)
+        self.label_s_t.setText("   |   ".join(b for b in diag_bits if b))
 
         # ---- Balloon-height telemetry from Unity ----
         # channel 24 carries the height in meters, NaN when Unity isn't
@@ -898,14 +928,14 @@ class ClinicalDashboard:
         # label_height aliases label_height_card; reformat for the card
         # (two lines, big number) rather than the old inline label form.
         if math.isfinite(balloon_height_m):
-            self.label_height_card.setText(f"Height\n{balloon_height_m:.1f} m")
+            self.label_height_card.setText(f"Height {balloon_height_m:.1f} m")
             self.height_data['x'].append(self.tick_counter)
             self.height_data['y'].append(balloon_height_m)
             if len(self.height_data['x']) > self.max_history:
                 self.height_data['x'].pop(0); self.height_data['y'].pop(0)
             self.curve_height.setData(self.height_data['x'], self.height_data['y'])
         else:
-            self.label_height_card.setText("Height\n-- m")
+            self.label_height_card.setText("Height -- m")
         self.plot_height.setXRange(
             max(0, self.tick_counter - self.view_width), self.tick_counter
         )
@@ -927,11 +957,10 @@ class ClinicalDashboard:
         def _fmt(t):
             s = t // int(Config.PIPELINE_RATE)
             return f"{s // 60:02d}:{s % 60:02d}"
-        # Two-line card format matches the big-card styling applied to
-        # these labels in _build_live_panel.
-        self.label_time_calm.setText(f"CALM\n{_fmt(self.ticks_calm)}")
-        self.label_time_stress.setText(f"STRESSED\n{_fmt(self.ticks_stressed)}")
-        self.label_time_ultra.setText(f"ULTRA\n{_fmt(self.ticks_ultra)}")
+        # Single-line compact card format.
+        self.label_time_calm.setText(f"CALM {_fmt(self.ticks_calm)}")
+        self.label_time_stress.setText(f"STRESSED {_fmt(self.ticks_stressed)}")
+        self.label_time_ultra.setText(f"ULTRA {_fmt(self.ticks_ultra)}")
 
         # ---- Per-panel durations + QA strip ----
         if self.tick_counter % 10 == 0:

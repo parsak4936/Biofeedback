@@ -152,18 +152,38 @@ class PatientIntakeDialog(QDialog):
         self.global_err.setWordWrap(True)
         outer.addWidget(self.global_err)
 
-        # Buttons
+        # Buttons. ORDER MATTERS for the Enter-key default:
+        # Qt makes the first QPushButton added with autoDefault=True
+        # (the default for buttons inside a QDialog) the implicit
+        # default. The earlier version added Cancel first, so pressing
+        # Enter while the form was incomplete silently triggered
+        # Cancel -- the operator saw the dialog disappear and assumed
+        # the form had accepted. We now:
+        #   - put Start first in the layout AND mark it as the default,
+        #   - explicitly turn autoDefault OFF on Cancel,
+        # so Enter always triggers Start (which runs _validate first
+        # and surfaces missing fields).
         button_row = QHBoxLayout()
         button_row.addStretch()
+
         self.cancel_btn = QPushButton("Cancel")
         self.cancel_btn.setObjectName("cancel")
+        self.cancel_btn.setAutoDefault(False)
+        self.cancel_btn.setDefault(False)
         self.cancel_btn.clicked.connect(self.reject)
         button_row.addWidget(self.cancel_btn)
 
         self.start_btn = QPushButton("Start session")
+        self.start_btn.setAutoDefault(True)
+        self.start_btn.setDefault(True)
         self.start_btn.clicked.connect(self._on_start)
         button_row.addWidget(self.start_btn)
         outer.addLayout(button_row)
+
+        # Clear gender error live the moment the operator picks F or M
+        # so it doesn't keep glaring after the field is actually valid.
+        self.gender_combo.currentIndexChanged.connect(
+            lambda _i: self.gender_err.setText(""))
 
     # ---- small UI helpers ----
     def _label(self, text):
@@ -192,12 +212,24 @@ class PatientIntakeDialog(QDialog):
         err_label.setText(message)
 
     def _clear_field_error(self, *_):
+        """Clear the red border + inline error label for whichever field
+        the operator is currently editing. Mapping sender -> err label
+        used to be missing (the loop body was a `pass`), so the inline
+        error stayed visible even after the field had been corrected."""
         sender = self.sender()
         if isinstance(sender, QLineEdit):
             sender.setStyleSheet("")
-        for err in (self.name_err, self.lastname_err, self.id_err, self.gender_err):
-            # Best-effort: clear whatever the user is interacting with.
-            pass
+        err_map = {
+            self.name_edit:     self.name_err,
+            self.lastname_edit: self.lastname_err,
+            self.id_edit:       self.id_err,
+        }
+        err_label = err_map.get(sender)
+        if err_label is not None:
+            err_label.setText("")
+        # Also clear the global banner whenever any single field changes,
+        # so it doesn't keep accusing the operator after they've fixed it.
+        self.global_err.setText("")
 
     def _clear_all_errors(self):
         for field in (self.name_edit, self.lastname_edit, self.id_edit):
@@ -239,10 +271,20 @@ class PatientIntakeDialog(QDialog):
                                "Letters, digits, underscore or dash only (max 32 characters).")
             ok = False
 
+        # Gender. The combo box starts on "— select —" (sentinel item
+        # at index 0), so we accept ONLY explicit F or M selections.
+        # We also red-border the combo box so the operator's eye gets
+        # pulled to it the way the QLineEdit fields do on missing input.
         gender = self.gender_combo.currentText()
-        if gender not in ("F", "M"):
-            self.gender_err.setText("Please select F or M.")
+        if self.gender_combo.currentIndex() <= 0 or gender not in ("F", "M"):
+            self.gender_combo.setStyleSheet(
+                self.gender_combo.styleSheet() + "border: 1px solid #ff6666;"
+            )
+            self.gender_err.setText("Gender is required -- please select F or M.")
             ok = False
+        else:
+            # Clear any prior red border from a previous failed attempt.
+            self.gender_combo.setStyleSheet("")
 
         # Session date is locked to today, no validation needed.
 

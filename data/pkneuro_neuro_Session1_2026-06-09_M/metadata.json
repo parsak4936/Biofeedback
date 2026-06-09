@@ -1,27 +1,27 @@
 {
   "patient": {
-    "first_name": "shayan",
-    "last_name": "filefifth",
-    "patient_id": "123",
-    "gender": "F",
-    "session_date": "2026-06-02",
+    "first_name": "pkneuro",
+    "last_name": "neuro",
+    "patient_id": "2",
+    "gender": "M",
+    "session_date": "2026-06-09",
     "session_number": 1
   },
-  "session_folder": "shayan_filefifth_Session1_2026-06-02_F",
-  "session_timestamp": "20260602_222420",
+  "session_folder": "pkneuro_neuro_Session1_2026-06-09_M",
+  "session_timestamp": "20260609_141206",
   "baseline": {
-    "captured_at": "2026-06-02 22:26:27",
+    "captured_at": "2026-06-09 14:14:17",
     "baseline_duration_sec": 120,
-    "sample_rate_pipeline_hz": 50.0,
+    "sample_rate_pipeline_hz": 10.0,
     "personal_baselines": {
-      "eda_uS": 3.772201329260774,
-      "hr_bpm": 90.78314842612056,
-      "hrv_ms": 39.25896478492699
+      "eda_uS": 4.592203210901331,
+      "hr_bpm": 72.32930681761668,
+      "hrv_ms": 44.118901024321595
     },
-    "sigma_baseline": 0.6126406342224351,
+    "sigma_baseline": 0.20911613531645598,
     "thresholds": {
-      "mild": 0.7812542274305155,
-      "high": 1.4245268933640725
+      "mild": 0.2680468779283786,
+      "high": 0.48761882001065737
     },
     "hrv_metrics": {},
     "artifacts_removed": {
@@ -29,11 +29,8 @@
       "hr": 0,
       "hrv": 0
     },
-    "source": "mock:data/5_2026-05-29_14-52-05.txt",
+    "source": "mock:data/real1/opensignals_0007800F319C_2026-06-04_16-02-23.txt",
     "pipeline_constants": {
-      "ema_alpha_eda": 1.0,
-      "ema_alpha_hr": 1.0,
-      "ema_alpha_hrv": 1.0,
       "artifact_sigma_multiplier": 3.0,
       "weight_eda": 0.5,
       "weight_hrv": 0.3,

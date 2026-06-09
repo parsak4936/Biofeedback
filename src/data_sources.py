@@ -116,39 +116,66 @@ import neurokit2 as nk
 # =============================================================================
 # PLUX hardware constants and transfer functions
 # =============================================================================
-# These come straight from the PLUX biosignalsplux datasheet. The hub samples
-# each electrode with a 16-bit ADC referenced to 3.0 V; the per-sensor
-# constants below convert the raw integer reading into a physical unit.
-# Documented in SIGNALS_AND_DATA.md for cross-reference.
+# These come from biosignalsnotebooks/conversion.py (raw_to_phy), which is
+# the official PLUX-maintained reference for sensor calibration. We pick
+# the constants for `device='biosignalsplux'` because that's the hub the
+# lab uses.
+#
+# Earlier values in this file (gain=0.132 for EDA, gain=1.1 for ECG via
+# the `_PLUX_ECG_GAIN = 1100` line) were the BITalino constants
+# (`bitalino_rev` / `bitalino_riot` in raw_to_phy). Source:
+# https://github.com/pluxbiosignals/biosignalsnotebooks/.../conversion.py
+# Using BITalino constants on biosignalsplux data produced EDA values
+# ~9 % low and ECG values ~8 % low.
+#
+# The general PLUX transfer function for both ECG and EDA is:
+#     phy = (raw * vcc / 2^resolution - vcc * offset) / gain
+# where vcc, offset and gain are sensor/device-specific.
 
-_PLUX_ADC_FULL_SCALE = 65536         # 16-bit ADC: 0..65535
-_PLUX_REF_VOLTAGE_V = 3.0            # ADC reference voltage
-_PLUX_EDA_CONSTANT = 0.132           # EDA sensor transducer constant
-_PLUX_ECG_GAIN = 1100                # ECG instrumentation-amplifier gain
+_PLUX_ADC_FULL_SCALE = 65536         # 16-bit ADC: 0..65535 (2^16)
+_PLUX_REF_VOLTAGE_V = 3.0            # vcc for biosignalsplux family
+
+# EDA, biosignalsplux: offset = 0, gain = 0.12
+# (BITalino_rev/riot used gain = 0.132 with vcc = 3.3 -- different device.)
+_PLUX_EDA_OFFSET = 0.0
+_PLUX_EDA_GAIN = 0.12
+
+# ECG, biosignalsplux: offset = 0.5, gain = 1.019
+# (BITalino used gain = 1.1.) The bsnb formula outputs millivolts directly
+# when these constants are used, so no extra ×1000 is needed (unlike the
+# old code which used gain=1100 and then ×1000 to compensate).
+_PLUX_ECG_OFFSET = 0.5
+_PLUX_ECG_GAIN_BSNB = 1.019
 
 
 def adc_to_eda_uS(adc):
-    """PLUX EDA transfer function.
+    """PLUX EDA transfer function (biosignalsnotebooks/conversion.py).
 
-        EDA (µS) = (ADC / 65536) × 3.0 / 0.132
+        EDA (µS) = (raw * 3.0 / 65536 - 3.0 * 0) / 0.12
+                 = raw * 3.0 / (65536 * 0.12)
 
-    Returns skin conductance in microsiemens. EDA is unipolar (always ≥ 0),
-    so no recentering step.
+    Returns skin conductance in microsiemens. EDA is unipolar (always >= 0),
+    so the offset stays at 0 -- no recentering.
     """
-    return (adc / _PLUX_ADC_FULL_SCALE) * _PLUX_REF_VOLTAGE_V / _PLUX_EDA_CONSTANT
+    return ((adc * _PLUX_REF_VOLTAGE_V / _PLUX_ADC_FULL_SCALE)
+            - _PLUX_REF_VOLTAGE_V * _PLUX_EDA_OFFSET) / _PLUX_EDA_GAIN
 
 
 def adc_to_ecg_mV(adc):
-    """PLUX ECG transfer function.
+    """PLUX ECG transfer function (biosignalsnotebooks/conversion.py).
 
-        ECG (mV) = ((ADC / 65536) - 0.5) × 3.0 / 1100 × 1000
+        ECG (mV) = (raw * 3.0 / 65536 - 3.0 * 0.5) / 1.019
 
     Returns electrocardiogram voltage in millivolts. ECG is bipolar (swings
-    both directions around zero) so the `- 0.5` recenters the fraction so the
-    baseline sits at zero and the R-peak spikes come out as positive numbers.
-    The trailing `× 1000` converts volts to millivolts.
+    both directions around zero) so offset = 0.5 recenters the ratio so
+    R-peaks come out positive against a near-zero baseline.
+
+    Note vs. the previous version: gain is 1.019 (biosignalsplux) instead
+    of 1.1 (BITalino), and the * 1000 V->mV conversion is no longer needed
+    because bsnb's formula yields millivolts directly with the new gain.
     """
-    return ((adc / _PLUX_ADC_FULL_SCALE) - 0.5) * _PLUX_REF_VOLTAGE_V / _PLUX_ECG_GAIN * 1000.0
+    return ((adc * _PLUX_REF_VOLTAGE_V / _PLUX_ADC_FULL_SCALE)
+            - _PLUX_REF_VOLTAGE_V * _PLUX_ECG_OFFSET) / _PLUX_ECG_GAIN_BSNB
 
 
 # =============================================================================
@@ -459,6 +486,19 @@ def _gated_rmssd_from_peaks(peak_indices, fs_hz):
 
 def _compute_hr_rmssd(ecg_window: np.ndarray, fs_hz: float,
                       have_full_hrv_window: bool):
+    """Dispatch to the configured backend. Default = NeuroKit2 (below).
+    'bsnb' routes to biosignalsnotebooks (Pan-Tompkins) -- prof's
+    preference per his 2026-06 email."""
+    if getattr(Config, 'HR_HRV_BACKEND', 'neurokit').lower() == 'bsnb':
+        # Local import so users who never select 'bsnb' don't need
+        # biosignalsnotebooks installed.
+        from bsnb_backend import compute_hr_rmssd_bsnb
+        return compute_hr_rmssd_bsnb(ecg_window, fs_hz, have_full_hrv_window)
+    return _compute_hr_rmssd_neurokit(ecg_window, fs_hz, have_full_hrv_window)
+
+
+def _compute_hr_rmssd_neurokit(ecg_window: np.ndarray, fs_hz: float,
+                                have_full_hrv_window: bool):
     """
     Run the PDF chain on a trailing ECG window:
 
@@ -603,7 +643,7 @@ class MockDataSource(DataSource):
     """
 
     def __init__(self):
-        print(f"[DATA SOURCE] Initializing MockDataSource (PDF-aligned)...")
+        print(f"[DATA SOURCE] Initializing MockDataSource...")
 
         # Locate the file relative to project root.
         project_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -791,6 +831,14 @@ class MockDataSource(DataSource):
 
 
 def _pre_derive_hr_hrv(ecg_mv: np.ndarray, fs_hz: float):
+    """Dispatch to the configured backend (same idea as _compute_hr_rmssd)."""
+    if getattr(Config, 'HR_HRV_BACKEND', 'neurokit').lower() == 'bsnb':
+        from bsnb_backend import pre_derive_hr_hrv_bsnb
+        return pre_derive_hr_hrv_bsnb(ecg_mv, fs_hz)
+    return _pre_derive_hr_hrv_neurokit(ecg_mv, fs_hz)
+
+
+def _pre_derive_hr_hrv_neurokit(ecg_mv: np.ndarray, fs_hz: float):
     """
     Offline simulation of the live streaming HR/RMSSD chain.
 
