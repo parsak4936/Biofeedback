@@ -832,6 +832,24 @@ class ClinicalDashboard:
         # ECG is now drawn by _update_ecg_chart() called at the top of
         # update_dashboard, before the main-inlet early return.
 
+        # ---- Pre-baseline EDA auto-rescale ----
+        # Before the baseline locks, no avg_eda is broadcast yet, so the
+        # later auto-rescale block (further below) does not run. Without
+        # this pre-baseline rescale, tiny resting EDA values (~0.05 uS)
+        # are invisible against the default 0..5 uS range. We re-fit Y
+        # to the actual data span once per second whenever the running
+        # EDA series has enough samples but no baseline has locked.
+        if (avg_eda <= 0.0
+                and len(self.eda_data['y']) >= int(Config.PIPELINE_RATE)
+                and self.tick_counter % int(Config.PIPELINE_RATE) == 0):
+            # Re-fit around the visible mean with a small half-range
+            # floor so we don't zoom into pure noise.
+            recent = self.eda_data['y'][-int(Config.PIPELINE_RATE) * 5:]
+            v_mean = float(sum(recent) / len(recent))
+            self._autoscale_signal(self.plot_eda, self.eda_data['y'],
+                                   v_mean, Config.EDA_PLOT_HALFRANGE,
+                                   y_floor=0.0)
+
         # ---- Captured baseline display + dynamic signal-chart zoom ----
         # Update the card text as soon as any non-zero average is
         # broadcast (channel 9/10/11 carry running averages every

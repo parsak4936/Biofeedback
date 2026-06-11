@@ -80,7 +80,7 @@ class Config:
     #
     # Not consulted when EDA_BACKEND == 'neurokit' (NeuroKit2 uses
     # cvxEDA convex-optimisation decomposition unconditionally).
-    EDA_BSNB_METHOD = 'lowpass_subtract'
+    EDA_BSNB_METHOD = 'raw'
     
     # ============================================
     # LSL NETWORK SETTINGS
@@ -427,7 +427,12 @@ class Config:
     # After baseline locks:   recenter around the patient's baseline ± *_HALFRANGE.
     # This prevents pyqtgraph from auto-zooming to floating-point noise when the
     # signal is stable (the "90.497730–90.497738" effect on flat resting HR).
-    EDA_PLOT_DEFAULT_RANGE = (0.0, 25.0)      # μS — covers typical resting range
+    # EDA default range was 0..25 µS which makes small resting values
+    # (<1 µS, common with finger pads not yet warmed up) visually
+    # indistinguishable from zero. Tightened to 0..5 µS so the trace is
+    # readable before baseline; auto-rescale below expands it on demand
+    # if the signal climbs past the upper bound.
+    EDA_PLOT_DEFAULT_RANGE = (0.0, 5.0)       # μS — readable for small resting EDA
     HR_PLOT_DEFAULT_RANGE = (40.0, 180.0)     # BPM — wide enough for stress excursions
     HRV_PLOT_DEFAULT_RANGE = (0.0, 200.0)     # ms — RMSSD healthy range
     # Tighter zoom around the patient's baseline so small deviations are

@@ -1103,21 +1103,27 @@ class RealPLUXDataSource(DataSource):
             print()
 
             if eda_uS_mean < eda_min_valid_uS:
-                raise RuntimeError(
-                    f"channel-mapping verify FAILED: EDA channel {self.eda_ch} "
-                    f"produced mean {eda_uS_mean:.4f} uS over {verify_sec:.0f}s "
-                    f"(threshold: {eda_min_valid_uS:.2f} uS). Either:\n"
-                    f"  (a) EDA electrode lost contact -- re-seat the finger "
-                    f"pad and retry.\n"
-                    f"  (b) Channel mapping is wrong -- check the OpenSignals "
-                    f"UI for which CH number actually carries EDA, then set "
-                    f"Config.REAL_PLUX_EDA_CHANNEL accordingly.\n"
-                    f"Refusing to start a session with near-zero EDA -- "
-                    f"would record garbage data."
-                )
-        except RuntimeError:
-            # Re-raise (this is the operator-facing abort path).
-            raise
+                # Earlier this RAISED RuntimeError and aborted the entire
+                # session. That blocked ECG too, because the ECG side
+                # outlet is created AFTER this verify block -- so a dead
+                # EDA electrode meant no ECG chart either.
+                #
+                # Operator request 2026-06: warn loudly but keep going.
+                # ECG / HR / HRV still work; the EDA chart will sit at the
+                # near-zero reading and the operator can re-seat the EDA
+                # finger pad without restarting the whole stack.
+                print()
+                print("[DATA SOURCE]   " + "!" * 60)
+                print(f"[DATA SOURCE]   WARN: EDA channel {self.eda_ch} reads "
+                      f"{eda_uS_mean:.4f} uS over {verify_sec:.0f}s "
+                      f"(threshold {eda_min_valid_uS:.2f} uS).")
+                print(f"[DATA SOURCE]   Most likely cause: EDA electrode "
+                      f"lost skin contact -- re-seat the finger pad.")
+                print(f"[DATA SOURCE]   ECG will still stream and HR/HRV "
+                      f"will still compute. EDA chart will read near zero "
+                      f"until contact is restored.")
+                print("[DATA SOURCE]   " + "!" * 60)
+                print()
         except Exception as e:
             # Verify itself crashed (LSL hiccup, decode error). Don't abort —
             # the operator can still run the session and catch problems
@@ -1151,6 +1157,14 @@ class RealPLUXDataSource(DataSource):
             source_id='plux_hardware_ecg',
         )
         self.ecg_outlet = StreamOutlet(self.ecg_out_info)
+        # Echo the live channel indices once now that both outlets exist,
+        # so a quick scan of the streamer console confirms which physical
+        # channel is being broadcast as ECG / EDA. Useful when the
+        # dashboard chart disagrees with OpenSignals -- the most common
+        # culprit is a mis-mapped self.ecg_ch / self.eda_ch.
+        print(f"[DATA SOURCE]   LIVE CHANNELS: "
+              f"EDA=ch{self.eda_ch}  ECG=ch{self.ecg_ch}  "
+              f"(both outlets are now publishing).")
 
         # ---- Rolling buffer for ECG (60 s + 5 s margin = full RMSSD window) ----
         buffer_len = int((Config.RMSSD_WINDOW_SEC + 5) * self.fs_hz)
@@ -1225,6 +1239,20 @@ class RealPLUXDataSource(DataSource):
 
             # Push raw ECG to side outlet (every sample, for dashboard).
             self.ecg_outlet.push_sample([float(ecg_mV)])
+
+            # DIAGNOSTIC (operator request 2026-06). Once per second print
+            # the raw ADC and converted mV value, plus the EDA value, so
+            # the operator can verify the dashboard chart matches what's
+            # actually being pushed. Helps catch stale-outlet ghosts and
+            # channel-mapping mismatches.
+            if self._sample_index % int(self.fs_hz) == 0:
+                print(f"[DATA SOURCE] ECG push: "
+                      f"ADC={float(s[self.ecg_ch]):.0f}  "
+                      f"-> {ecg_mV:+.3f} mV   "
+                      f"(EDA: ADC={float(s[self.eda_ch]):.0f}  "
+                      f"-> {eda_uS:.3f} uS,  "
+                      f"latest_hr={self.latest_hr if np.isfinite(self.latest_hr) else 'NaN'},  "
+                      f"latest_rmssd={self.latest_rmssd if np.isfinite(self.latest_rmssd) else 'NaN'})")
 
             # Periodic HR/RMSSD recompute.
             if self._sample_index % self._recompute_step == 0:

@@ -1,0 +1,1 @@
+sample_n,patient_first_name,patient_last_name,patient_id,gender,session_date,session_number,phase,state,dashboard_score,eda,hr,hrv,delta_eda,delta_hr,delta_hrv,s_instant,s_t,height_m,artifacts_eda,artifacts_hr,artifacts_hrv
