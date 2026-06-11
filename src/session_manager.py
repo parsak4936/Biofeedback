@@ -350,12 +350,16 @@ class SessionManager:
             # 3. status
             f"{self.phase},"
             f"{state if state else 'unknown'},"
-            f"{dashboard_score if dashboard_score is not None else 0.0:.2f},"
-            # 4. signals
-            f"{eda:.4f},{hr:.4f},{hrv:.4f},"
-            f"{delta_eda:.4f},{delta_hr:.4f},{delta_hrv:.4f},"
-            f"{s_instant if s_instant is not None else 0.0:.4f},"
-            f"{s_t if s_t is not None else 0.0:.4f},"
+            f"{dashboard_score if dashboard_score is not None else 0.0:.4f},"
+            # 4. signals -- 6 decimal places to preserve very small EDA
+            # values (down to 1e-6 uS) so an audit can reconstruct the
+            # exact trace later. The previous :.4f rounded values below
+            # 0.0001 uS down to 0.0000, which masked the difference
+            # between "sensor dead" and "low but real contact".
+            f"{eda:.6f},{hr:.6f},{hrv:.6f},"
+            f"{delta_eda:.6f},{delta_hr:.6f},{delta_hrv:.6f},"
+            f"{s_instant if s_instant is not None else 0.0:.6f},"
+            f"{s_t if s_t is not None else 0.0:.6f},"
             # 5. height (from Unity, blank if not streaming)
             f"{height_str},"
             # 6. diagnostic counters
@@ -389,8 +393,11 @@ class SessionManager:
         self._diagnostic_row_n += 1
 
         def _f(x):
+            # 6 decimal places matches log_sample. Preserves small EDA
+            # values exactly so the diagnostic and clinical CSVs agree
+            # cell-by-cell to the same precision.
             try:
-                return f"{x:.4f}"
+                return f"{x:.6f}"
             except Exception:
                 return "nan"
 

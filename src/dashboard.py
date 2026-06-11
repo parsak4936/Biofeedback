@@ -751,15 +751,18 @@ class ClinicalDashboard:
                 return f"{v:.{prec}f} {unit}" if _math.isfinite(v) else f"-- {unit}"
             except Exception:
                 return f"-- {unit}"
-        self.label_live_eda.setText(f"EDA: {_fmt_v(eda, 'uS', 2)}")
+        # 4-6 decimal places on the live readouts so the operator can
+        # spot small EDA values (1e-3..1e-4 uS) at a glance instead of
+        # seeing them rounded to "0.00 uS" and assuming the sensor is dead.
+        self.label_live_eda.setText(f"EDA: {_fmt_v(eda, 'uS', 4)}")
         self.label_live_hr.setText (f"HR: {_fmt_v(hr,  'BPM', 1)}")
         self.label_live_hrv.setText(f"HRV: {_fmt_v(hrv, 'ms', 1)}")
-        self.label_live_phasic.setText(f"phEDA: {_fmt_v(delta_eda, 'uS', 3)}")
+        self.label_live_phasic.setText(f"phEDA: {_fmt_v(delta_eda, 'uS', 4)}")
         # ECG numeric: instantaneous mV from the side stream. Use the last
         # value in the side-stream buffer if present (the chart is the
         # canonical view; this is a quick "is contact good?" check).
         if self.ecg_data['y']:
-            self.label_live_ecg.setText(f"ECG: {self.ecg_data['y'][-1]:+.3f} mV")
+            self.label_live_ecg.setText(f"ECG: {self.ecg_data['y'][-1]:+.5f} mV")
         else:
             self.label_live_ecg.setText("ECG: -- mV")
 

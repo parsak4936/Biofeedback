@@ -214,19 +214,30 @@ class SignalProcessor:
         Returns silently on Exception (the last good value is held — better
         than synthesising a zero on a transient failure).
         """
-        # Backend dispatch -- prof's email asked we expose a
-        # biosignalsnotebooks-style chain as a switchable alternative.
-        if getattr(Config, 'EDA_BACKEND', 'neurokit').lower() == 'bsnb':
+        # Backend dispatch. If bsnb is requested but the import fails
+        # (e.g. biosignalsnotebooks installed --no-deps and missing
+        # bokeh / h5py), we silently fall back to NeuroKit2 below.
+        # The first failure prints a warning; subsequent calls take the
+        # NeuroKit path without noise (latched on the class instance).
+        if getattr(Config, 'EDA_BACKEND', 'neurokit').lower() == 'bsnb' \
+                and not getattr(self, '_bsnb_eda_failed', False):
             try:
                 from bsnb_backend import phasic_eda_bsnb
                 val = phasic_eda_bsnb(self._raw_eda_window,
                                        Config.PIPELINE_RATE)
+                if not math.isfinite(val) or abs(val) > Config.EDA_PHASIC_MAX_US:
+                    return
+                self.current_phasic_eda = val
+                return
+            except ImportError as e:
+                self._bsnb_eda_failed = True
+                print(f"[PROCESSOR] WARN: bsnb EDA backend failed to import "
+                      f"({type(e).__name__}: {e}). Falling back to NeuroKit2 "
+                      f"for EDA decomposition.")
             except Exception:
+                # Any non-import error in the bsnb path -- hold last value
+                # silently as before.
                 return
-            if not math.isfinite(val) or abs(val) > Config.EDA_PHASIC_MAX_US:
-                return
-            self.current_phasic_eda = val
-            return
 
         if not _NEUROKIT_AVAILABLE:
             return

@@ -484,16 +484,31 @@ def _gated_rmssd_from_peaks(peak_indices, fs_hz):
 # This is the SINGLE place where the chain lives — no duplication between
 # mock and live paths.
 
+_BSNB_IMPORT_FAILED = False  # latched after first failure to avoid log spam
+
+
 def _compute_hr_rmssd(ecg_window: np.ndarray, fs_hz: float,
                       have_full_hrv_window: bool):
     """Dispatch to the configured backend. Default = NeuroKit2 (below).
-    'bsnb' routes to biosignalsnotebooks (Pan-Tompkins) -- prof's
-    preference per his 2026-06 email."""
-    if getattr(Config, 'HR_HRV_BACKEND', 'neurokit').lower() == 'bsnb':
-        # Local import so users who never select 'bsnb' don't need
-        # biosignalsnotebooks installed.
-        from bsnb_backend import compute_hr_rmssd_bsnb
-        return compute_hr_rmssd_bsnb(ecg_window, fs_hz, have_full_hrv_window)
+    'bsnb' routes to biosignalsnotebooks (Pan-Tompkins).
+
+    If the bsnb backend cannot be loaded (e.g. biosignalsnotebooks
+    installed --no-deps and missing bokeh / h5py / IPython), we fall
+    back to NeuroKit2 with a single loud warning instead of crashing
+    the streamer. The fallback is latched so the operator sees the
+    warning once, not once per recompute."""
+    global _BSNB_IMPORT_FAILED
+    if (getattr(Config, 'HR_HRV_BACKEND', 'neurokit').lower() == 'bsnb'
+            and not _BSNB_IMPORT_FAILED):
+        try:
+            from bsnb_backend import compute_hr_rmssd_bsnb
+            return compute_hr_rmssd_bsnb(ecg_window, fs_hz, have_full_hrv_window)
+        except ImportError as e:
+            _BSNB_IMPORT_FAILED = True
+            print(f"[DATA SOURCE] WARN: bsnb backend failed to import "
+                  f"({type(e).__name__}: {e}). Falling back to NeuroKit2 "
+                  f"for HR/RMSSD. Install the missing module with "
+                  f"`pip install --no-deps <module-name>` if you want bsnb.")
     return _compute_hr_rmssd_neurokit(ecg_window, fs_hz, have_full_hrv_window)
 
 
@@ -831,10 +846,19 @@ class MockDataSource(DataSource):
 
 
 def _pre_derive_hr_hrv(ecg_mv: np.ndarray, fs_hz: float):
-    """Dispatch to the configured backend (same idea as _compute_hr_rmssd)."""
-    if getattr(Config, 'HR_HRV_BACKEND', 'neurokit').lower() == 'bsnb':
-        from bsnb_backend import pre_derive_hr_hrv_bsnb
-        return pre_derive_hr_hrv_bsnb(ecg_mv, fs_hz)
+    """Dispatch to the configured backend (same idea as _compute_hr_rmssd).
+    Falls back to NeuroKit2 with a warning if bsnb cannot be loaded."""
+    global _BSNB_IMPORT_FAILED
+    if (getattr(Config, 'HR_HRV_BACKEND', 'neurokit').lower() == 'bsnb'
+            and not _BSNB_IMPORT_FAILED):
+        try:
+            from bsnb_backend import pre_derive_hr_hrv_bsnb
+            return pre_derive_hr_hrv_bsnb(ecg_mv, fs_hz)
+        except ImportError as e:
+            _BSNB_IMPORT_FAILED = True
+            print(f"[DATA SOURCE] WARN: bsnb backend failed to import "
+                  f"({type(e).__name__}: {e}). Falling back to NeuroKit2 "
+                  f"for HR/RMSSD pre-derivation.")
     return _pre_derive_hr_hrv_neurokit(ecg_mv, fs_hz)
 
 
@@ -1103,27 +1127,15 @@ class RealPLUXDataSource(DataSource):
             print()
 
             if eda_uS_mean < eda_min_valid_uS:
-                # Earlier this RAISED RuntimeError and aborted the entire
-                # session. That blocked ECG too, because the ECG side
-                # outlet is created AFTER this verify block -- so a dead
-                # EDA electrode meant no ECG chart either.
-                #
-                # Operator request 2026-06: warn loudly but keep going.
-                # ECG / HR / HRV still work; the EDA chart will sit at the
-                # near-zero reading and the operator can re-seat the EDA
-                # finger pad without restarting the whole stack.
-                print()
-                print("[DATA SOURCE]   " + "!" * 60)
-                print(f"[DATA SOURCE]   WARN: EDA channel {self.eda_ch} reads "
-                      f"{eda_uS_mean:.4f} uS over {verify_sec:.0f}s "
-                      f"(threshold {eda_min_valid_uS:.2f} uS).")
-                print(f"[DATA SOURCE]   Most likely cause: EDA electrode "
-                      f"lost skin contact -- re-seat the finger pad.")
-                print(f"[DATA SOURCE]   ECG will still stream and HR/HRV "
-                      f"will still compute. EDA chart will read near zero "
-                      f"until contact is restored.")
-                print("[DATA SOURCE]   " + "!" * 60)
-                print()
+                # Informational note (NOT an error). The pipeline proceeds
+                # normally -- ECG / HR / HRV stream as usual, EDA chart
+                # reads near zero until skin contact improves. Operator
+                # request 2026-06: this is a normal startup state, treat
+                # it as a quiet status rather than a panic banner.
+                print(f"[DATA SOURCE]   NOTE: EDA reading is small "
+                      f"({eda_uS_mean:.6f} uS, threshold "
+                      f"{eda_min_valid_uS:.2f} uS) -- normal if finger pads "
+                      f"are still warming up. Proceeding with the session.")
         except Exception as e:
             # Verify itself crashed (LSL hiccup, decode error). Don't abort —
             # the operator can still run the session and catch problems
@@ -1241,16 +1253,17 @@ class RealPLUXDataSource(DataSource):
             self.ecg_outlet.push_sample([float(ecg_mV)])
 
             # DIAGNOSTIC (operator request 2026-06). Once per second print
-            # the raw ADC and converted mV value, plus the EDA value, so
-            # the operator can verify the dashboard chart matches what's
-            # actually being pushed. Helps catch stale-outlet ghosts and
-            # channel-mapping mismatches.
+            # the raw ADC and converted physical value for both channels,
+            # plus the latest HR/RMSSD, so the operator can verify the
+            # dashboard chart matches what's actually being pushed.
+            # Precision is intentionally HIGH (6 decimal places on EDA,
+            # 6 on ECG mV) so the log preserves small values for audit.
             if self._sample_index % int(self.fs_hz) == 0:
                 print(f"[DATA SOURCE] ECG push: "
                       f"ADC={float(s[self.ecg_ch]):.0f}  "
-                      f"-> {ecg_mV:+.3f} mV   "
+                      f"-> {ecg_mV:+.6f} mV   "
                       f"(EDA: ADC={float(s[self.eda_ch]):.0f}  "
-                      f"-> {eda_uS:.3f} uS,  "
+                      f"-> {eda_uS:.6f} uS,  "
                       f"latest_hr={self.latest_hr if np.isfinite(self.latest_hr) else 'NaN'},  "
                       f"latest_rmssd={self.latest_rmssd if np.isfinite(self.latest_rmssd) else 'NaN'})")
 
