@@ -60,8 +60,8 @@ class Config:
     # Switching this flag does NOT touch fusion math, weights, thresholds,
     # or the data source's channel mapping. It changes only HOW the three
     # input numbers (EDA uS, HR BPM, RMSSD ms) are derived from raw signals.
-    HR_HRV_BACKEND = 'bsnb'
-    EDA_BACKEND = 'bsnb'
+    HR_HRV_BACKEND = 'neurokit'
+    EDA_BACKEND = 'neurokit'
 
     # Sub-mode for the bsnb EDA backend (only consulted when
     # EDA_BACKEND == 'bsnb'). Three options:
@@ -453,7 +453,7 @@ class Config:
     # ============================================
     # MockDataSource auto-detects sampling rate AND channel order (ECG vs EDA)
     # from the OpenSignals header JSON — switch files freely, no other edits.
-    MOCK_DATA_FILE = 'data/real1/opensignals_0007800F319C_2026-06-04_16-02-23.txt'
+    MOCK_DATA_FILE = 'data/LiveTest/opensignals_0007800F319C_2026-06-11_14-59-16.txt'
   # MOCK_DATA_FILE = "data/opensignals_2026-05-25_14-57-56.txt"            # 200Hz, 8.7min, ECG=col2/EDA=col3
     # MOCK_DATA_FILE = "data/fake_opensignals_2026-05-13_15-24-44.txt"       # 1000Hz, 42s, EDA=col2/ECG=col3
     # When False (default), MockDataSource stops publishing once the file is
