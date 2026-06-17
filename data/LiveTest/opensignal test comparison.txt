@@ -1,0 +1,29 @@
+ fs       = 1000 Hz
+  duration = 483.6 s (483600 samples)
+  EDA col  = 2  mean = 25.00 uS
+  ECG col  = 3  p-p = 1.682 mV
+
+[1/3] NeuroKit2 backend...
+  0.4 s
+[2/3] biosignalsnotebooks backend...
+  0.4 s
+[3/3] EDA decomposition (both)...
+
+== Per-backend signal stats ==
+  HR (nk)     valid 480600/483600  mean =  74.36  std =  6.87
+  HR (bsnb)   valid 481600/483600  mean =  72.64  std =  5.43
+  HRV (nk)    valid 424100/483600  mean =  72.65  std =  5.77
+  HRV (bsnb)  valid 424100/483600  mean = 155.25  std = 34.98
+  phEDA (nk)  valid 483600/483600  mean =   0.00  std =  0.00
+  phEDA (bsnb)  valid 483600/483600  mean =  -0.00  std =  0.00
+
+== Agreement between backends ==
+HR          n=480600  r=+0.758  RMSE=  4.792  bias(nk-bsnb)= +1.693
+RMSSD       n=424100  r=+0.091  RMSE= 89.680  bias(nk-bsnb)=-82.596
+phasic-EDA  n=483600  r=+nan  RMSE=  0.000  bias(nk-bsnb)= +0.000
+tonic-EDA   n=483600  r=+0.036  RMSE=  0.000  bias(nk-bsnb)= -0.000
+
+== Stress-index comparison (Moldoveanu fusion on both) ==
+  NeuroKit baseline (EDA, HR, HRV): (25.0, 72.6, 70.66)
+  BSNB     baseline (EDA, HR, HRV): (25.0, 74.19, 157.47)
+stress      n=424100  r=-0.025  RMSE=  7.360  bias(nk-bsnb)= -0.289
