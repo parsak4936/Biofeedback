@@ -107,10 +107,21 @@ def main():
     # Pre-extract the columns we will publish. nSeq is the first
     # column; CH1 and CH2 raw ADC values come from the file. Drop DI
     # to match the real OpenSignals LSL channel layout.
+    #
+    # IMPORTANT (2026-06-19 discovery): the real OpenSignals LSL bridge
+    # publishes PRE-CONVERTED physical units (uS for EDA, mV for ECG),
+    # NOT raw ADC. So to match that format, we convert ADC -> physical
+    # units HERE before pushing. The pipeline (with Config.LSL_VALUES_
+    # PRECONVERTED=True) then reads them as physical units directly.
+    # Result: replay and real device produce identical LSL streams.
     col_nseq = 0       # nSeq is always first in OpenSignals files
-    eda_adc = data[:, col_eda].astype(np.float32)
-    ecg_adc = data[:, col_ecg].astype(np.float32)
+    eda_adc_raw = data[:, col_eda].astype(np.float32)
+    ecg_adc_raw = data[:, col_ecg].astype(np.float32)
     nseq = data[:, col_nseq].astype(np.float32)
+    # Convert here so the LSL outlet publishes uS and mV (just like real
+    # OpenSignals does).
+    eda_uS_stream = adc_to_eda_uS(eda_adc_raw).astype(np.float32)
+    ecg_mV_stream = adc_to_ecg_mV(ecg_adc_raw).astype(np.float32)
 
     duration_s = n_samples / fs_native
 
@@ -129,9 +140,11 @@ def main():
 
     # First-sample preview so the operator knows what's in the file.
     print(f"  Preview (first row of file):")
-    print(f"    nSeq   = {int(nseq[0])}")
-    print(f"    EDA ADC= {int(eda_adc[0])}  -> {adc_to_eda_uS(eda_adc[0]):.4f} uS")
-    print(f"    ECG ADC= {int(ecg_adc[0])}  -> {adc_to_ecg_mV(ecg_adc[0]):+.4f} mV")
+    print(f"    nSeq        = {int(nseq[0])}")
+    print(f"    EDA file ADC= {int(eda_adc_raw[0])}  "
+          f"-> pushing {eda_uS_stream[0]:.4f} uS on LSL")
+    print(f"    ECG file ADC= {int(ecg_adc_raw[0])}  "
+          f"-> pushing {ecg_mV_stream[0]:+.4f} mV on LSL")
     print()
 
     # ---- Build the LSL outlet matching OpenSignals's real layout ----
@@ -150,11 +163,15 @@ def main():
     # Attach per-channel labels via the XML metadata API. Matches what
     # the real OpenSignals client publishes.
     channels = info.desc().append_child("channels")
-    for label, unit in (("NSEQ", "n/a"), ("EDA0", "raw"), ("ECG1", "raw")):
+    for label, unit, ctype in (
+            ("NSEQ", "n/a", "counter"),
+            ("EDA0", "uS",  "pre_converted"),
+            ("ECG1", "mV",  "pre_converted"),
+    ):
         ch = channels.append_child("channel")
         ch.append_child_value("label", label)
         ch.append_child_value("unit", unit)
-        ch.append_child_value("type", "raw_adc")
+        ch.append_child_value("type", ctype)
 
     outlet = StreamOutlet(info)
     print(f"[lsl_replay] LSL outlet 'OpenSignals' is now live "
@@ -201,11 +218,13 @@ def main():
             target_idx = min(int((now - t_start) * fs_effective), n_samples)
 
             # Push every sample from idx up to target_idx.
+            # Per the 2026-06-19 finding, we push PRE-CONVERTED physical
+            # units (uS / mV) to match what real OpenSignals does on LSL.
             while idx < target_idx:
                 sample = [
                     float(nseq[idx]),
-                    float(eda_adc[idx]),  # raw ADC, no conversion
-                    float(ecg_adc[idx]),  # raw ADC, no conversion
+                    float(eda_uS_stream[idx]),  # pre-converted uS
+                    float(ecg_mV_stream[idx]),  # pre-converted mV
                 ]
                 outlet.push_sample(sample)
                 idx += 1
@@ -214,12 +233,11 @@ def main():
             if now >= next_print:
                 elapsed = now - t_start
                 progress_pct = 100.0 * idx / n_samples
+                last = max(0, idx - 1)
                 print(f"  t={elapsed:6.1f}s  played {idx:>8d}/{n_samples} "
                       f"({progress_pct:5.1f}%)  "
-                      f"current EDA ADC={int(eda_adc[max(0, idx-1)])} "
-                      f"({adc_to_eda_uS(eda_adc[max(0, idx-1)]):.3f} uS)  "
-                      f"current ECG ADC={int(ecg_adc[max(0, idx-1)])} "
-                      f"({adc_to_ecg_mV(ecg_adc[max(0, idx-1)]):+.3f} mV)")
+                      f"EDA={eda_uS_stream[last]:.3f} uS  "
+                      f"ECG={ecg_mV_stream[last]:+.4f} mV")
                 next_print = now + 1.0
 
             # Yield to OS so we don't burn 100% CPU. ~15 ms on Windows.

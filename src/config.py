@@ -39,7 +39,7 @@ class Config:
     # the fallback ONLY for the case where NeuroKit2 is unavailable or
     # raises on the input.
     # Switching is a one-line change here; nothing downstream needs editing.
-    DATA_SOURCE = 'mock'
+    DATA_SOURCE = 'real_plux'
 
     # ============================================
     # HR / HRV / EDA EXTRACTION BACKEND (prof email 2026-06)
@@ -99,7 +99,32 @@ class Config:
     # real_plux mode. The mock path doesn't see this stream — it reads
     # the .txt file directly. Default matches OpenSignals' factory name.
     PLUX_LSL_NAME = "OpenSignals"
-    
+
+    # ============================================
+    # LSL VALUE FORMAT  (discovered 2026-06-19)
+    # ============================================
+    # OpenSignals (r)evolution's LSL bridge does NOT publish raw ADC
+    # integers. It publishes already-converted PHYSICAL UNITS:
+    #     EDA channel  -> microsiemens (uS)
+    #     ECG channel  -> millivolts (mV)
+    #
+    # This was discovered after weeks of investigation: lab data showing
+    # "EDA = 25 constant" was thought to be a placeholder, but it was
+    # actually the correctly-converted value of a saturated ADC (65535).
+    # Verified at home with the inspector: OpenSignals UI EDA = 21 uS,
+    # LSL inspector EDA channel = 21 -- they match.
+    #
+    # When True (DEFAULT for real OpenSignals LSL): trust the LSL values
+    #   as physical units. Skip our adc_to_eda_uS / adc_to_ecg_mV calls.
+    # When False (offline replays that push raw ADC, or future
+    #   OpenSignals versions that change this behaviour): apply the
+    #   calibration formulas.
+    #
+    # The replay tool scripts/lsl_replay.py was updated alongside this
+    # flag to push pre-converted values too, so both paths produce the
+    # same LSL format and the pipeline code is identical.
+    LSL_VALUES_PRECONVERTED = True
+
     # ============================================
     # SYSTEM LIMITS
     # ============================================

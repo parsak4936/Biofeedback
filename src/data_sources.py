@@ -1105,8 +1105,14 @@ class RealPLUXDataSource(DataSource):
             v_arr = np.asarray(verify_chunk, dtype=float)
             eda_samples = v_arr[:, self.eda_ch]
             ecg_samples = v_arr[:, self.ecg_ch]
-            eda_uS_arr = adc_to_eda_uS(eda_samples)
-            ecg_mV_arr = adc_to_ecg_mV(ecg_samples)
+            # When LSL is pre-converted, the samples are already in
+            # physical units -- skip the calibration formulas.
+            if getattr(Config, 'LSL_VALUES_PRECONVERTED', False):
+                eda_uS_arr = eda_samples
+                ecg_mV_arr = ecg_samples
+            else:
+                eda_uS_arr = adc_to_eda_uS(eda_samples)
+                ecg_mV_arr = adc_to_ecg_mV(ecg_samples)
             eda_uS_mean = float(np.mean(eda_uS_arr))
             ecg_mV_p2p = float(np.max(ecg_mV_arr) - np.min(ecg_mV_arr))
 
@@ -1241,9 +1247,19 @@ class RealPLUXDataSource(DataSource):
         self._watchdog_warned = False
 
         # ---- Per-sample processing for everything in the chunk ----
+        # Per Config.LSL_VALUES_PRECONVERTED (default True): OpenSignals
+        # LSL publishes physical units directly (uS / mV), so we MUST NOT
+        # apply our adc_to_eda_uS / adc_to_ecg_mV calibration formulas --
+        # doing so would double-convert and destroy the value. When
+        # False (raw-ADC mode), apply the formulas as before.
+        _preconverted = getattr(Config, 'LSL_VALUES_PRECONVERTED', False)
         for s in samples:
-            eda_uS = adc_to_eda_uS(s[self.eda_ch])
-            ecg_mV = adc_to_ecg_mV(s[self.ecg_ch])
+            if _preconverted:
+                eda_uS = float(s[self.eda_ch])  # already uS
+                ecg_mV = float(s[self.ecg_ch])  # already mV
+            else:
+                eda_uS = adc_to_eda_uS(s[self.eda_ch])
+                ecg_mV = adc_to_ecg_mV(s[self.ecg_ch])
 
             self.latest_eda = float(eda_uS)
             self._ecg_buffer.append(float(ecg_mV))
@@ -1259,10 +1275,16 @@ class RealPLUXDataSource(DataSource):
             # Precision is intentionally HIGH (6 decimal places on EDA,
             # 6 on ECG mV) so the log preserves small values for audit.
             if self._sample_index % int(self.fs_hz) == 0:
-                print(f"[DATA SOURCE] ECG push: "
-                      f"ADC={float(s[self.ecg_ch]):.0f}  "
+                # When pre-converted, the raw LSL value IS the physical
+                # unit -- the "ADC=" column is the LSL value itself, the
+                # arrow column repeats it (no conversion applied).
+                raw_eda_str = f"{float(s[self.eda_ch]):.4f}"
+                raw_ecg_str = f"{float(s[self.ecg_ch]):.4f}"
+                unit_tag = "(pre-conv)" if _preconverted else "(raw ADC)"
+                print(f"[DATA SOURCE] ECG push {unit_tag}: "
+                      f"LSL ecg={raw_ecg_str}  "
                       f"-> {ecg_mV:+.6f} mV   "
-                      f"(EDA: ADC={float(s[self.eda_ch]):.0f}  "
+                      f"(EDA: LSL eda={raw_eda_str}  "
                       f"-> {eda_uS:.6f} uS,  "
                       f"latest_hr={self.latest_hr if np.isfinite(self.latest_hr) else 'NaN'},  "
                       f"latest_rmssd={self.latest_rmssd if np.isfinite(self.latest_rmssd) else 'NaN'})")
