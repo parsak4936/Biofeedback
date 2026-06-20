@@ -444,7 +444,7 @@ def run_pipeline():
                     )
                     session.set_thresholds(fusion.thresh_mild, fusion.thresh_high)
 
-                    is_mock = Config.DATA_SOURCE in ('mock', 'mock2')
+                    is_mock = Config.DATA_SOURCE == 'mock'
                     source_label = (
                         f"{Config.DATA_SOURCE}:{Config.MOCK_DATA_FILE}"
                         if is_mock

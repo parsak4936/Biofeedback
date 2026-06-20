@@ -1,35 +1,35 @@
 {
   "patient": {
-    "first_name": "bsnb",
-    "last_name": "lowpass",
-    "patient_id": "12",
-    "gender": "F",
-    "session_date": "2026-06-09",
+    "first_name": "ok",
+    "last_name": "fg",
+    "patient_id": "fg",
+    "gender": "M",
+    "session_date": "2026-06-19",
     "session_number": 1
   },
-  "session_folder": "bsnb_lowpass_Session1_2026-06-09_F",
-  "session_timestamp": "20260609_141824",
+  "session_folder": "ok_fg_Session1_2026-06-19_M",
+  "session_timestamp": "20260619_173004",
   "baseline": {
-    "captured_at": "2026-06-09 14:20:43",
+    "captured_at": "2026-06-19 17:35:25",
     "baseline_duration_sec": 120,
     "sample_rate_pipeline_hz": 10.0,
     "personal_baselines": {
-      "eda_uS": 4.609685639985033,
-      "hr_bpm": 71.63327935284225,
-      "hrv_ms": 43.89232012960646
+      "eda_uS": 19.97371873431913,
+      "hr_bpm": 69.63165372734997,
+      "hrv_ms": 53.08780933645525
     },
-    "sigma_baseline": 0.5466121164544269,
+    "sigma_baseline": 0.6346910105339724,
     "thresholds": {
-      "mild": 0.7118590516115657,
-      "high": 1.285801773888714
+      "mild": 0.809668834539706,
+      "high": 1.476094395600377
     },
     "hrv_metrics": {},
     "artifacts_removed": {
       "eda": 0,
-      "hr": 9,
-      "hrv": 18
+      "hr": 0,
+      "hrv": 0
     },
-    "source": "mock:data/real1/opensignals_0007800F319C_2026-06-04_16-02-23.txt",
+    "source": "real_plux@Biofeedback_Raw",
     "pipeline_constants": {
       "artifact_sigma_multiplier": 3.0,
       "weight_eda": 0.5,

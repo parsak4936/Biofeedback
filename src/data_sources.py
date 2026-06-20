@@ -1340,12 +1340,11 @@ class DataSourceFactory:
     """
     Picks the data source from Config.DATA_SOURCE. Two valid options:
 
-        'mock'       → MockDataSource (replays Config.MOCK_DATA_FILE)
-        'real_plux'  → RealPLUXDataSource (live from PLUX via OpenSignals LSL)
+        'real_plux'  - live PLUX hardware via OpenSignals LSL (default).
+        'mock'       - replays Config.MOCK_DATA_FILE for offline testing.
 
-    The previous 'mock2' / 'real_plux2' variants are gone — both code paths
-    now use the same canonical NeuroKit2 chain from PDF §2, so there is no
-    A/B to maintain.
+    Both modes run the same NeuroKit2 / biosignalsnotebooks chain
+    downstream; the switch only changes where samples come from.
     """
 
     @staticmethod
@@ -1355,15 +1354,6 @@ class DataSourceFactory:
             return MockDataSource()
         if choice == 'real_plux':
             return RealPLUXDataSource()
-        # Soft-handle the now-removed v2 variants so old configs don't
-        # silently fall through to a ValueError without explanation.
-        if choice in ('mock2', 'real_plux2'):
-            raise ValueError(
-                f"Config.DATA_SOURCE = '{Config.DATA_SOURCE}' is no longer "
-                f"valid. The v1/v2 split was removed; both modes now use "
-                f"the same canonical NeuroKit2 chain. Use '{choice[:-1]}' "
-                f"instead (i.e. drop the trailing '2')."
-            )
         raise ValueError(
             f"Invalid Config.DATA_SOURCE: '{Config.DATA_SOURCE}'. "
             f"Valid options: 'mock', 'real_plux'."

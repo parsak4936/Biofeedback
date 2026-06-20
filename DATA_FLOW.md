@@ -36,15 +36,18 @@ nk.ecg_clean
 
 `correct_artifacts=True` is the technical-report Bug 3 fix: it routes detected peaks through `nk.signal_fixpeaks` to correct missed or doubled beats, replacing the older hand-rolled "drop RR intervals > 50% off the median" approach.
 
-The two paths differ only in how the chain's outputs are turned into per-tick HR and RMSSD:
+HR is the mean of `nk.ecg_rate(peaks, sampling_rate)` over a trailing
+`HR_WINDOW_SEC` of ECG (default 30 s). RMSSD is computed from
+`_gated_rmssd_from_peaks` (Kubios + Malik 20 % gate) over a trailing
+`RMSSD_WINDOW_SEC` (default 60 s). Both are recomputed every 0.5 s
+and held with zero-order hold between updates. RMSSD values outside
+5-300 ms are rejected as detector failures and the previous valid
+value is held.
 
-**Adaptive path** (`mock` and `real_plux`). HR comes from `nk.ecg_rate(peaks, ..., desired_length=n)` which returns a per-sample series interpolated between detected beats (monotone cubic). RMSSD comes from `nk.hrv_time(peaks_window, ...)` evaluated at each beat over a trailing `RMSSD_WINDOW_SEC` window of beats (default 60 s), and held with zero-order hold between beats. Lower latency, per-beat granularity. RMSSD values outside 5-300 ms are rejected as detector failures (technical-report Bug 3 plausibility band) and the previous valid value is held.
-
-**Windowed path** (`mock2` and `real_plux2`). Same chain, but HR is the mean of `nk.ecg_rate` over a trailing `DS2_HR_WINDOW_SEC` of ECG (default 30 s) and RMSSD is `nk.hrv_time` over a trailing `DS2_HRV_WINDOW_SEC` (default 60 s), both recomputed every 0.5 seconds and held between updates. Smoother but slower-responding. Same plausibility band on RMSSD.
-
-A prominence-based two-pass detector + `sqrt(mean(diff(rr)^2))` fallback is kept ONLY for the case where NeuroKit2 is unavailable or raises on the input. In a normal recording the fallback never runs.
-
-For the offline mock paths the detection runs once over the whole recording at load time. For the live PLUX paths the same chain runs incrementally on a rolling ECG buffer (5 seconds for the adaptive path, 65 seconds for the windowed path).
+For mock mode the detection runs once over the whole recording at
+load time. For the live PLUX path the same chain runs incrementally
+on a rolling ECG buffer (65 seconds, covering the RMSSD window plus a
+margin).
 
 EDA needs none of this: the converted microsiemens value is used directly. It is a slow signal, so the high sample rate is just oversampling.
 

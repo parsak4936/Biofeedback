@@ -19,15 +19,33 @@ The repo already ships with an `env\` folder populated, so the venv-creation ste
 In `src/config.py`, one line decides where the signals come from:
 
 ```python
-DATA_SOURCE = 'mock'        # replay MOCK_DATA_FILE, in-house adaptive R-peak detector
-DATA_SOURCE = 'mock2'       # replay MOCK_DATA_FILE, NeuroKit2 sliding-window derivation
-DATA_SOURCE = 'real_plux'   # live PLUX device via OpenSignals LSL, in-house detector
-DATA_SOURCE = 'real_plux2'  # live PLUX device via OpenSignals LSL, NeuroKit2 derivation
+DATA_SOURCE = 'real_plux'   # live PLUX device via OpenSignals LSL (default)
+DATA_SOURCE = 'mock'        # replay MOCK_DATA_FILE for offline testing
 ```
 
-`mock` and `mock2` replay the file at `Config.MOCK_DATA_FILE`. Useful for development, demos, and A/B-testing the two HR/HRV derivation methods on identical input.
+`real_plux` reads the live LSL stream named `OpenSignals` that PLUX's
+desktop software publishes when "Lab Streaming Layer" is enabled in
+its preferences. The data source auto-detects which channel index
+carries ECG and which carries EDA from the stream metadata. If labels
+are absent, `Config.REAL_PLUX_ECG_CHANNEL` and `REAL_PLUX_EDA_CHANNEL`
+are the fallback.
 
-`real_plux` and `real_plux2` read the live LSL stream named `OpenSignals` that PLUX's desktop software publishes when "Lab Streaming Layer" is enabled in its preferences. Both auto-detect which channel index carries ECG and which carries EDA from the stream metadata. If labels are absent, `Config.REAL_PLUX_ECG_CHANNEL` and `REAL_PLUX_EDA_CHANNEL` are the fallback.
+`mock` replays the file at `Config.MOCK_DATA_FILE`. Useful for
+development, demos, and pipeline smoke-tests without the device
+attached. Full details in [MOCK_MODE.md](MOCK_MODE.md).
+
+## Picking a backend (NeuroKit2 vs biosignalsnotebooks)
+
+Two lines in `src/config.py`:
+
+```python
+HR_HRV_BACKEND = 'neurokit'   # 'neurokit' | 'bsnb'
+EDA_BACKEND    = 'neurokit'   # 'neurokit' | 'bsnb'
+```
+
+Both backends share identical CSV format, dashboard, and fusion math.
+Only HR / RMSSD / EDA extraction differs. Side-by-side comparison and
+exact formulas in [METHODS.md](METHODS.md).
 
 ## The normal way to run
 

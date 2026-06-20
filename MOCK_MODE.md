@@ -102,11 +102,11 @@ A single LSL sample, if printed, looks like:
 
 The first part is the channel values. The order matches the `sensor` field in the file's JSON header, so for this recording the first value is ECG ADC and the second is EDA ADC. The second part is the LSL timestamp in seconds since the LSL clock started, useful for time-aligning multiple streams.
 
-### Channel auto-detection on the live PLUX path
+### Channel auto-detection
 
-`real_plux` and `real_plux2` both read the per-channel label from the LSL stream's metadata at startup and map EDA / ECG by name (case-insensitive). If labels are missing or unrecognised (older OpenSignals builds, or a device that does not publish channel descriptors), `Config.REAL_PLUX_EDA_CHANNEL` and `REAL_PLUX_ECG_CHANNEL` are used as the fallback. Either way the resolved indices are printed at startup so the operator can confirm them in the launcher terminal.
+`real_plux` reads the per-channel label from the LSL stream's metadata at startup and maps EDA / ECG by name (case-insensitive). If labels are missing or unrecognised, `Config.REAL_PLUX_EDA_CHANNEL` and `REAL_PLUX_ECG_CHANNEL` are used as the fallback. Either way the resolved indices are printed at startup so the operator can confirm them in the launcher terminal.
 
-The mock path (`mock` and `mock2`) reads the file's JSON header and maps sensors by name, so switching to a recording with a different channel order requires no edits.
+The mock path reads the file's JSON header and maps sensors by name, so switching to a recording with a different channel order requires no edits.
 
 ## How HR and HRV come out of the ECG voltage
 
@@ -134,11 +134,16 @@ Finding the R-peaks reliably is the tricky part, because real ECG is noisy and t
 
 Both derivation paths run on the same canonical NeuroKit2 chain, following the design principle stated in the VRET technical report Section 1: every number is computed by a validated library call rather than hand-rolled signal processing. The chain is `nk.ecg_clean` then `nk.ecg_peaks(correct_artifacts=True)` (which delegates to `nk.signal_fixpeaks` internally for missed / doubled-beat correction, the technical-report Bug 3 fix). The two paths differ only in how the resulting peaks are turned into per-tick HR and RMSSD output:
 
-**Adaptive path** (`mock` and `real_plux`). HR via `nk.ecg_rate(peaks, ..., desired_length=n)`, which returns a per-sample series interpolated between detected beats. RMSSD via `nk.hrv_time(peaks_window, ...)["HRV_RMSSD"]`, evaluated at each beat over a trailing `RMSSD_WINDOW_SEC` window of beats and held with zero-order hold between beats. Per-beat updates, lower latency. RMSSD outside 5-300 ms is rejected as a detector failure (technical-report Bug 3 plausibility band). A prominence-based two-pass detector + `sqrt(mean(diff(rr)^2))` formula is kept as a fallback ONLY for the case where NeuroKit2 is unavailable or raises on degenerate input.
+HR via `nk.ecg_rate` over a trailing `HR_WINDOW_SEC` (default 30 s).
+RMSSD via `_gated_rmssd_from_peaks` (Kubios + Malik 20 % gate) over a
+trailing `RMSSD_WINDOW_SEC` (default 60 s). Values are recomputed
+every 0.5 s and held with zero-order hold between updates. RMSSD
+outside [5, 300] ms is rejected as a detector failure.
 
-**Windowed path** (`mock2` and `real_plux2`). HR via `nk.ecg_rate` over a `DS2_HR_WINDOW_SEC` trailing window for HR (mean of the per-beat rates, default 30 s) and `nk.hrv_time` over a `DS2_HRV_WINDOW_SEC` trailing window for RMSSD (default 60 s). Values are recomputed every 0.5 seconds and held between updates. Same plausibility band.
-
-For the offline mock paths the detection runs once over the whole recording at load time and the HR / HRV time series are stored. For the live PLUX paths the same logic runs incrementally on a rolling ECG buffer (5 seconds for the adaptive detector, 65 seconds for the NeuroKit chain). The downstream math is the same either way.
+For mock mode the detection runs once over the whole recording at
+load time and the HR / HRV series are stored. For the live PLUX path
+the same logic runs incrementally on a rolling 65 s ECG buffer.
+Exact formulas for both backends in [METHODS.md](METHODS.md).
 
 ## EDA needs no derivation
 

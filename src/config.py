@@ -16,29 +16,18 @@ code touch, see CODE_AUDIT.md.
 
 class Config:
     # ============================================
-    # DATA SOURCE SELECTION (CRITICAL FOR MODULARITY)
+    # DATA SOURCE SELECTION
     # ============================================
-    # Options: 'mock' | 'mock2' | 'real_plux' | 'real_plux2'
-    # All four paths use the same canonical NeuroKit2 chain
-    # (nk.ecg_clean -> nk.ecg_peaks(correct_artifacts=True) ->
-    # nk.ecg_rate / nk.hrv_time), per the VRET technical report design
-    # principle: every number is computed by a validated library call.
-    # The variants differ only in the windowing strategy on top of the
-    # same chain:
-    #   mock        - replays MOCK_DATA_FILE; per-beat HR (nk.ecg_rate
-    #                 with desired_length=n, interpolated per sample) and
-    #                 per-beat-rolling RMSSD over RMSSD_WINDOW_SEC.
-    #   mock2       - replays MOCK_DATA_FILE; mean HR over a 30 s ECG
-    #                 window and mean RMSSD over a 60 s ECG window,
-    #                 recomputed every 0.5 s. Smoother / slower.
-    #   real_plux   - live PLUX via OpenSignals LSL, per-beat semantics
-    #                 as in 'mock'.
-    #   real_plux2  - live PLUX via OpenSignals LSL, sliding-mean
-    #                 semantics as in 'mock2'.
-    # A prominence-based detector + sqrt(mean(diff(rr)^2)) is kept as
-    # the fallback ONLY for the case where NeuroKit2 is unavailable or
-    # raises on the input.
-    # Switching is a one-line change here; nothing downstream needs editing.
+    # Two paths, switchable with one line:
+    #   'real_plux' - live PLUX device via OpenSignals LSL. Default for
+    #                 sessions with a real participant.
+    #   'mock'      - replays MOCK_DATA_FILE (an OpenSignals .txt
+    #                 recording) at native rate. Used for development,
+    #                 offline debugging, and pipeline smoke-tests
+    #                 without the device attached. See MOCK_MODE.md
+    #                 for details.
+    # Both paths feed identical math downstream; nothing downstream
+    # needs editing when switching.
     DATA_SOURCE = 'real_plux'
 
     # ============================================

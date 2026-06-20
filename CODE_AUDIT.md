@@ -77,7 +77,7 @@ Every numbered step of the math-pipeline document is implemented. The detailed s
 
 ## What is modular versus what needs a code change
 
-Editable in `src/config.py` alone, no pipeline code touched: the data source (`mock` / `mock2` / `real_plux` / `real_plux2`), the mock file path, every math constant (smoothing factors, the 3-sigma multiplier, the fusion weights, the threshold multipliers), the R-peak detection method for the adaptive path, the NeuroKit sliding-window sizes for the v2 path, the physiological sanity bounds, the disconnect-detection thresholds, the dashboard chart ranges, the baseline duration, the UDP target and throttle, the wait-for-calm warmup, and the upper bound on intake session number. Altitude logic and difficulty modes are no longer in this codebase: they moved to Unity.
+Editable in `src/config.py` alone, no pipeline code touched: the data source (`mock` / `real_plux`), the HR/HRV/EDA backend (`neurokit` / `bsnb`), the mock file path, every math constant (3-sigma multiplier, fusion weights, threshold multipliers, sigma floors), the HR / RMSSD window sizes, the physiological sanity bounds, the disconnect-detection thresholds, the dashboard chart ranges, the baseline duration, the UDP target and throttle, the wait-for-calm warmup, and the upper bound on intake session number. Altitude logic and difficulty modes are no longer in this codebase: they moved to Unity.
 
 These still require editing code: the LSL channel layout (changing it means updating `output.py` and `dashboard.py` in sync), the dashboard color theme (RGB values in `dashboard.py`), the Butterworth filter order in the R-peak detector, the logging directory (the string `data/` appears in a few modules), and the state-machine transitions (`_TRANSITIONS` in `session_control.py`).
 
@@ -85,7 +85,7 @@ These still require editing code: the LSL channel layout (changing it means upda
 
 The pipeline and the math are finished and verified. What remains is integration work, not pipeline work:
 
-The real PLUX device path is written but needs a hands-on dry run. Flip `Config.DATA_SOURCE` to `real_plux` or `real_plux2`, start OpenSignals, run a session, and confirm the disconnect detection fires when an electrode is unplugged. The Unity scene is a separate project being built against the output described in `OUTPUTS.md`. A few small polish items remain: the duplicate method definitions in `session_manager.py` are dead code that could be removed, and the launcher's Ctrl+C path could be wired to send a SHUTDOWN command so file cleanup matches the dashboard's close-window path.
+The real PLUX device path runs end-to-end against live hardware (verified June 2026). The Unity scene is a separate project, built against the output described in `OUTPUTS.md`. A few small polish items remain: the duplicate method definitions in `session_manager.py` are dead code that could be removed, and the launcher's Ctrl+C path could be wired to send a SHUTDOWN command so file cleanup matches the dashboard's close-window path.
 
 ## Checks that can be run right now
 
