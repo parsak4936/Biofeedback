@@ -508,7 +508,7 @@ class ClinicalDashboard:
         # numerically by the state-classifier, so an off-scale ULTRA event
         # still triggers the correct UI state.
         plot_widget.enableAutoRange(axis=pg.ViewBox.YAxis, enable=False)
-        plot_widget.setYRange(-1.0, 3.0, padding=0)
+        plot_widget.setYRange(-5.0, 8.0, padding=0)
         plot_widget.setMenuEnabled(False)
         plot_widget.hideButtons()
         plot_widget.setStyleSheet("border: 1px solid #2c2c2c;")
@@ -835,23 +835,15 @@ class ClinicalDashboard:
         # ECG is now drawn by _update_ecg_chart() called at the top of
         # update_dashboard, before the main-inlet early return.
 
-        # ---- Pre-baseline EDA auto-rescale ----
-        # Before the baseline locks, no avg_eda is broadcast yet, so the
-        # later auto-rescale block (further below) does not run. Without
-        # this pre-baseline rescale, tiny resting EDA values (~0.05 uS)
-        # are invisible against the default 0..5 uS range. We re-fit Y
-        # to the actual data span once per second whenever the running
-        # EDA series has enough samples but no baseline has locked.
-        if (avg_eda <= 0.0
-                and len(self.eda_data['y']) >= int(Config.PIPELINE_RATE)
-                and self.tick_counter % int(Config.PIPELINE_RATE) == 0):
-            # Re-fit around the visible mean with a small half-range
-            # floor so we don't zoom into pure noise.
-            recent = self.eda_data['y'][-int(Config.PIPELINE_RATE) * 5:]
-            v_mean = float(sum(recent) / len(recent))
-            self._autoscale_signal(self.plot_eda, self.eda_data['y'],
-                                   v_mean, Config.EDA_PLOT_HALFRANGE,
-                                   y_floor=0.0)
+        # ---- EDA chart: full 0..25 µS PLUX sensor span, ALWAYS ----
+        # Operator request 2026-06: keep the EDA Y axis pinned to the
+        # full sensor range so saturation is visible and the scale is
+        # the same across every participant. The auto-rescale that used
+        # to narrow this around the visible mean is intentionally OFF
+        # for EDA -- it only applies to HR / HRV below.
+        if self.tick_counter % int(Config.PIPELINE_RATE) == 0:
+            self.plot_eda.setYRange(*Config.EDA_PLOT_DEFAULT_RANGE, padding=0)
+            self.plot_eda.locked_y_range = Config.EDA_PLOT_DEFAULT_RANGE
 
         # ---- Captured baseline display + dynamic signal-chart zoom ----
         # Update the card text as soon as any non-zero average is
@@ -865,17 +857,12 @@ class ClinicalDashboard:
             if avg_hrv > 0.0:
                 self.label_baseline_hrv.setText(f"HRV\n{avg_hrv:.1f} ms")
 
-            # Dynamic auto-rescale per chart: keep the curve centred on
-            # the live mean and expand the half-range to whichever is
-            # bigger between the configured default and the current data
-            # span. Avoids the "EDA jumps and goes off the chart" and
-            # the opposite "flat resting signal zooms to noise" problems.
-            # Updated once per second (every PIPELINE_RATE ticks) so
-            # the chart doesn't visibly jitter.
+            # Dynamic auto-rescale for HR / HRV only (EDA stays at the
+            # full 0..25 µS sensor span pinned earlier in this tick).
+            # Keeps the HR / HRV curves centred on the live mean and
+            # widens the half-range when the signal deviates. Updated
+            # once per second so the chart doesn't visibly jitter.
             if self.tick_counter % int(Config.PIPELINE_RATE) == 0:
-                self._autoscale_signal(self.plot_eda, self.eda_data['y'],
-                                       avg_eda, Config.EDA_PLOT_HALFRANGE,
-                                       y_floor=0.0)
                 self._autoscale_signal(self.plot_hr,  self.hr_data['y'],
                                        avg_hr,  Config.HR_PLOT_HALFRANGE,
                                        y_floor=0.0)
@@ -899,13 +886,13 @@ class ClinicalDashboard:
 
             # ---- THRESHOLD-LOCKED Y-AXIS on the stress chart ----
             # Anchor the Y range to the person's own MILD/HIGH so the
-            # CALM/STRESSED/ULTRA bands fill the visible area. The
-            # range is set once per pair of distinct thresholds (cheap
-            # check via the cached _stress_y_locked_at tuple), so we
-            # don't fight pyqtgraph every frame.
+            # bands are visible, but give GENEROUS headroom in both
+            # directions so deep-negative S_t (very calm) and far-above-
+            # HIGH S_t (very stressed) are still visible. Operator
+            # request 2026-06: previous tight band hid both tails.
             band = max(1e-3, thresh_high - thresh_mild)
-            y_min = -0.5 * band
-            y_max = thresh_high + 0.5 * band
+            y_min = -3.0 * band                          # well below CALM zero
+            y_max = thresh_high + 3.0 * band             # well above HIGH
             cache = getattr(self, '_stress_y_locked_at', None)
             if cache != (thresh_mild, thresh_high):
                 self.stress_plot.setYRange(y_min, y_max, padding=0)

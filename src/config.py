@@ -441,18 +441,19 @@ class Config:
     # After baseline locks:   recenter around the patient's baseline ± *_HALFRANGE.
     # This prevents pyqtgraph from auto-zooming to floating-point noise when the
     # signal is stable (the "90.497730–90.497738" effect on flat resting HR).
-    # EDA default range was 0..25 µS which makes small resting values
-    # (<1 µS, common with finger pads not yet warmed up) visually
-    # indistinguishable from zero. Tightened to 0..5 µS so the trace is
-    # readable before baseline; auto-rescale below expands it on demand
-    # if the signal climbs past the upper bound.
-    EDA_PLOT_DEFAULT_RANGE = (0.0, 5.0)       # μS — readable for small resting EDA
+    # EDA default range covers the FULL PLUX biosignalsplux EDA sensor span
+    # (0..25 uS). The sensor saturates at 25 uS, so showing the full span
+    # makes saturation visible on the chart and gives the operator the same
+    # vertical scale across every participant. Auto-rescale is suppressed
+    # for EDA (see _autoscale_signal call site in dashboard.py) so the
+    # chart never narrows below this range.
+    EDA_PLOT_DEFAULT_RANGE = (0.0, 25.0)      # μS — full PLUX EDA sensor range
     HR_PLOT_DEFAULT_RANGE = (40.0, 180.0)     # BPM — wide enough for stress excursions
     HRV_PLOT_DEFAULT_RANGE = (0.0, 200.0)     # ms — RMSSD healthy range
-    # Tighter zoom around the patient's baseline so small deviations are
-    # visible on screen. Reduce these to zoom in more, raise them if a
-    # signal pegs against the edge of its chart.
-    EDA_PLOT_HALFRANGE = 1.0                  # uS around baseline once known
+    # Half-ranges for the per-signal post-baseline recenter (HR / HRV charts only;
+    # EDA stays at the full sensor span). Reduce to zoom in more, raise if
+    # a signal pegs against the edge of its chart.
+    EDA_PLOT_HALFRANGE = 12.5                 # uS — half of full 0..25 span
     HR_PLOT_HALFRANGE = 10.0                  # BPM
     HRV_PLOT_HALFRANGE = 15.0                 # ms
 
