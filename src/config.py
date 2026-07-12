@@ -218,6 +218,27 @@ class Config:
     THRESH_HIGH_K = 2.33
 
     # ============================================
+    # STRESS INDEX SMOOTHER  (2026-07 tuning)
+    # ============================================
+    # Width of the rolling mean applied to S_instant to produce S_t.
+    # Prof. La Rosa's 2026-07 review noted visible jitter on all live traces
+    # and suggested a larger moving average. Historically this was hardcoded
+    # to 1 second (10 samples at PIPELINE_RATE = 10 Hz) which was too short:
+    # single-tick z-score spikes on HR / HRV re-computes punched straight
+    # through the smoother.
+    #
+    #   1.0 s  (legacy)  — noisy, tick-level detail visible
+    #   3.0 s  (default) — clean chart, ~1.5 s of latency to state changes
+    #   5.0 s            — very clean, ~2.5 s of latency (fine for review,
+    #                      may be slow for VR feedback)
+    #
+    # Only affects the display + Unity command timing. Baseline math
+    # (mean_baseline, sigma_baseline, thresholds) is recomputed using the
+    # same window so the classification bands stay calibrated to the new
+    # smoothed distribution — no threshold re-tuning needed.
+    S_T_SMOOTH_SEC = 3.0
+
+    # ============================================
     # EDA PHASIC DECOMPOSITION (PDF Cause 1 fix)
     # ============================================
     # Raw EDA is ~99% slow tonic drift (electrode hydration, temperature) on

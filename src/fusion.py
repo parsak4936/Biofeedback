@@ -58,8 +58,11 @@ class FusionEngine:
     SIGMA_FALLBACK = 1.5
 
     def __init__(self):
-        # 50-sample rolling buffer to smooth S_instant into S_t (1 second at 50 Hz)
-        self.s_instant_buffer = collections.deque(maxlen=int(Config.PIPELINE_RATE))
+        # Rolling S_instant buffer whose mean is S_t. Width = S_T_SMOOTH_SEC
+        # seconds at PIPELINE_RATE. Kept at a minimum of 1 tick so a
+        # misconfigured 0-second value still produces a valid deque.
+        self._s_t_window = max(1, int(Config.S_T_SMOOTH_SEC * Config.PIPELINE_RATE))
+        self.s_instant_buffer = collections.deque(maxlen=self._s_t_window)
 
         # Frozen at the end of the 120 s baseline; zero until then.
         self.thresh_mild = 0.0
@@ -267,13 +270,15 @@ class FusionEngine:
                             + Config.WEIGHT_HRV * z_hrv
                             + Config.WEIGHT_HR * z_hr)
 
-        window = int(Config.PIPELINE_RATE)
+        # Use the same S_t window as the live path so mean_baseline centres
+        # on the exact distribution the classifier sees at runtime.
+        window = max(1, int(Config.S_T_SMOOTH_SEC * Config.PIPELINE_RATE))
         kernel = np.ones(window, dtype=np.float64) / window
         s_t_series = np.convolve(s_instant_series, kernel, mode='valid')
 
         # PDF Bug 7: sigma from RAW s_inst (true spread), mean from the
         # smoothed s_t series (centring matches what live classification
-        # operates on after the 1 s rolling mean).
+        # operates on after the rolling mean).
         sigma_raw = float(np.std(s_instant_series))
         sigma_smoothed = float(np.std(s_t_series))
         mean_baseline = float(np.mean(s_t_series))
@@ -398,8 +403,9 @@ class FusionEngine:
         """
         self.s_instant_buffer.append(s_instant)
 
-        # Wait until the buffer has 1 full second of data before evaluating
-        if len(self.s_instant_buffer) < int(Config.PIPELINE_RATE):
+        # Wait until the buffer has one full S_t window of data before
+        # evaluating. Under a 3 s window that is 30 samples at 10 Hz.
+        if len(self.s_instant_buffer) < self._s_t_window:
             return 0.0, "calm", 0.0
 
         s_t = sum(self.s_instant_buffer) / len(self.s_instant_buffer)

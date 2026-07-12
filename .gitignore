@@ -14,5 +14,9 @@ __pycache__/
 *.env
 config_private.py
 
+# Session recordings — never in git.
+# Each PC keeps its own local data/ folder. Do NOT rely on git to sync it.
+data/
+
 # OS files
 Thumbs.db
