@@ -160,6 +160,116 @@ def _safe(col, default=None):
         return default
 
 
+def _dominant_scenario(df, meta: dict = None):
+    """
+    Detect the scenario for a session, in priority order:
+      1. metadata.json `scenario` — written by SessionManager after the
+         first telemetry packet was seen.
+      2. Legacy `scenario` string column (transitional CSV format).
+      3. Match dynamic column names against Config.SCENARIO_PRIMARY_FIELD.
+         If a session's CSV contains e.g. a `height` column, we can
+         reasonably assume the scenario was `acrophobia`.
+      4. Legacy `height_m` column populated → 'acrophobia'.
+      5. Otherwise "".
+    """
+    from config import Config as _Cfg
+
+    # (1) metadata.json — the authoritative record.
+    if meta:
+        s = meta.get('scenario')
+        if isinstance(s, str) and s.strip():
+            return s.strip().lower()
+        # Fall back to legacy intake-form field if it happens to be there.
+        s = (meta.get('patient') or {}).get('scenario')
+        if isinstance(s, str) and s.strip():
+            return s.strip().lower()
+
+    # (2) Transitional `scenario` string column.
+    if 'scenario' in df.columns:
+        live_mask = (df['phase'] == 'LIVE') if 'phase' in df.columns \
+                    else pd.Series([True] * len(df))
+        labels = df.loc[live_mask, 'scenario'].dropna().astype(str)
+        labels = labels[labels != '']
+        if not labels.empty:
+            return labels.value_counts().idxmax().lower()
+
+    # (3) Match on dynamic column names → primary field hint.
+    for scen, primary in _Cfg.SCENARIO_PRIMARY_FIELD.items():
+        if primary in df.columns:
+            return scen
+
+    # (4) Legacy Acrophobia fallback.
+    if 'height_m' in df.columns:
+        h = pd.to_numeric(df['height_m'], errors='coerce')
+        if h.notna().any():
+            return 'acrophobia'
+
+    return ""
+
+
+def _plot_scenario_telemetry(ax, df, t, meta: dict = None):
+    """
+    Populate the bottom axis with the scenario's primary field over time.
+    Reads the field directly from the dynamic scenario column in the CSV.
+    For legacy Acrophobia sessions (only `height_m`), falls back to that
+    column so old recordings still chart identically.
+    """
+    from config import Config as _Cfg
+
+    scenario = _dominant_scenario(df, meta=meta)
+    ylabel = "telemetry"
+    primary = _Cfg.SCENARIO_PRIMARY_FIELD.get(scenario) if scenario else None
+    unit = _Cfg.SCENARIO_PRIMARY_UNIT.get(scenario, "") if scenario else ""
+
+    # Prefer the dynamic per-scenario column if present.
+    if primary and primary in df.columns:
+        series = pd.to_numeric(df[primary], errors='coerce')
+        if series.notna().any():
+            ax.plot(t, series.values, color='#ffaa00', linewidth=1.2)
+            ylabel = f"{primary} ({unit})" if unit else primary
+            ax.set_ylabel(ylabel, fontsize=9, color='#dddddd')
+            return
+    # Legacy Acrophobia CSVs (only height_m present).
+    if scenario == 'acrophobia' and 'height_m' in df.columns:
+        h = pd.to_numeric(df['height_m'], errors='coerce')
+        if h.notna().any():
+            ax.plot(t, h, color='#ffaa00', linewidth=1.2)
+            ax.set_ylabel(f"height ({unit or 'm'})",
+                          fontsize=9, color='#dddddd')
+            return
+
+    # No usable telemetry — placeholder text.
+    if scenario:
+        ax.text(0.5, 0.5,
+                f"scenario '{scenario}' — no telemetry values recorded",
+                transform=ax.transAxes, ha='center', va='center',
+                color='#666666', fontsize=10)
+    else:
+        ax.text(0.5, 0.5,
+                'no scenario telemetry recorded\n(Unity not streaming '
+                'during this session)',
+                transform=ax.transAxes, ha='center', va='center',
+                color='#666666', fontsize=10)
+    ax.set_ylabel(ylabel, fontsize=9, color='#dddddd')
+
+
+def load_session_metadata(csv_path: str) -> dict:
+    """
+    Load the FULL metadata.json for the session that owns the given
+    samples.csv, or {} if not present. Used to look up the scenario the
+    operator selected in the intake form. Silent on error.
+    """
+    folder = os.path.dirname(csv_path)
+    metadata_path = os.path.join(folder, 'metadata.json')
+    if not os.path.exists(metadata_path):
+        return {}
+    try:
+        with open(metadata_path, 'r', encoding='utf-8') as f:
+            return json.load(f) or {}
+    except Exception:
+        return {}
+
+
 def load_baseline_json(csv_path: str):
     """
     Load the baseline portion of a session.
@@ -283,7 +393,8 @@ def summarize(df: pd.DataFrame, baseline_meta: dict = None) -> dict:
 
 
 def render(df: pd.DataFrame, summary: dict, csv_path: str,
-           show: bool = True, save_path: str = None):
+           show: bool = True, save_path: str = None,
+           meta: dict = None):
     """Build the matplotlib review figure. If save_path is given, write it
     to disk (PNG/PDF per file extension) instead of (or in addition to)
     popping a window."""
@@ -348,21 +459,17 @@ def render(df: pd.DataFrame, summary: dict, csv_path: str,
         ax.plot(t, df[col], color=color, linewidth=1.1)
         ax.set_ylabel(label, fontsize=9, color='#dddddd')
 
-    # --- Balloon height (from Unity height telemetry) ---
+    # --- Scenario telemetry (adapts to whichever scenario Unity ran) ---
+    # samples.csv carries three telemetry columns per row:
+    #   height_m         legacy: populated only for Acrophobia scenarios
+    #   scenario         label of the currently-active Unity scene
+    #   telemetry_json   raw JSON of the data payload (any fields)
+    # We plot the "primary" numeric field for whichever scenario the
+    # session ran under, per Config.SCENARIO_PRIMARY_FIELD. If the
+    # scenario is unknown or the primary field is absent, we fall back
+    # to a helpful placeholder message instead of an empty axis.
     ax = axes[4]
-    if 'height_m' in df.columns:
-        h = pd.to_numeric(df['height_m'], errors='coerce')
-        if h.notna().any():
-            ax.plot(t, h, color='#ffaa00', linewidth=1.2)
-        else:
-            ax.text(0.5, 0.5, 'no height telemetry recorded',
-                    transform=ax.transAxes, ha='center', va='center',
-                    color='#666666', fontsize=10)
-    else:
-        ax.text(0.5, 0.5, 'height column not present in this CSV',
-                transform=ax.transAxes, ha='center', va='center',
-                color='#666666', fontsize=10)
-    ax.set_ylabel('Height (m)', fontsize=9, color='#dddddd')
+    _plot_scenario_telemetry(ax, df, t, meta=meta)
     axes[-1].set_xlabel("time (s)", color='#dddddd')
 
     # --- Summary text box ---
@@ -496,6 +603,7 @@ def main():
 
     df = pd.read_csv(path)
     baseline = load_baseline_json(path)
+    meta = load_session_metadata(path)
     summary = summarize(df, baseline_meta=baseline)
     cli_summary_line(summary, path)
 
@@ -503,12 +611,12 @@ def main():
         # Build the figure but don't pop a window — dump to disk and exit.
         # matplotlib will pick PDF vs PNG from the file extension.
         plt.ioff()
-        render(df, summary, path, show=False, save_path=args.save)
+        render(df, summary, path, show=False, save_path=args.save, meta=meta)
         print(f"[REVIEW] Saved review to: {args.save}")
         return
 
     if not args.no_window:
-        render(df, summary, path)
+        render(df, summary, path, meta=meta)
 
 
 if __name__ == '__main__':

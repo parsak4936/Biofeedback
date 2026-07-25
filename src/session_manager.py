@@ -121,16 +121,34 @@ class SessionManager:
     #   3. status                  phase, state, dashboard_score
     #   4. signals                 eda, hr, hrv, delta_eda, delta_hr, delta_hrv,
     #                              s_instant, s_t
-    #   5. height (from Unity)     height_m
+    #   5. scenario telemetry      <dynamic columns learned from the first
+    #                              non-empty telemetry packet Unity sends>
     #   6. diagnostic counters     artifacts_eda, artifacts_hr, artifacts_hrv
-    _SAMPLES_HEADER = ("sample_n,"
-                       "patient_first_name,patient_last_name,patient_id,"
-                       "gender,session_date,session_number,"
-                       "phase,state,dashboard_score,"
-                       "eda,hr,hrv,"
-                       "delta_eda,delta_hr,delta_hrv,s_instant,s_t,"
-                       "height_m,"
-                       "artifacts_eda,artifacts_hr,artifacts_hrv\n")
+    #
+    # Group 5 is DYNAMIC. Biofeedback is passive: whatever `data` fields
+    # the connected Unity scene emits become the CSV columns. Nothing is
+    # pre-declared or configured — the scene ships one JSON packet per
+    # tick with an arbitrary `data` object, and its keys turn into
+    # samples.csv columns in the order Unity sends them.
+    #
+    # Because Baseline rows are written BEFORE Unity Play (no telemetry
+    # yet), those rows are buffered in memory. As soon as the first
+    # non-empty telemetry packet arrives, its keys become the column
+    # list, the header is written, and the buffered rows are flushed
+    # with empty telemetry cells. If a session ends without any
+    # telemetry (e.g. physiology-only test), the header is committed
+    # with no dynamic columns and the buffer is flushed anyway.
+    #
+    # Once committed, the column set stays fixed for the whole session.
+    # Fields Unity subsequently adds are dropped (with a one-time
+    # console warning); missing fields land as empty cells.
+    _SAMPLES_HEADER_PREFIX = ("sample_n,"
+                              "patient_first_name,patient_last_name,patient_id,"
+                              "gender,session_date,session_number,"
+                              "phase,state,dashboard_score,"
+                              "eda,hr,hrv,"
+                              "delta_eda,delta_hr,delta_hrv,s_instant,s_t")
+    _SAMPLES_HEADER_SUFFIX = "artifacts_eda,artifacts_hr,artifacts_hrv"
 
     # diagnostic.csv header — `tick_n` is a 1-indexed counter of rows
     # actually written (not pipeline ticks; rows are decimated per
@@ -155,6 +173,19 @@ class SessionManager:
         self.patient_name = self.patient['first_name']
         self.patient_id = self.patient['patient_id']
         self.patient_info = f"{self.patient_name}_{self.patient_id}"
+
+        # Dynamic-column bookkeeping. Determined at runtime from the
+        # first non-empty telemetry packet Unity sends; None until then.
+        self._dynamic_fields = None          # ordered list of field names
+        self._header_committed = False       # True once samples.csv header is written
+        self._observed_scenario = ""         # remembered for metadata.json
+        # Rows that arrived before the first telemetry packet — held here
+        # until the header can be written, then flushed with empty cells
+        # in the dynamic columns.
+        self._pending_rows = []
+        # Track unknown telemetry fields we've already warned about, so
+        # runaway Unity streams don't spam the console.
+        self._unknown_field_warnings = set()
 
         # Session folder + per-file paths inside it.
         self.session_folder = _session_folder_from_env()
@@ -210,12 +241,14 @@ class SessionManager:
         self.thresh_mild = None
         self.thresh_high = None
 
-        # Open the two CSV file handles for the lifetime of the session.
-        # Opening + closing per tick costs ~ms on Windows (drags the loop
-        # below 50 Hz); a held handle makes the write essentially free.
+        # Open file handles for the lifetime of the session.
+        # samples.csv opens WITHOUT the header — the header is deferred
+        # until we have seen the first telemetry packet from Unity and
+        # can list its `data` fields as dynamic columns. All log_sample
+        # calls before that first packet buffer their rows in memory.
         self._samples_handle = None
         self._diagnostic_handle = None
-        self._open_samples(write_header=True)
+        self._open_samples(write_header=False)
         self._open_diagnostic(write_header=True)
 
         # Expose canonical paths for callers (main.py uses this for the
@@ -236,12 +269,27 @@ class SessionManager:
 
     # ---------- file-handle helpers -----------------------------------------
 
+    def _build_samples_header(self) -> str:
+        """
+        Assemble the samples.csv header string:
+            <fixed prefix>,<dynamic field 1>,...,<dynamic field N>,<fixed suffix>\n
+
+        Uses whatever `_dynamic_fields` we learned from the first Unity
+        packet. If the session never saw a packet, the dynamic slot is
+        empty and the header collapses to prefix + suffix.
+        """
+        parts = [self._SAMPLES_HEADER_PREFIX]
+        if self._dynamic_fields:
+            parts.extend(self._dynamic_fields)
+        parts.append(self._SAMPLES_HEADER_SUFFIX)
+        return ",".join(parts) + "\n"
+
     def _open_samples(self, write_header: bool):
         self._close_samples()
         self._samples_handle = open(self.samples_path, 'w',
                                     newline='', buffering=1)
         if write_header:
-            self._samples_handle.write(self._SAMPLES_HEADER)
+            self._samples_handle.write(self._build_samples_header())
             self._samples_handle.flush()
 
     def _close_samples(self):
@@ -271,7 +319,15 @@ class SessionManager:
         self._diagnostic_handle = None
 
     def close_all(self):
-        """Close both file handles. Safe to call repeatedly."""
+        """Close both file handles. Safe to call repeatedly.
+
+        If the session ended without a telemetry packet ever arriving
+        (no Unity, or physiology-only test), commit the header with no
+        dynamic columns first so the pending baseline rows still land
+        on disk instead of being silently dropped.
+        """
+        if not self._header_committed and self._samples_handle is not None:
+            self._commit_header_and_flush()
         self._close_samples()
         self._close_diagnostic()
 
@@ -292,7 +348,13 @@ class SessionManager:
         self.stress_history = {
             's_instant': [], 's_t': [], 'state': [], 'dashboard_score': [],
         }
-        self._open_samples(write_header=True)
+        # Fresh file, defer header until the first LIVE-restart telemetry
+        # packet arrives (matches the session-start behaviour).
+        self._dynamic_fields = None
+        self._header_committed = False
+        self._pending_rows = []
+        self._unknown_field_warnings.clear()
+        self._open_samples(write_header=False)
         # Reset both counters so the new run starts at sample_n=1 and the
         # decimation gate fires on its first call.
         self._samples_call_count = 0
@@ -309,7 +371,8 @@ class SessionManager:
                    delta_eda: float = 0.0, delta_hr: float = 0.0, delta_hrv: float = 0.0,
                    s_instant: float = None, s_t: float = None,
                    state: str = None, dashboard_score: float = None,
-                   height_m=None):
+                   height_m=None,        # accepted + ignored (back-compat)
+                   scenario: str = "", telemetry_data: dict = None):
         """
         Append one row to samples.csv (held handle, single fwrite).
 
@@ -331,42 +394,121 @@ class SessionManager:
             return  # decimated — skip this tick
         self._samples_row_n += 1
 
-        p = self.patient
-        # height_m can be None (Unity not streaming yet); empty cell on
-        # disk is the convention pandas / Excel parse as NaN.
-        if height_m is None:
-            height_str = ""
+        # ---- First non-empty telemetry: commit the header now. ----
+        # The dynamic columns are the keys of Unity's `data` object, in
+        # the order Unity sends them. `scenario` is remembered for
+        # metadata.json but does NOT become a CSV column.
+        if telemetry_data and not self._header_committed:
+            self._dynamic_fields = list(telemetry_data.keys())
+            if scenario:
+                self._observed_scenario = scenario.strip().lower()
+            self._commit_header_and_flush()
+
+        # ---- Warn once per unknown late-arriving field ----
+        # If Unity starts adding new fields after the header has been
+        # committed, they get dropped. Log the first offender per field
+        # so drift between scenes shows up in the console instead of
+        # silently disappearing from the CSV.
+        if telemetry_data and self._header_committed:
+            for fname in telemetry_data:
+                if (fname not in self._dynamic_fields
+                        and fname not in self._unknown_field_warnings):
+                    self._unknown_field_warnings.add(fname)
+                    print(f"[SESSION] WARN: telemetry field {fname!r} "
+                          f"appeared AFTER the header was committed. It "
+                          f"will not be written to samples.csv this "
+                          f"session — restart the session to include it.")
+
+        # ---- Build the row (independent of whether we write or buffer) ----
+        row = self._format_row(
+            eda=eda, hr=hr, hrv=hrv,
+            delta_eda=delta_eda, delta_hr=delta_hr, delta_hrv=delta_hrv,
+            s_instant=s_instant, s_t=s_t,
+            state=state, dashboard_score=dashboard_score,
+            telemetry_data=telemetry_data,
+        )
+
+        if self._header_committed:
+            self._samples_handle.write(row)
         else:
+            # Buffer until the first telemetry packet — or until close_all
+            # flushes with no dynamic columns if none ever arrives.
+            self._pending_rows.append(row)
+
+    def _format_row(self, *, eda, hr, hrv, delta_eda, delta_hr, delta_hrv,
+                     s_instant, s_t, state, dashboard_score,
+                     telemetry_data):
+        """
+        Build one samples.csv row string. Dynamic-column cells use the
+        current `_dynamic_fields`, formatting each value out of
+        `telemetry_data`. Missing / non-registered fields become empty
+        cells; unknown late-arriving fields are ignored.
+        """
+        p = self.patient
+        cell_values = []
+        for fname in (self._dynamic_fields or []):
+            if not telemetry_data or fname not in telemetry_data:
+                cell_values.append("")
+                continue
+            v = telemetry_data[fname]
             try:
-                height_str = f"{float(height_m):.3f}"
+                fv = float(v)
+                # bool first because bool is a subtype of int in Python.
+                if isinstance(v, bool):
+                    cell_values.append("1" if v else "0")
+                elif isinstance(v, int) or fv.is_integer():
+                    cell_values.append(f"{int(fv)}")
+                else:
+                    cell_values.append(f"{fv:.3f}")
             except (TypeError, ValueError):
-                height_str = ""
-        self._samples_handle.write(
-            # 1. row index
+                # Non-numeric value — keep it as-is, CSV-quoted.
+                s = str(v).replace('"', '""')
+                cell_values.append(f'"{s}"')
+
+        dyn = ",".join(cell_values)
+        # Comma-join yields "" when there are zero fields; guard against
+        # a collapsed double-comma in that case.
+        if dyn:
+            dyn += ","
+
+        return (
             f"{self._samples_row_n},"
-            # 2. person info
             f"{p['first_name']},{p['last_name']},{p['patient_id']},"
             f"{p['gender']},{p['session_date']},{p['session_number']},"
-            # 3. status
             f"{self.phase},"
             f"{state if state else 'unknown'},"
             f"{dashboard_score if dashboard_score is not None else 0.0:.4f},"
-            # 4. signals -- 6 decimal places to preserve very small EDA
-            # values (down to 1e-6 uS) so an audit can reconstruct the
-            # exact trace later. The previous :.4f rounded values below
-            # 0.0001 uS down to 0.0000, which masked the difference
-            # between "sensor dead" and "low but real contact".
             f"{eda:.6f},{hr:.6f},{hrv:.6f},"
             f"{delta_eda:.6f},{delta_hr:.6f},{delta_hrv:.6f},"
             f"{s_instant if s_instant is not None else 0.0:.6f},"
             f"{s_t if s_t is not None else 0.0:.6f},"
-            # 5. height (from Unity, blank if not streaming)
-            f"{height_str},"
-            # 6. diagnostic counters
+            f"{dyn}"
             f"{self.artifacts_removed.get('eda', 0)},"
             f"{self.artifacts_removed.get('hr', 0)},"
             f"{self.artifacts_removed.get('hrv', 0)}\n"
         )
+
+    def _commit_header_and_flush(self):
+        """
+        Write the samples.csv header using the (now-known) dynamic-field
+        list and flush every buffered row to disk. Idempotent — safe to
+        call more than once; second call is a no-op.
+        """
+        if self._header_committed:
+            return
+        if self._samples_handle is None:
+            return
+        self._samples_handle.write(self._build_samples_header())
+        for row in self._pending_rows:
+            self._samples_handle.write(row)
+        self._samples_handle.flush()
+        n = len(self._pending_rows)
+        self._pending_rows = []
+        self._header_committed = True
+        cols = self._dynamic_fields or []
+        print(f"[SESSION] samples.csv header committed with "
+              f"{len(cols)} dynamic column(s): {cols}. "
+              f"Flushed {n} buffered row(s).")
 
     def log_diagnostic_row(self, status: str,
                             raw_eda: float, raw_hr: float, raw_hrv: float):
@@ -499,6 +641,12 @@ class SessionManager:
             },
         }
         self.metadata['baseline'] = baseline_record
+        # Persist the scenario we learned from Unity's first telemetry
+        # packet (if any). Session_review reads this back to label the
+        # bottom telemetry panel; harmless when empty (session never had
+        # a Unity scene connected).
+        if self._observed_scenario:
+            self.metadata['scenario'] = self._observed_scenario
         with open(self.metadata_path, 'w', encoding='utf-8') as f:
             json.dump(self.metadata, f, indent=2)
         print(f"[SESSION] Baseline captured into metadata.json")

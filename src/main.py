@@ -96,12 +96,16 @@ def run_pipeline():
     # trivial to correlate UDP packets with the recorded stress trace
     # and the diagnostic per-tick log.
     unity = UnityUDPBridge(audit_log_path=session.unity_udp_path)
-    # Background thread listens on UDP for Unity's height telemetry
-    # ("height,N.NNN" packets, default port 5006). The latest value
-    # is read each tick and broadcast on LSL channel 24 + written
-    # to the samples CSV.
-    from height_receiver import HeightReceiver
-    height_rx = HeightReceiver()
+    # Background thread listens on UDP for Unity's scenario-agnostic
+    # telemetry JSON packets (default port 5006). The latest snapshot
+    # is read each tick, broadcast on the dedicated telemetry LSL stream
+    # (Biofeedback_Telemetry) for the dashboard's scene panel, and
+    # written to samples.csv (`scenario` + `telemetry_json` columns).
+    # For the Acrophobia scenario, `height_m` is also populated on the
+    # main LSL stream for backward compatibility with the height chart.
+    # See UNITY_TELEMETRY_CONTRACT.md for the packet spec.
+    from telemetry_receiver import TelemetryReceiver
+    telemetry_rx = TelemetryReceiver()
     control = ControlSubscriber()  # blocks until dashboard publishes
     acq = BiofeedbackAcquisition()
     proc = SignalProcessor()
@@ -515,10 +519,20 @@ def run_pipeline():
                 avg_eda = running.get('eda', 0.0)
                 avg_hr  = running.get('hr',  0.0)
                 avg_hrv = running.get('hrv', 0.0)
-            # Pull the latest balloon height from Unity if it's streaming
-            # back; None when no telemetry has arrived (channel encodes
-            # that as NaN; CSV writer leaves the cell empty).
-            current_height = height_rx.get_height()
+            # Pull the latest telemetry snapshot from Unity if it is
+            # streaming back. get_telemetry() is scenario-agnostic — the
+            # scenario label (e.g. "acrophobia") and the raw data dict go
+            # verbatim into samples.csv, and .get_height() returns metres
+            # only when the current scenario's payload contains a
+            # height-like field. Everything else is None / "" / empty
+            # dict, and the CSV / LSL writers treat that as "not streaming".
+            current_scenario, current_telemetry = telemetry_rx.get_telemetry()
+            current_height = telemetry_rx.get_height()
+            # Publish the raw scenario + data payload to the dashboard's
+            # dedicated telemetry stream. Runs every tick regardless of
+            # pipeline phase so the operator sees the scene panel populate
+            # even before Start Baseline.
+            out.broadcast_telemetry(current_scenario, current_telemetry)
             out.broadcast_state(
                 s_t, state_label, dashboard,
                 smoothed_vector[0], smoothed_vector[1], smoothed_vector[2],
@@ -555,7 +569,9 @@ def run_pipeline():
                 session.log_sample(smoothed_vector[0], smoothed_vector[1], smoothed_vector[2],
                                    deltas['eda'], deltas['hr'], deltas['hrv'],
                                    s_inst, s_t, state_label, dashboard,
-                                   height_m=current_height)
+                                   height_m=current_height,
+                                   scenario=current_scenario,
+                                   telemetry_data=current_telemetry)
             elif state == SessionState.BASELINE:
                 # `state` column is "baseline" during the calibration phase
                 # (not the default "unknown"), so post-hoc tools and
@@ -565,7 +581,9 @@ def run_pipeline():
                 # streaming (it usually is not pre-Start-Live, so cell is empty).
                 session.log_sample(smoothed_vector[0], smoothed_vector[1], smoothed_vector[2],
                                    state="baseline",
-                                   height_m=current_height)
+                                   height_m=current_height,
+                                   scenario=current_scenario,
+                                   telemetry_data=current_telemetry)
             # else (IDLE / BASELINE_DONE / STOPPED): no samples.csv row.
 
             session.log_diagnostic_row(
@@ -604,7 +622,7 @@ def run_pipeline():
             pass
         unity.close()
         try:
-            height_rx.close()
+            telemetry_rx.close()
         except Exception:
             pass
 

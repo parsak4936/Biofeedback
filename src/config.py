@@ -414,17 +414,58 @@ class Config:
     UDP_GATE_WARMUP_SEC = 1.5
 
     # ============================================
-    # HEIGHT TELEMETRY (Unity -> Python, balloon altitude in meters)
+    # UNITY TELEMETRY (Unity -> Python, scenario-agnostic)
     # ============================================
-    # Unity's BioFeedbackMiddleware.SendHeightTelemetry sends UDP packets
-    # of the form "height,12.345" to the host/port below at telemetryRateHz
-    # (default 10 Hz, set in the Unity .cs file). The Python side opens a
-    # UDP socket here, parses incoming packets, exposes the latest height
-    # to main.py (broadcast on LSL channel 24 + written to samples.csv).
-    HEIGHT_TELEMETRY_ENABLED = True       # listen for Unity height packets
-    HEIGHT_TELEMETRY_HOST = '0.0.0.0'     # bind address; 0.0.0.0 = any interface
-    HEIGHT_TELEMETRY_PORT = 5006          # must match Unity's telemetryPort
-    HEIGHT_TELEMETRY_STALE_SEC = 5.0      # if no packet for this long, hold last
+    # Every VR scenario (Acrophobia, Arachnophobia, Fear of Public Speaking,
+    # future ones) sends one small JSON packet per Unity tick over UDP at
+    # this host:port, throttled to 10 Hz. One packet shape for all
+    # scenarios — see UNITY_TELEMETRY_CONTRACT.md for the full spec.
+    #
+    #     {"scenario": "acrophobia",      "data": {"height": 12.345}}
+    #     {"scenario": "arachnophobia",   "data": {"size": 1.5, "count": 3}}
+    #     {"scenario": "public_speaking", "data": {"looking": 42,
+    #                                               "audience": 100}}
+    #
+    # Whatever `data` fields Unity emits are stored verbatim by biofeedback.
+    # No Python change is needed when a new phobia is added.
+    TELEMETRY_ENABLED = True        # listen for Unity telemetry packets
+    TELEMETRY_HOST = '0.0.0.0'      # bind address; 0.0.0.0 = any interface
+    TELEMETRY_PORT = 5006           # must match Unity's telemetryPort
+    TELEMETRY_STALE_SEC = 5.0       # older than this: treat as "no telemetry"
+
+    # JSON key names — both required in every packet. Change these only if
+    # the Unity teammate insists on a different naming (unlikely).
+    TELEMETRY_SCENARIO_KEY = "scenario"
+    TELEMETRY_DATA_KEY = "data"
+
+    # LSL output stream for the dashboard's scene panel. String-format,
+    # one JSON string per sample at PIPELINE_RATE. Complements the
+    # existing float-format `OUT_STREAM_NAME` (Biofeedback_State).
+    TELEMETRY_LSL_STREAM_NAME = "Biofeedback_Telemetry"
+    TELEMETRY_LSL_STREAM_TYPE = "Telemetry"
+
+    # Optional dashboard hint: which field of the `data` object to plot
+    # on the scene panel's live chart for a known scenario. Purely a
+    # display hint — samples.csv columns are always the raw fields
+    # Unity sends, unrestricted. If the scenario is not listed here the
+    # scene panel just picks the first numeric field it sees.
+    #
+    # Keys are scenario labels (lowercase) that match whatever Unity
+    # puts in the `scenario` JSON header. Add entries here only if you
+    # want the dashboard chart to prefer a specific field on that scene.
+    SCENARIO_PRIMARY_FIELD = {
+        'acrophobia':      'height',    # metres above ground
+        'arachnophobia':   'count',     # number of spiders in view
+        'public_speaking': 'looking',   # audience members looking at speaker
+    }
+
+    # Human-readable unit for the primary field, appended to the scene
+    # panel's live readout. Same keys as SCENARIO_PRIMARY_FIELD.
+    SCENARIO_PRIMARY_UNIT = {
+        'acrophobia':      'm',
+        'arachnophobia':   '',
+        'public_speaking': '',
+    }
 
     # ============================================
     # REAL PLUX OPENSIGNALS LSL CONFIG

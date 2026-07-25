@@ -1,18 +1,28 @@
 # src/output.py
 """
-LSL output bridge for the operator dashboard.
+LSL output bridges for the operator dashboard.
 
-Publishes one stream named `Biofeedback_State` at 50 Hz. The dashboard
-subscribes and draws from it. Unity does not need this stream: it gets
-its decisions over the separate UDP bridge in `unity_bridge.py`. The
-LSL stream is for the dashboard, the audit pipeline, and any future
-analysis tools.
+Two LSL streams are published so the dashboard sees everything it needs:
 
-The channel layout is fixed and lives below as a class attribute. Any
-consumer can rely on it by index. 25 channels total.
+  1. `Biofeedback_State` (float32, 25 fixed channels) — physiology,
+     session state, thresholds, Unity command stats. Channel 24
+     carries `height_m` from the Acrophobia scene only (NaN otherwise);
+     kept for backward compatibility with the existing height chart /
+     session_review analytics.
+
+  2. `Biofeedback_Telemetry` (string, 1 channel) — scenario-agnostic
+     per-tick JSON envelope from the VR scene. String format so any
+     future scenario can add / remove fields without changing the LSL
+     channel schema.
+
+Unity does not subscribe to either stream — it receives its own
+"increase / decrease / start / stop" decisions over the UDP bridge in
+`unity_bridge.py`. These streams are for the operator dashboard, the
+audit pipeline, and any post-hoc analysis tools.
 """
 
-from pylsl import StreamInfo, StreamOutlet
+import json
+from pylsl import StreamInfo, StreamOutlet, cf_string
 from config import Config
 
 
@@ -53,6 +63,7 @@ class UnityBridge:
     ]
 
     def __init__(self):
+        # ---- Primary numeric stream (unchanged 25-channel layout) ----
         self.info = StreamInfo(
             name=Config.OUT_STREAM_NAME,
             type=Config.OUT_STREAM_TYPE,
@@ -64,6 +75,21 @@ class UnityBridge:
         self.outlet = StreamOutlet(self.info)
         print(f"[OUTPUT] LSL outlet '{Config.OUT_STREAM_NAME}' opened "
               f"({len(self.CHANNELS)} channels).")
+
+        # ---- Secondary telemetry stream (scenario-agnostic JSON) ----
+        # One channel per sample, string format, one JSON envelope per
+        # tick. Empty string when the receiver has no fresh packet.
+        self.telemetry_info = StreamInfo(
+            name=Config.TELEMETRY_LSL_STREAM_NAME,
+            type=Config.TELEMETRY_LSL_STREAM_TYPE,
+            channel_count=1,
+            nominal_srate=Config.PIPELINE_RATE,
+            channel_format=cf_string,
+            source_id='python_fusion_engine_telemetry'
+        )
+        self.telemetry_outlet = StreamOutlet(self.telemetry_info)
+        print(f"[OUTPUT] LSL outlet '{Config.TELEMETRY_LSL_STREAM_NAME}' "
+              f"opened (1 string channel).")
 
     def broadcast_state(self, s_t: float, state_label: str, dashboard_score: float,
                         eda: float, hr: float, hrv: float,
@@ -107,3 +133,30 @@ class UnityBridge:
             float('nan') if height_m is None else float(height_m),
         ]
         self.outlet.push_sample(vector)
+
+    def broadcast_telemetry(self, scenario: str, data: dict):
+        """Publish one JSON envelope on the telemetry string stream.
+
+        Called once per tick alongside broadcast_state. When the receiver
+        has no fresh packet (Unity not running yet, or telemetry stale),
+        an empty string is pushed so the dashboard sees "no telemetry"
+        instead of a stale value.
+
+        The envelope shape mirrors the Unity → Python contract exactly
+        (see UNITY_TELEMETRY_CONTRACT.md), so a downstream tool that
+        already knows how to parse a Unity packet can consume the LSL
+        stream identically.
+        """
+        if not scenario:
+            self.telemetry_outlet.push_sample([""])
+            return
+        envelope = {
+            Config.TELEMETRY_SCENARIO_KEY: scenario,
+            Config.TELEMETRY_DATA_KEY: data or {},
+        }
+        try:
+            payload = json.dumps(envelope,
+                                  separators=(',', ':'), ensure_ascii=True)
+        except (TypeError, ValueError):
+            payload = ""
+        self.telemetry_outlet.push_sample([payload])

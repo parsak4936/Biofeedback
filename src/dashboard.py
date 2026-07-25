@@ -39,6 +39,20 @@ from PyQt5.QtWidgets import (
 )
 from pylsl import resolve_byprop, resolve_stream, StreamInlet
 
+
+def _format_scene_value(v):
+    """Render a telemetry value for the scene panel. Floats get 2 decimals
+    unless they're clearly integers; ints stay bare; anything else is str()."""
+    if isinstance(v, bool):
+        return "true" if v else "false"
+    if isinstance(v, int):
+        return str(v)
+    if isinstance(v, float):
+        if v.is_integer():
+            return f"{int(v)}"
+        return f"{v:.2f}"
+    return str(v)
+
 from config import Config
 from session_control import Command, ControlPublisher, SessionState
 
@@ -91,6 +105,21 @@ class ClinicalDashboard:
         self._ecg_last_retry_time = 0.0
         self._ecg_retry_interval_sec = 2.0
         self._try_attach_ecg(initial=True)
+
+        # Optional telemetry side stream. Same lazy-attach pattern as ECG:
+        # main.py opens the outlet at startup, we retry until it appears.
+        # Feeds the scene panel (scenario label, key/value grid, primary-
+        # field chart). Absent stream = scene panel stays in its "waiting
+        # for Unity" empty state, physiology charts work unchanged.
+        self.telemetry_inlet = None
+        self._telemetry_last_retry_time = 0.0
+        self._telemetry_retry_interval_sec = 2.0
+        # Latest telemetry snapshot rendered on the scene panel.
+        self.latest_scenario = ""
+        self.latest_scene_data = {}
+        # Rolling history of the primary field for the scene panel chart.
+        self.scene_chart_data = {'x': [], 'y': []}
+        self._try_attach_telemetry(initial=True)
 
         # ---- Control publisher (button clicks -> main.py) ----
         self.control = ControlPublisher()
@@ -388,14 +417,18 @@ class ClinicalDashboard:
         self.label_time_ultra  = QLabel("ULTRA 00:00")
         self.label_s_t_card    = QLabel("S_t --")
         self.label_score_card  = QLabel("Score --")
-        self.label_height_card = QLabel("Height -- m")
+        # Scenario-agnostic card. Shows the primary field of whichever
+        # scenario Unity is currently emitting (height for acrophobia,
+        # count for arachnophobia, looking for public_speaking, per
+        # Config.SCENARIO_PRIMARY_FIELD). "Scene --" when no telemetry.
+        self.label_scene_card = QLabel("Scene --")
         for lab, edge in (
             (self.label_time_calm,   "#7bc89a"),
             (self.label_time_stress, "#d4b86a"),
             (self.label_time_ultra,  "#d68a8a"),
             (self.label_s_t_card,    "#a0c4d9"),
             (self.label_score_card,  "#a0c4d9"),
-            (self.label_height_card, "#d4b86a"),
+            (self.label_scene_card,  "#d4b86a"),
         ):
             lab.setFont(QFont("Arial", 9, QFont.Bold))
             lab.setAlignment(Qt.AlignCenter)
@@ -418,7 +451,7 @@ class ClinicalDashboard:
         # Backwards-compat aliases. update_dashboard still writes to these
         # variable names; we forward them to the merged label or to no-ops.
         self.label_deltas = self.label_s_t
-        self.label_height = self.label_height_card
+        self.label_height = self.label_scene_card  # old name → scene card
         self.label_thresholds = self.label_s_t   # rolled into deltas line
         self.label_gate = self.label_s_t          # rolled into deltas line
         self.label_unity = self.label_s_t          # rolled into deltas line
@@ -435,7 +468,9 @@ class ClinicalDashboard:
         # ====================================================================
         from PyQt5.QtWidgets import QGridLayout
         self.plot_stress = self._create_stress_plot()
-        self.plot_height = self._create_height_plot()
+        # Scene panel replaces the old Balloon Height chart. Adapts to
+        # whatever scenario Unity is emitting (see _create_scene_panel).
+        self.scene_widget = self._create_scene_panel()
         # plot_deltas is built but not displayed. update_dashboard still
         # references its curves; they buffer invisibly. Keeps the change
         # contained to layout only.
@@ -457,7 +492,7 @@ class ClinicalDashboard:
         chart_grid = QGridLayout()
         chart_grid.setSpacing(6)
         chart_grid.addWidget(self.plot_stress, 0, 0)
-        chart_grid.addWidget(self.plot_height, 0, 1)
+        chart_grid.addWidget(self.scene_widget, 0, 1)
         chart_grid.setColumnStretch(0, 1)
         chart_grid.setColumnStretch(1, 1)
         v.addLayout(chart_grid, 1)   # all remaining space goes to the charts
@@ -465,7 +500,7 @@ class ClinicalDashboard:
         return group
 
     def _build_qa_strip(self):
-        """Bottom-of-screen data-quality counters."""
+        """Bottom-of-screen data-quality counters + Unity link indicator."""
         layout = QHBoxLayout()
         group = QGroupBox("Data Quality")
         group.setStyleSheet("QGroupBox::title { color: #a0c4d9; }")
@@ -480,6 +515,24 @@ class ClinicalDashboard:
             lab.setStyleSheet("color: #888888; margin-right: 18px;")
             gv.addWidget(lab)
         gv.addStretch()
+
+        # Unity telemetry link status pill. Painted red/gray until the
+        # first packet arrives, then green while packets keep flowing,
+        # amber when the receiver goes stale (>2 s without a packet).
+        # Text updates every tick in _refresh_unity_link_pill().
+        self.label_unity_link = QLabel("● UNITY  waiting…")
+        self.label_unity_link.setFont(QFont("Arial", 10, QFont.Bold))
+        self.label_unity_link.setStyleSheet(
+            "color: #888888; padding: 3px 10px; "
+            "background-color: #1c1c1c; border: 1px solid #333333; "
+            "border-radius: 3px; margin-left: 10px;"
+        )
+        # Track packet flow so the pill can show a rolling packet-rate.
+        self._unity_last_packet_wall = 0.0
+        self._unity_packet_count = 0
+        self._unity_recent_stamps = []  # sliding 2-second window
+        gv.addWidget(self.label_unity_link)
+
         layout.addWidget(group)
         return layout
 
@@ -561,26 +614,71 @@ class ClinicalDashboard:
         plot_widget.addLegend(offset=(10, 10))
         return plot_widget
 
-    def _create_height_plot(self):
-        """Live-session chart of the balloon altitude streamed back from
-        Unity on UDP 5006. NaN cells (Unity not streaming) are simply
-        skipped so the curve does not draw a spurious zero line."""
-        plot_widget = pg.PlotWidget(
-            title="Balloon Height (m, from Unity)",
-            labels={'left': 'Height (m)', 'bottom': 'Time (samples)'}
+    def _create_scene_panel(self):
+        """
+        Scenario-agnostic panel that replaces the old Balloon Height chart.
+
+        Layout (top to bottom):
+          1. Scenario label — "Scene: ACROPHOBIA" or "waiting for Unity"
+          2. Key/value grid — every field of the current data payload
+          3. Primary-field chart — the field named in
+             Config.SCENARIO_PRIMARY_FIELD for the active scenario. When
+             the scenario is unknown or has no primary field configured,
+             the chart region shows a "no primary field" placeholder.
+
+        All three elements are populated in update_dashboard from the
+        Biofeedback_Telemetry LSL stream. The panel gracefully handles
+        every state: no Unity connected, Unity connected but stale,
+        unknown scenario, known scenario with new fields.
+        """
+        from PyQt5.QtWidgets import (QWidget, QVBoxLayout, QGridLayout,
+                                      QLabel, QSizePolicy)
+
+        container = QWidget()
+        container.setStyleSheet("background-color: #0a0a0a;")
+        outer = QVBoxLayout(container)
+        outer.setContentsMargins(6, 6, 6, 6)
+        outer.setSpacing(6)
+
+        # --- Scenario label at top ---
+        self.label_scenario = QLabel("Scene: (waiting for Unity)")
+        self.label_scenario.setFont(QFont("Arial", 13, QFont.Bold))
+        self.label_scenario.setStyleSheet("color: #d4b86a; padding: 2px;")
+        self.label_scenario.setAlignment(Qt.AlignCenter)
+        outer.addWidget(self.label_scenario)
+
+        # --- Key/value grid ---
+        # QGridLayout inside its own widget so we can clear it wholesale
+        # each tick without disturbing the outer layout.
+        self.scene_kv_container = QWidget()
+        self.scene_kv_container.setStyleSheet(
+            "color: #dddddd; font-family: Consolas, monospace;"
         )
-        plot_widget.showGrid(x=True, y=True, alpha=0.25)
-        plot_widget.setMouseEnabled(x=True, y=False)
-        plot_widget.enableAutoRange(axis=pg.ViewBox.XAxis, enable=False)
-        plot_widget.enableAutoRange(axis=pg.ViewBox.YAxis, enable=False)
-        plot_widget.setYRange(*Config.HEIGHT_PLOT_DEFAULT_RANGE, padding=0)
-        plot_widget.setMenuEnabled(False)
-        plot_widget.hideButtons()
-        plot_widget.setStyleSheet("border: 1px solid #2c2c2c;")
-        self.curve_height = plot_widget.plot(
+        self.scene_kv_container.setSizePolicy(QSizePolicy.Expanding,
+                                                QSizePolicy.Minimum)
+        self.scene_kv_layout = QGridLayout(self.scene_kv_container)
+        self.scene_kv_layout.setContentsMargins(4, 2, 4, 2)
+        self.scene_kv_layout.setSpacing(3)
+        outer.addWidget(self.scene_kv_container)
+
+        # --- Primary-field chart at the bottom ---
+        self.plot_scene = pg.PlotWidget(
+            title="",
+            labels={'left': 'value', 'bottom': 'Time (samples)'}
+        )
+        self.plot_scene.showGrid(x=True, y=True, alpha=0.25)
+        self.plot_scene.setMouseEnabled(x=True, y=False)
+        self.plot_scene.enableAutoRange(axis=pg.ViewBox.XAxis, enable=False)
+        self.plot_scene.enableAutoRange(axis=pg.ViewBox.YAxis, enable=True)
+        self.plot_scene.setMenuEnabled(False)
+        self.plot_scene.hideButtons()
+        self.plot_scene.setStyleSheet("border: 1px solid #2c2c2c;")
+        self.curve_scene = self.plot_scene.plot(
             [], [], pen=pg.mkPen('#d4b86a', width=2)
         )
-        return plot_widget
+        outer.addWidget(self.plot_scene, 1)  # chart takes remaining space
+
+        return container
 
     def _create_signal_plot(self, title: str, color: str, y_range=None):
         plot_widget = pg.PlotWidget(
@@ -725,7 +823,12 @@ class ClinicalDashboard:
         live_elapsed_sec = float(sample[21])
         unity_cmd_code   = int(sample[22])
         unity_cmd_total  = int(sample[23])
-        balloon_height_m = float(sample[24])  # NaN until Unity streams
+        # sample[24] is still `height_m` on the LSL stream for backward
+        # compatibility with any external consumer of the primary stream,
+        # but the dashboard no longer draws it here — the Scene panel
+        # subscribes to the Biofeedback_Telemetry string stream and
+        # renders whatever scenario Unity is emitting (see below).
+        _ = float(sample[24])  # read to keep the tuple index shape stable
 
         # If main's state changed, refresh the button enable/disable picture.
         if session_state != self._last_state_observed:
@@ -928,25 +1031,19 @@ class ClinicalDashboard:
             diag_bits.append(unity_str)
         self.label_s_t.setText("   |   ".join(b for b in diag_bits if b))
 
-        # ---- Balloon-height telemetry from Unity ----
-        # channel 24 carries the height in meters, NaN when Unity isn't
-        # streaming. Skip the chart append when NaN so we don't draw
-        # a spurious zero line, but still update the label.
-        import math
-        # label_height aliases label_height_card; reformat for the card
-        # (two lines, big number) rather than the old inline label form.
-        if math.isfinite(balloon_height_m):
-            self.label_height_card.setText(f"Height {balloon_height_m:.1f} m")
-            self.height_data['x'].append(self.tick_counter)
-            self.height_data['y'].append(balloon_height_m)
-            if len(self.height_data['x']) > self.max_history:
-                self.height_data['x'].pop(0); self.height_data['y'].pop(0)
-            self.curve_height.setData(self.height_data['x'], self.height_data['y'])
+        # ---- Scene panel telemetry (from Biofeedback_Telemetry) ----
+        # Pull the newest packet, parse JSON, refresh the scenario label,
+        # the key/value grid, and the primary-field chart. All work is
+        # scenario-agnostic: whatever fields Unity sends are rendered
+        # verbatim. Lazy-attach the inlet the first few seconds until
+        # main.py's outlet resolves.
+        self._try_attach_telemetry(initial=False)
+        if self.telemetry_inlet is not None:
+            self._pump_telemetry_and_render()
         else:
-            self.label_height_card.setText("Height -- m")
-        self.plot_height.setXRange(
-            max(0, self.tick_counter - self.view_width), self.tick_counter
-        )
+            # Inlet not up yet: still refresh the pill so the operator
+            # sees "waiting…" instead of a frozen state.
+            self._refresh_unity_link_pill()
 
         # ---- Time-in-state (LIVE only) ----
         # Count every sample we just drained (not 1 per timer fire),
@@ -1026,6 +1123,233 @@ class ClinicalDashboard:
         except Exception as e:
             if initial:
                 print(f"[DASHBOARD] ECG side stream lookup failed ({e}); "
+                      f"will retry in the update loop.")
+
+    def _pump_telemetry_and_render(self):
+        """
+        Pull every buffered sample from the telemetry inlet, keep the
+        most recent JSON envelope, update the scene panel widgets, and
+        append the primary field's value to the scene chart.
+
+        Called from update_dashboard once the inlet is attached. Cheap
+        — one pull_chunk per timer fire plus a handful of Qt widget
+        updates. String stream so we get list-of-strings back.
+        """
+        import json
+        import time as _time
+        try:
+            chunk, _ = self.telemetry_inlet.pull_chunk(timeout=0.0)
+        except Exception:
+            return
+        # Refresh the Unity link pill on EVERY tick so "stale" can be
+        # detected even when no chunk arrives this fire.
+        self._refresh_unity_link_pill()
+        if not chunk:
+            # No new telemetry this tick. Do NOT clear the panel — hold
+            # the last-known scenario/values so brief network jitter
+            # doesn't blink the UI.
+            return
+
+        # Take the newest packet only; older ones in the chunk are stale.
+        # Also count every non-empty payload seen so the Unity link pill
+        # can display a rolling packet-rate.
+        newest = None
+        now = _time.time()
+        for row in chunk:
+            payload = (row[0] if isinstance(row, (list, tuple)) and row
+                       else row)
+            if payload:
+                newest = payload
+                self._unity_packet_count += 1
+                self._unity_recent_stamps.append(now)
+                self._unity_last_packet_wall = now
+        # Prune the 2-second sliding window used for the pill's rate readout.
+        cutoff = now - 2.0
+        while (self._unity_recent_stamps
+               and self._unity_recent_stamps[0] < cutoff):
+            self._unity_recent_stamps.pop(0)
+
+        if newest is None:
+            # Every payload in the chunk was empty ("no telemetry" from
+            # main.py). Reset the panel to its waiting state.
+            if self.latest_scenario:
+                self.latest_scenario = ""
+                self.latest_scene_data = {}
+                self._refresh_scene_panel()
+            return
+
+        try:
+            envelope = json.loads(newest)
+        except (ValueError, TypeError):
+            return
+        scenario = envelope.get(Config.TELEMETRY_SCENARIO_KEY, "")
+        data = envelope.get(Config.TELEMETRY_DATA_KEY, {})
+        if not isinstance(scenario, str) or not isinstance(data, dict):
+            return
+
+        self.latest_scenario = scenario
+        self.latest_scene_data = data
+        self._refresh_scene_panel()
+
+        # Append the primary field's value to the chart if configured.
+        primary_key = Config.SCENARIO_PRIMARY_FIELD.get(scenario.lower())
+        if primary_key and primary_key in data:
+            try:
+                value = float(data[primary_key])
+            except (TypeError, ValueError):
+                value = None
+            if value is not None:
+                self.scene_chart_data['x'].append(self.tick_counter)
+                self.scene_chart_data['y'].append(value)
+                if len(self.scene_chart_data['x']) > self.max_history:
+                    self.scene_chart_data['x'].pop(0)
+                    self.scene_chart_data['y'].pop(0)
+                self.curve_scene.setData(self.scene_chart_data['x'],
+                                          self.scene_chart_data['y'])
+
+        self.plot_scene.setXRange(
+            max(0, self.tick_counter - self.view_width),
+            self.tick_counter,
+        )
+
+    def _refresh_unity_link_pill(self):
+        """
+        Repaint the Unity link pill so the operator always knows whether
+        biofeedback is receiving telemetry from Unity. Three states:
+
+          gray   — no packet has ever arrived (waiting).
+          green  — packets are flowing (last <2 s + rate > 0).
+          amber  — a packet HAS arrived at some point, but the link has
+                   gone silent for >2 s (Unity paused, VR cable pulled,
+                   scene not in Play mode).
+
+        Format:
+          "● UNITY  waiting…"                             (never seen)
+          "● UNITY  acrophobia • 10.2 Hz • 128 pkts"      (live)
+          "● UNITY  acrophobia • STALE 4.2s • 128 pkts"   (dropped)
+        """
+        import time as _time
+        now = _time.time()
+
+        if self._unity_last_packet_wall == 0.0:
+            color = "#888888"       # gray dot, gray text
+            text = "● UNITY  waiting…"
+        else:
+            age = now - self._unity_last_packet_wall
+            rate = len(self._unity_recent_stamps) / 2.0
+            scen = (self.latest_scenario or "unknown").upper()
+            total = self._unity_packet_count
+            if age <= 2.0:
+                color = "#7bc89a"    # green: healthy link
+                text = (f"● UNITY  {scen} • {rate:.1f} Hz "
+                        f"• {total} pkts")
+            else:
+                color = "#d4b86a"    # amber: went silent
+                text = (f"● UNITY  {scen} • STALE {age:.1f}s "
+                        f"• {total} pkts")
+
+        self.label_unity_link.setText(text)
+        self.label_unity_link.setStyleSheet(
+            f"color: {color}; padding: 3px 10px; "
+            f"background-color: #1c1c1c; border: 1px solid {color}; "
+            f"border-radius: 3px; margin-left: 10px;"
+        )
+
+    def _refresh_scene_panel(self):
+        """
+        Redraw the scenario label, key/value grid, chart title, and top-
+        bar card from `self.latest_scenario` + `self.latest_scene_data`.
+        Idempotent — safe to call repeatedly.
+        """
+        # ---- Scenario label ----
+        if self.latest_scenario:
+            self.label_scenario.setText(
+                f"Scene: {self.latest_scenario.upper()}"
+            )
+        else:
+            self.label_scenario.setText("Scene: (waiting for Unity)")
+
+        # ---- Key/value grid ----
+        # Clear existing rows first — QGridLayout has no clear() so we
+        # remove children by hand. Cheap because rows are ~1-5 items.
+        while self.scene_kv_layout.count():
+            item = self.scene_kv_layout.takeAt(0)
+            w = item.widget()
+            if w is not None:
+                w.deleteLater()
+        for row, (key, val) in enumerate(self.latest_scene_data.items()):
+            k_lab = QLabel(f"{key}:")
+            k_lab.setStyleSheet("color: #a0c4d9;")
+            v_lab = QLabel(_format_scene_value(val))
+            v_lab.setStyleSheet("color: #eeeeee; font-weight: bold;")
+            self.scene_kv_layout.addWidget(k_lab, row, 0)
+            self.scene_kv_layout.addWidget(v_lab, row, 1)
+
+        # ---- Chart title (matches the primary field for the scenario) ----
+        primary_key = Config.SCENARIO_PRIMARY_FIELD.get(
+            self.latest_scenario.lower()
+        )
+        if primary_key:
+            unit = Config.SCENARIO_PRIMARY_UNIT.get(
+                self.latest_scenario.lower(), ""
+            )
+            title_bits = [primary_key]
+            if unit:
+                title_bits.append(f"({unit})")
+            self.plot_scene.setTitle(" ".join(title_bits),
+                                       color='#dddddd', size='10pt')
+        else:
+            self.plot_scene.setTitle("no primary field configured",
+                                       color='#888888', size='9pt')
+
+        # ---- Top-bar Scene card ----
+        # Show "<primary_field> <value> <unit>" for known scenarios,
+        # otherwise a generic scenario label.
+        if not self.latest_scenario:
+            self.label_scene_card.setText("Scene --")
+        elif primary_key and primary_key in self.latest_scene_data:
+            unit = Config.SCENARIO_PRIMARY_UNIT.get(
+                self.latest_scenario.lower(), ""
+            )
+            val = _format_scene_value(self.latest_scene_data[primary_key])
+            self.label_scene_card.setText(
+                f"{primary_key} {val} {unit}".strip()
+            )
+        else:
+            self.label_scene_card.setText(
+                f"Scene {self.latest_scenario}"
+            )
+
+    def _try_attach_telemetry(self, initial: bool = False):
+        """Best-effort resolve the Biofeedback_Telemetry side stream.
+        Same lazy-attach pattern as ECG — main.py publishes it at startup
+        but resolve_byprop can miss it during the ~1 s race between
+        outlet open and the dashboard's first tick."""
+        if self.telemetry_inlet is not None:
+            return
+        import time as _time
+        now = _time.time()
+        if (not initial and
+                (now - self._telemetry_last_retry_time) < self._telemetry_retry_interval_sec):
+            return
+        self._telemetry_last_retry_time = now
+        try:
+            streams = resolve_byprop("name",
+                                      Config.TELEMETRY_LSL_STREAM_NAME,
+                                      timeout=0.2)
+            if streams:
+                self.telemetry_inlet = StreamInlet(streams[0])
+                print(f"[DASHBOARD] Connected to telemetry stream "
+                      f"'{Config.TELEMETRY_LSL_STREAM_NAME}'."
+                      + ("" if initial else " (lazy retry succeeded)"))
+            elif initial:
+                print(f"[DASHBOARD] Telemetry stream not yet present; "
+                      f"will retry every "
+                      f"{self._telemetry_retry_interval_sec:.0f}s "
+                      f"in the update loop.")
+        except Exception as e:
+            if initial:
+                print(f"[DASHBOARD] Telemetry stream lookup failed ({e}); "
                       f"will retry in the update loop.")
 
     def _autoscale_signal(self, plot, ydata, center, default_half,
