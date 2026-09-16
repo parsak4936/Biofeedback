@@ -14,6 +14,9 @@ code touch, see CODE_AUDIT.md.
 """
 
 
+import os as _os
+
+
 class Config:
     # ============================================
     # DATA SOURCE SELECTION
@@ -28,7 +31,14 @@ class Config:
     #                 for details.
     # Both paths feed identical math downstream; nothing downstream
     # needs editing when switching.
-    DATA_SOURCE = 'real_plux'
+    # Environment override: BIOFEEDBACK_DATA_SOURCE.
+    #
+    # Set the env var to test against a recording without editing this file.
+    # The committed value stays 'real_plux', so a forgotten test run can
+    # never leave the lab machine pointing at mock data for a real session.
+    #   run.bat        -> no env var  -> real_plux (live device)
+    #   run_mock.bat   -> env var set -> mock (recorded file)
+    DATA_SOURCE = _os.environ.get('BIOFEEDBACK_DATA_SOURCE', 'real_plux')
 
     # ============================================
     # HR / HRV / EDA EXTRACTION BACKEND (prof email 2026-06)
@@ -67,8 +77,9 @@ class Config:
     #       detection. Captures event-driven sympathetic responses while
     #       removing the slow tonic drift (electrode hydration etc).
     #
-    # Not consulted when EDA_BACKEND == 'neurokit' (NeuroKit2 uses
-    # cvxEDA convex-optimisation decomposition unconditionally).
+    # Not consulted when EDA_BACKEND == 'neurokit'. That path calls
+    # nk.eda_phasic with its default method, a 0.05 Hz high-pass filter;
+    # cvxEDA is not used.
     EDA_BSNB_METHOD = 'raw'
     
     # ============================================
@@ -127,8 +138,9 @@ class Config:
     # ============================================
     # FREQUENCIES (Hz)
     # ============================================
-    # Per prof's email (2026-06): 200 Hz raw sensor (PLUX default),
-    # 10 Hz for HR/HRV/EDA extraction (PIPELINE_RATE), 1 Hz for Unity
+    # Per prof's email (2026-06): raw sensor at the rate OpenSignals streams
+    # (1000 Hz in current captures, read from the stream at run time),
+    # 10 Hz for the processing loop (PIPELINE_RATE), 1 Hz for Unity
     # VR updates (UNITY_COMMAND_INTERVAL_SEC = 1.0 below). Dashboard UI
     # refresh stays at 50 Hz internally (QTimer in dashboard.py) for a
     # smooth-looking chart, but most timer fires will see zero new LSL
@@ -190,6 +202,26 @@ class Config:
     # is now a pass-through; raw values flow straight to fusion + LSL.
 
     BASELINE_SEC = 120  # math-pipeline Step 2
+
+    # Interval after dashboard launch during which "Start Baseline" stays
+    # disabled. Two reasons it exists:
+    #
+    #   1. RMSSD is estimated over a 60 s trailing window (RMSSD_WINDOW_SEC).
+    #      Clicking Start Baseline immediately means the first 60 s of the
+    #      120 s baseline produce NaN RMSSD, so sigma_hrv is computed from
+    #      half the intended sample.
+    #   2. EDA electrodes need time for hydration to stabilise. A baseline
+    #      captured during that transient is a drifting reference, not a
+    #      resting one.
+    #
+    # 60 = aligned to the RMSSD window (default).
+    # 300 = Task Force (1996) 5-minute recommendation, if the protocol can
+    #       afford the extra resting time.
+    # 0   = disable the lock entirely (not recommended outside debugging).
+    #
+    # Affects only when the button becomes clickable. Nothing in the fusion
+    # math, threshold derivation, or baseline duration changes.
+    BASELINE_LOCK_SEC = 60
 
     # Cadence at which proc.running_baseline_averages() is recomputed
     # during the BASELINE state. The dashboard's three EDA/HR/HRV cards
@@ -276,11 +308,11 @@ class Config:
 
     # Physiological ceiling for an instantaneous phasic-EDA value (µS).
     # Real phasic skin-conductance responses are tenths of a µS; even a
-    # large startle SCR rarely exceeds ~1 µS. Larger magnitudes are filter
-    # ringing from a resampler edge artifact in the phasic decomposition
-    # (the resampler intermittently appends a spurious ~0 final sample;
-    # nk's zero-phase filter then rings backward across the tail, reaching
-    # 4-15 µS in rare ticks). We do NOT try to repair the decomposition
+    # large startle SCR rarely exceeds ~1 µS. Larger magnitudes appear at
+    # the final sample of the zero-phase filter, which has no later samples
+    # to constrain it. (An older explanation blamed the resampler; that
+    # dated from the 50 Hz pipeline, and at 10 Hz the resample step changes
+    # nothing.) We do NOT try to repair the decomposition
     # (heuristic repair risks misfiring on real data); we simply reject an
     # implausible reading so a known-garbage value never reaches the score.
     EDA_PHASIC_MAX_US = 1.0
@@ -406,12 +438,14 @@ class Config:
     # Per prof's email (2026-06): VR scenario updates at 1 Hz.
     UNITY_COMMAND_INTERVAL_SEC = 1.0
     # Wait-for-calm gate: after "start" is sent, the bridge holds all
-    # state-driven commands until the patient hits the calm state. This
-    # window is the period we wait *before* checking for calm, so the
-    # synthetic "calm" the fusion engine returns during its 1-second buffer
-    # warmup doesn't trigger a false open. Default 1.5 s gives the buffer
-    # plenty of time to fill with real samples.
-    UDP_GATE_WARMUP_SEC = 1.5
+    # state-driven commands until the participant first reaches the calm
+    # state. This window is the period we wait *before* checking for calm,
+    # so the synthetic "calm" the fusion engine returns while its S_t
+    # window fills (S_T_SMOOTH_SEC) cannot open the gate. It follows the
+    # smoothing width with half a second of margin. The fixed 1.5 s it
+    # replaced dated from the 1 s smoothing window, so after the move to
+    # 3 s every run's first command was sent on that placeholder.
+    UDP_GATE_WARMUP_SEC = S_T_SMOOTH_SEC + 0.5
 
     # ============================================
     # UNITY TELEMETRY (Unity -> Python, scenario-agnostic)
@@ -487,6 +521,14 @@ class Config:
     # at STREAM_TIMEOUT_SEC, matching how the acquisition-side deadman
     # fails the session.
     REAL_PLUX_WATCHDOG_WARN_SEC = 2.0
+    # Longest sensor silence bridged by republishing the last derived
+    # sample. Gaps between Bluetooth chunks last tens of milliseconds and
+    # are normal; anything longer is loss of signal. From then on the last
+    # values stop being passed on as current, acquisition records
+    # HOLD_LAST, and the pipeline withholds commands to the scene until
+    # samples resume (main.py, after REAL_PLUX_WATCHDOG_WARN_SEC of no
+    # fresh data).
+    REAL_PLUX_GAP_BRIDGE_SEC = 0.5
 
     # ============================================
     # DASHBOARD VISUAL SETTINGS
@@ -530,9 +572,16 @@ class Config:
     # ============================================
     # MockDataSource auto-detects sampling rate AND channel order (ECG vs EDA)
     # from the OpenSignals header JSON — switch files freely, no other edits.
-    MOCK_DATA_FILE = 'data/LiveTest/opensignals_0007800F319C_2026-06-11_14-59-16.txt'
-  # MOCK_DATA_FILE = "data/opensignals_2026-05-25_14-57-56.txt"            # 200Hz, 8.7min, ECG=col2/EDA=col3
-    # MOCK_DATA_FILE = "data/fake_opensignals_2026-05-13_15-24-44.txt"       # 1000Hz, 42s, EDA=col2/ECG=col3
+    # Override with BIOFEEDBACK_MOCK_FILE (relative to the project root).
+    # Sampling rate and channel order are auto-detected from the file's
+    # OpenSignals header, so files recorded at different rates or with
+    # ECG/EDA in swapped columns all work without further edits.
+    MOCK_DATA_FILE = _os.environ.get(
+        'BIOFEEDBACK_MOCK_FILE',
+        'data/opensignalDATA/opensignals_0007800F319C_2026-09-09_11-54-50.txt')
+    # Previously used recordings, kept for reference:
+    #   data/opensignalDATA/opensignals_0007800F319C_2026-09-09_12-12-43.txt  1000Hz, EDA=col2/ECG=col3
+    #   data/opensignalDATA/opensignals_0007800F319C_2026-09-09_12-10-51.txt  1000Hz, EDA=col2/ECG=col3
     # When False (default), MockDataSource stops publishing once the file is
     # exhausted — the acquisition deadman fires after STREAM_TIMEOUT_SEC and
     # the session ends cleanly with whatever was captured. Matches what a

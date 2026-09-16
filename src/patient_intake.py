@@ -3,14 +3,22 @@
 Patient intake dialog.
 
 A modal PyQt5 form that runs before the main pipeline starts. It collects the
-patient's name, last name, ID, gender, the session date, and the session
-number, validates each field with clear inline error messages, and returns a
-dict to the caller once everything is valid. The dashboard and the session
-CSV/baseline JSON all use these fields downstream.
+participant ID, gender, session date and session number, validates each field
+with clear inline error messages, and returns a dict to the caller once
+everything is valid. The dashboard and the session CSV/metadata JSON use these
+fields downstream.
 
-The validation deliberately uses a gender dropdown (M / F) rather than a free
-text input — the requirement was "no 'T' for gender" type mistakes, and the
-cleanest way to enforce that is to not allow free typing in the first place.
+No name is collected. Given name and family name were captured by earlier
+versions of this form; they were removed so that nothing the pipeline writes
+to disk can identify a participant directly. The participant ID is the only
+identifier recorded, and resolving it to a person happens outside this system
+against a register the pipeline never reads.
+
+Gender and session number are radio groups rather than free text. The
+requirement was to prevent "T for gender" style entries, and refusing free
+typing removes that class of error at the point of entry instead of catching
+it later. Neither gender option starts selected, so an unanswered field stays
+distinguishable from a deliberate one.
 """
 
 import re
@@ -20,27 +28,31 @@ from datetime import date
 from PyQt5.QtCore import Qt, QDate
 from PyQt5.QtGui import QFont
 from PyQt5.QtWidgets import (
-    QApplication, QDialog, QVBoxLayout, QHBoxLayout, QFormLayout,
-    QLabel, QLineEdit, QComboBox, QSpinBox, QPushButton,
+    QApplication, QButtonGroup, QDialog, QVBoxLayout, QHBoxLayout,
+    QFormLayout, QLabel, QLineEdit, QPushButton, QRadioButton,
     QWidget, QFrame,
 )
 
 from config import Config
 
 
-# A patient ID should be alphanumeric (plus underscore/dash) and reasonably short.
-# Adjust here if your clinic uses a different convention.
+# A participant ID should be alphanumeric (plus underscore/dash) and reasonably short.
+# Adjust here if the laboratory uses a different convention.
 PATIENT_ID_RE = re.compile(r'^[A-Za-z0-9_\-]{1,32}$')
-NAME_RE = re.compile(r"^[A-Za-z\s\-']{1,40}$")
 
 
 class PatientIntakeDialog(QDialog):
-    """Modal form for capturing patient info before a session starts."""
+    """Modal form for capturing session info before a session starts."""
 
     def __init__(self, parent=None):
         super().__init__(parent)
-        self.setWindowTitle("New Session — Patient Information")
+        self.setWindowTitle("New Session — Participant Information")
         self.setModal(True)
+        # Drop the "?" context-help button Qt puts in the title bar of a
+        # QDialog on Windows. Nothing here defines whatsThis text, so the
+        # button does nothing when clicked and only invites confusion.
+        self.setWindowFlags(
+            self.windowFlags() & ~Qt.WindowContextHelpButtonHint)
         self.setMinimumWidth(460)
         self.setStyleSheet("""
             QDialog { background-color: #1a1a1a; color: #ffffff; }
@@ -68,22 +80,21 @@ class PatientIntakeDialog(QDialog):
         self._build_ui()
         # Listen for changes so we can re-validate live and clear errors as
         # the user types.
-        for w in (self.name_edit, self.lastname_edit, self.id_edit):
-            w.textChanged.connect(self._clear_field_error)
+        self.id_edit.textChanged.connect(self._clear_field_error)
 
     def _build_ui(self):
         outer = QVBoxLayout(self)
         outer.setSpacing(12)
         outer.setContentsMargins(20, 18, 20, 18)
 
-        title = QLabel("Patient information")
+        title = QLabel("Participant information")
         title.setFont(QFont("Arial", 14, QFont.Bold))
         title.setStyleSheet("color: #0099ff;")
         outer.addWidget(title)
 
         subtitle = QLabel(
-            "Fill in the patient's details before the session begins.\n"
-            "Fields marked with * are required."
+            "Enter the session details before starting.\n"
+            "Fields marked with * are required. No name is recorded."
         )
         subtitle.setStyleSheet("color: #aaaaaa;")
         outer.addWidget(subtitle)
@@ -97,30 +108,38 @@ class PatientIntakeDialog(QDialog):
         form.setSpacing(8)
         form.setLabelAlignment(Qt.AlignRight)
 
-        # First name
-        self.name_edit = QLineEdit()
-        self.name_edit.setPlaceholderText("e.g. Alice")
-        self.name_err = self._error_label()
-        form.addRow(self._label("First name *"), self._field_with_error(self.name_edit, self.name_err))
-
-        # Last name
-        self.lastname_edit = QLineEdit()
-        self.lastname_edit.setPlaceholderText("e.g. Rossi")
-        self.lastname_err = self._error_label()
-        form.addRow(self._label("Last name *"), self._field_with_error(self.lastname_edit, self.lastname_err))
-
-        # Patient ID
+        # Participant ID. This is the ONLY identifier the system records.
+        # Given name and family name were collected by earlier versions of
+        # this form and have been removed: nothing the pipeline writes to
+        # disk may carry a name. Resolving an ID back to a person is done
+        # outside this system, against a register the pipeline never reads.
         self.id_edit = QLineEdit()
         self.id_edit.setPlaceholderText("alphanumeric, e.g. P0042")
         self.id_err = self._error_label()
-        form.addRow(self._label("Patient ID *"), self._field_with_error(self.id_edit, self.id_err))
+        form.addRow(self._label("Participant ID *"), self._field_with_error(self.id_edit, self.id_err))
 
-        # Gender — dropdown, not free text. Prevents the 'T for gender' problem
-        # at the source rather than catching it in validation.
-        self.gender_combo = QComboBox()
-        self.gender_combo.addItems(["— select —", "F", "M"])
+        # Gender — two radio buttons rather than a dropdown. With only two
+        # options a list costs two clicks and hides both until opened;
+        # radios show the full choice and take one click. Neither is
+        # pre-selected, so the operator has to make the choice actively:
+        # a default would be recorded silently whenever someone tabbed past
+        # this row, and a wrong value here is undetectable afterwards.
+        self.gender_group = QButtonGroup(self)
+        gender_row = QHBoxLayout()
+        gender_row.setSpacing(18)
+        gender_row.setContentsMargins(0, 0, 0, 0)
+        for value in ("F", "M"):
+            rb = QRadioButton(value)
+            rb.setStyleSheet("QRadioButton { color: #dddddd; }")
+            self.gender_group.addButton(rb)
+            rb.setProperty("value", value)
+            gender_row.addWidget(rb)
+        gender_row.addStretch()
+        gender_widget = QWidget()
+        gender_widget.setLayout(gender_row)
         self.gender_err = self._error_label()
-        form.addRow(self._label("Gender *"), self._field_with_error(self.gender_combo, self.gender_err))
+        form.addRow(self._label("Gender *"),
+                    self._field_with_error(gender_widget, self.gender_err))
 
         # Date — fixed to today and not adjustable. We still re-read
         # QDate.currentDate() at submit time (in case the dialog is left
@@ -133,15 +152,29 @@ class PatientIntakeDialog(QDialog):
         )
         form.addRow(self._label("Session date *"), self.date_label)
 
-        # Session number — capped at Config.MAX_SESSION_NUMBER. Raise that
-        # constant for multi-session protocols.
-        self.session_spin = QSpinBox()
-        self.session_spin.setMinimum(1)
-        self.session_spin.setMaximum(max(1, int(Config.MAX_SESSION_NUMBER)))
-        self.session_spin.setValue(1)
+        # Session number — one radio per session, mutually exclusive. The
+        # buttons are generated from Config.MAX_SESSION_NUMBER rather than
+        # hardcoded, so a protocol with more visits still works by raising
+        # that one constant. Session 1 is pre-selected, matching what the
+        # spin box this replaced did.
+        self.session_group = QButtonGroup(self)
+        session_row = QHBoxLayout()
+        session_row.setSpacing(18)
+        session_row.setContentsMargins(0, 0, 0, 0)
+        for n in range(1, max(1, int(Config.MAX_SESSION_NUMBER)) + 1):
+            rb = QRadioButton(str(n))
+            rb.setStyleSheet("QRadioButton { color: #dddddd; }")
+            rb.setProperty("value", n)
+            if n == 1:
+                rb.setChecked(True)
+            self.session_group.addButton(rb)
+            session_row.addWidget(rb)
+        session_row.addStretch()
+        session_widget = QWidget()
+        session_widget.setLayout(session_row)
         form.addRow(
-            self._label(f"Session number * (1-{Config.MAX_SESSION_NUMBER})"),
-            self.session_spin,
+            self._label("Session number *"),
+            session_widget,
         )
 
         outer.addLayout(form)
@@ -180,10 +213,10 @@ class PatientIntakeDialog(QDialog):
         button_row.addWidget(self.start_btn)
         outer.addLayout(button_row)
 
-        # Clear gender error live the moment the operator picks F or M
-        # so it doesn't keep glaring after the field is actually valid.
-        self.gender_combo.currentIndexChanged.connect(
-            lambda _i: self.gender_err.setText(""))
+        # Clear the gender error the moment either option is picked, so it
+        # doesn't keep glaring after the field is already valid.
+        self.gender_group.buttonClicked.connect(
+            lambda _b: self.gender_err.setText(""))
 
     # ---- small UI helpers ----
     def _label(self, text):
@@ -220,9 +253,7 @@ class PatientIntakeDialog(QDialog):
         if isinstance(sender, QLineEdit):
             sender.setStyleSheet("")
         err_map = {
-            self.name_edit:     self.name_err,
-            self.lastname_edit: self.lastname_err,
-            self.id_edit:       self.id_err,
+            self.id_edit: self.id_err,
         }
         err_label = err_map.get(sender)
         if err_label is not None:
@@ -232,11 +263,21 @@ class PatientIntakeDialog(QDialog):
         self.global_err.setText("")
 
     def _clear_all_errors(self):
-        for field in (self.name_edit, self.lastname_edit, self.id_edit):
-            field.setStyleSheet("")
-        for err in (self.name_err, self.lastname_err, self.id_err, self.gender_err):
+        self.id_edit.setStyleSheet("")
+        for err in (self.id_err, self.gender_err):
             err.setText("")
         self.global_err.setText("")
+
+    # ---- selection accessors ----
+    def selected_gender(self) -> str:
+        """"F", "M", or "" when neither radio has been chosen."""
+        btn = self.gender_group.checkedButton()
+        return btn.property("value") if btn is not None else ""
+
+    def selected_session(self) -> int:
+        """Chosen session number. Falls back to 1, which is pre-selected."""
+        btn = self.session_group.checkedButton()
+        return int(btn.property("value")) if btn is not None else 1
 
     # ---- validation + submit ----
     def _validate(self):
@@ -244,47 +285,21 @@ class PatientIntakeDialog(QDialog):
         self._clear_all_errors()
         ok = True
 
-        name = self.name_edit.text().strip()
-        if not name:
-            self._mark_invalid(self.name_edit, self.name_err, "First name is required.")
-            ok = False
-        elif not NAME_RE.match(name):
-            self._mark_invalid(self.name_edit, self.name_err,
-                               "Letters, spaces, hyphens and apostrophes only (max 40).")
-            ok = False
-
-        lastname = self.lastname_edit.text().strip()
-        if not lastname:
-            self._mark_invalid(self.lastname_edit, self.lastname_err, "Last name is required.")
-            ok = False
-        elif not NAME_RE.match(lastname):
-            self._mark_invalid(self.lastname_edit, self.lastname_err,
-                               "Letters, spaces, hyphens and apostrophes only (max 40).")
-            ok = False
-
         pid = self.id_edit.text().strip()
         if not pid:
-            self._mark_invalid(self.id_edit, self.id_err, "Patient ID is required.")
+            self._mark_invalid(self.id_edit, self.id_err, "Participant ID is required.")
             ok = False
         elif not PATIENT_ID_RE.match(pid):
             self._mark_invalid(self.id_edit, self.id_err,
                                "Letters, digits, underscore or dash only (max 32 characters).")
             ok = False
 
-        # Gender. The combo box starts on "— select —" (sentinel item
-        # at index 0), so we accept ONLY explicit F or M selections.
-        # We also red-border the combo box so the operator's eye gets
-        # pulled to it the way the QLineEdit fields do on missing input.
-        gender = self.gender_combo.currentText()
-        if self.gender_combo.currentIndex() <= 0 or gender not in ("F", "M"):
-            self.gender_combo.setStyleSheet(
-                self.gender_combo.styleSheet() + "border: 1px solid #ff6666;"
-            )
-            self.gender_err.setText("Gender is required -- please select F or M.")
+        # Gender. Neither radio starts checked, so an unanswered field is
+        # distinguishable from a deliberate answer and cannot slip through
+        # as a default.
+        if self.selected_gender() not in ("F", "M"):
+            self.gender_err.setText("Gender is required -- select F or M.")
             ok = False
-        else:
-            # Clear any prior red border from a previous failed attempt.
-            self.gender_combo.setStyleSheet("")
 
         # Session date is locked to today, no validation needed.
 
@@ -296,12 +311,10 @@ class PatientIntakeDialog(QDialog):
         if not self._validate():
             return
         self.patient = {
-            "first_name":     self.name_edit.text().strip(),
-            "last_name":      self.lastname_edit.text().strip(),
             "patient_id":     self.id_edit.text().strip(),
-            "gender":         self.gender_combo.currentText(),
+            "gender":         self.selected_gender(),
             "session_date":   QDate.currentDate().toString("yyyy-MM-dd"),
-            "session_number": self.session_spin.value(),
+            "session_number": self.selected_session(),
         }
         self.accept()
 

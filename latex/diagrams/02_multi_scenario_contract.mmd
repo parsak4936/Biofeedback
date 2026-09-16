@@ -1,0 +1,19 @@
+%%{init: {'theme':'neutral'}}%%
+flowchart TB
+    BF[Biofeedback Engine<br/>one server, scenario-agnostic]
+
+    BF -.->|"start / stop / increase / decrease<br/>(same 4 commands for every scene)"| A[Acrophobia scene<br/>balloon flight]
+    BF -.-> B[Arachnophobia scene<br/>spider dynamics]
+    BF -.-> C[Public Speaking scene<br/>audience behaviour]
+    BF -.-> D[Future scene N]
+
+    A -->|"JSON envelope<br/>&#123;scenario, data&#125;<br/>e.g. height"| BF
+    B -->|"JSON envelope<br/>e.g. size, count"| BF
+    C -->|"JSON envelope<br/>e.g. looking, audience"| BF
+    D -->|"JSON envelope<br/>any fields"| BF
+
+    classDef engine   fill:#fff4e6,stroke:#333,stroke-width:2px
+    classDef scene    fill:#e8f4f8,stroke:#333,stroke-width:1px
+
+    class BF engine
+    class A,B,C,D scene

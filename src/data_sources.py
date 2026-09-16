@@ -1226,9 +1226,10 @@ class RealPLUXDataSource(DataSource):
             if (silent_for > Config.REAL_PLUX_WATCHDOG_WARN_SEC
                     and not self._watchdog_warned):
                 print(f"[DATA SOURCE] WARN: no PLUX samples for "
-                      f"{silent_for:.1f}s — Bluetooth dropout likely. "
-                      f"Holding last value; will raise at "
-                      f"{Config.STREAM_TIMEOUT_SEC}s.")
+                      f"{silent_for:.1f}s, Bluetooth dropout likely. No "
+                      f"fresh data is published, so commands to the scene "
+                      f"are withheld until samples resume; the session "
+                      f"ends at {Config.STREAM_TIMEOUT_SEC}s.")
                 self._watchdog_warned = True
             if silent_for > Config.STREAM_TIMEOUT_SEC:
                 raise ConnectionError(
@@ -1236,13 +1237,32 @@ class RealPLUXDataSource(DataSource):
                     f"(threshold {Config.STREAM_TIMEOUT_SEC}s). Check that "
                     f"OpenSignals is still recording and the device is paired."
                 )
-            # No new data — republish the last derived sample so the
-            # downstream stream stays alive at roughly the same rate.
-            self.outlet.push_sample(
-                [self.latest_eda, self.latest_hr, self.latest_rmssd]
-            )
+            # Short gaps between Bluetooth chunks are normal, and during
+            # them the last derived sample is republished so the stream
+            # downstream stays continuous. Beyond REAL_PLUX_GAP_BRIDGE_SEC
+            # the unit has genuinely gone silent, and republishing would
+            # make frozen values look fresh: acquisition would label them
+            # NEW_DATA, the composite would keep classifying them, and
+            # commands would keep reaching the scene on physiology that had
+            # stopped updating. So from that point nothing is published,
+            # acquisition records HOLD_LAST, and main.py withholds commands
+            # until samples resume.
+            if silent_for <= Config.REAL_PLUX_GAP_BRIDGE_SEC:
+                self.outlet.push_sample(
+                    [self.latest_eda, self.latest_hr, self.latest_rmssd]
+                )
+            # Yield briefly on an idle poll rather than returning at once.
+            # The streamer calls this in a loop with no sleep of its own, so
+            # without this the process spun a CPU core flat out on the
+            # machine rendering the scene. Samples wait in the LSL buffer,
+            # so a couple of milliseconds costs nothing.
+            time.sleep(0.002)
             return self.latest_eda, self.latest_hr, self.latest_rmssd
 
+        if self._watchdog_warned:
+            print(f"[DATA SOURCE] PLUX samples resumed after "
+                  f"{time.time() - self._last_fresh_sample_time:.1f}s "
+                  f"of silence.")
         self._last_fresh_sample_time = time.time()
         self._watchdog_warned = False
 

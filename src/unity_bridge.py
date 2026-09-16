@@ -21,10 +21,10 @@ the patient first hits the calm state. Reason: when the live phase
 begins the patient might be mid-adjustment (putting on the VR, settling
 in), so the first stress reading is often unreliable. Waiting for the
 system to observe a real calm before opening the gate prevents noise
-from flooding Unity at session start. A short warmup window
-(`Config.UDP_GATE_WARMUP_SEC`, default 1.5 s) is applied first so the
-fusion engine's buffer-warmup default "calm" does not trip the gate
-prematurely.
+from flooding Unity at session start. A warmup window
+(`Config.UDP_GATE_WARMUP_SEC`, the S_t smoothing width plus 0.5 s) is
+applied first so the fusion engine's buffer-warmup default "calm" does
+not trip the gate prematurely.
 
 Audit log. Every packet actually sent is also written to a CSV
 (`data/unity_udp_log_<ts>_<patient>.csv`) with timestamp, kind
@@ -263,6 +263,31 @@ class UnityUDPBridge:
         self._last_state_emit_time = 0.0
         self.commands_gated = 0
         print("[UNITY] Bridge reset: gate closed, ready for next start.")
+
+    def truncate_audit(self):
+        """Empty unity_udp.csv back to its header row.
+
+        The audit is opened once at launch. Without this, a restarted run
+        appended its commands to those of the run it replaced, so the file
+        described commands whose physiology was no longer on disk.
+
+        The "sent" count shown on the dashboard describes the same commands
+        as the audit, so it restarts with the file rather than carrying the
+        discarded run's total forward.
+        """
+        self.commands_sent = 0
+        if not self._audit_path:
+            return
+        try:
+            if self._audit_handle is not None:
+                self._audit_handle.close()
+            self._audit_handle = open(self._audit_path, 'w', newline='',
+                                      buffering=1)
+            self._audit_handle.write(
+                "timestamp,kind,command,state,s_t,gate_open\n")
+        except OSError as e:
+            print(f"[UNITY] WARN: could not truncate audit log: {e}")
+            self._audit_handle = None
 
     def last_command_code(self) -> int:
         """Numeric encoding of the most recent UDP command we sent.

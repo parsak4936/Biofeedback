@@ -1,0 +1,42 @@
+%%{init: {'theme':'neutral'}}%%
+flowchart TB
+    subgraph INPUTS[Raw inputs]
+        A[Raw ECG mV]
+        B[Raw EDA microsiemens]
+    end
+
+    subgraph HRPATH[HR and RMSSD extraction]
+        A --> C1[ecg_clean<br/>0.5 Hz HP + 50 Hz notch]
+        C1 --> C2[R-peak detection<br/>+ Kubios correction]
+        C2 --> C3[HR<br/>60 / mean RR<br/>30 s window]
+        C2 --> C4[RMSSD<br/>Malik 20% gate<br/>60 s window]
+    end
+
+    subgraph EDAPATH[Phasic EDA extraction]
+        B --> D1[Rolling 60 s window]
+        D1 --> D2[cvxEDA decomposition]
+        D2 --> D3[Last phasic sample<br/>reject if abs > 1 uS]
+    end
+
+    C3 --> F1[delta HR<br/>percent change from baseline]
+    C4 --> F2[delta HRV<br/>percent decrease from baseline]
+    D3 --> F3[delta EDA<br/>phasic microsiemens]
+
+    subgraph FUSION[Fusion and classification]
+        F1 --> Z[Standardise each delta<br/>against baseline sigma]
+        F2 --> Z
+        F3 --> Z
+        Z --> W["Weighted sum<br/>0.5 z_EDA + 0.3 z_HRV + 0.2 z_HR"]
+        W --> S[3 s rolling mean<br/>yields S_t]
+        S --> CL[Classify against<br/>MILD and HIGH thresholds]
+    end
+
+    CL --> CMD[UDP command to Unity]
+
+    classDef inputs   fill:#f5f5f5,stroke:#333
+    classDef process  fill:#e8f8ea,stroke:#333
+    classDef output   fill:#fff4e6,stroke:#333,stroke-width:2px
+
+    class A,B inputs
+    class C1,C2,C3,C4,D1,D2,D3,F1,F2,F3,Z,W,S,CL process
+    class CMD output

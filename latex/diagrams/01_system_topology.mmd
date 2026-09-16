@@ -1,0 +1,26 @@
+%%{init: {'theme':'neutral', 'flowchart':{'curve':'linear'}}}%%
+flowchart LR
+    P([Participant]) -->|ECG, EDA| PLUX[PLUX biosignalsplux hub]
+    PLUX -->|Bluetooth| OS[OpenSignals]
+    OS -->|LSL: physical units, 200 Hz| BF[Biofeedback Engine<br/>Python 3.10]
+
+    BF -->|UDP 5005: text commands| U[Unity VR Scene]
+    U -->|UDP 5006: JSON telemetry, 10 Hz| BF
+
+    BF -->|LSL: state + telemetry| DASH[Operator Dashboard<br/>PyQt5]
+    BF -->|CSV, JSON files| DISK[(Session Record)]
+
+    U -->|render| HMD[Meta Quest HMD]
+    HMD --- P
+
+    classDef participant fill:#f5f5f5,stroke:#333,stroke-width:1px
+    classDef hardware   fill:#e8f4f8,stroke:#333,stroke-width:1px
+    classDef software   fill:#e8f8ea,stroke:#333,stroke-width:1px
+    classDef engine     fill:#fff4e6,stroke:#333,stroke-width:2px
+    classDef storage    fill:#f8f0e8,stroke:#333,stroke-width:1px
+
+    class P,HMD participant
+    class PLUX hardware
+    class OS,U,DASH software
+    class BF engine
+    class DISK storage

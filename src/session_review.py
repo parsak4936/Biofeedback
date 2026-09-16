@@ -342,15 +342,12 @@ def summarize(df: pd.DataFrame, baseline_meta: dict = None) -> dict:
     def seconds(state):
         return state_counts.get(state, 0) / pipeline_rate
 
-    first = _safe(df.get('patient_first_name'), '')
-    last  = _safe(df.get('patient_last_name'),  '')
     pid   = _safe(df.get('patient_id'),        '?')
     gender = _safe(df.get('gender'), '?')
     sdate  = _safe(df.get('session_date'), '?')
     snum   = _safe(df.get('session_number'), '?')
 
     out = {
-        'patient_full':       f"{first} {last}".strip() or '?',
         'patient_id':         str(pid),
         'gender':             str(gender),
         'session_date':       str(sdate),
@@ -402,7 +399,7 @@ def render(df: pd.DataFrame, summary: dict, csv_path: str,
     fig, axes = plt.subplots(5, 1, figsize=(14, 10), sharex=True,
                              gridspec_kw={'height_ratios': [3, 1, 1, 1, 1]})
     fig.suptitle(
-        f"Session Review — {summary['patient_full']} "
+        f"Session Review — {summary['patient_id']} "
         f"(ID {summary['patient_id']}, {summary['gender']}, "
         f"session #{summary['session_number']} on {summary['session_date']}) — "
         f"{os.path.basename(csv_path)}",
@@ -477,7 +474,7 @@ def render(df: pd.DataFrame, summary: dict, csv_path: str,
         return f"{x:{spec}}{unit}" if x is not None else "--"
 
     box = (
-        f"Patient:    {summary['patient_full']}\n"
+        f"Participant: {summary['patient_id']}\n"
         f"ID / sex:   {summary['patient_id']}  /  {summary['gender']}\n"
         f"Session:    #{summary['session_number']}  on  {summary['session_date']}\n"
         f"Source:     {summary.get('data_source') or '--'}\n"
@@ -547,7 +544,7 @@ def cli_summary_line(summary: dict, csv_path: str):
     patient file. Mirrors what's in the review-window box."""
     print()
     print(f"[REVIEW] {os.path.basename(csv_path)}")
-    print(f"   patient    : {summary['patient_full']}  "
+    print(f"   participant: {summary['patient_id']}  "
           f"(ID {summary['patient_id']}, {summary['gender']})")
     print(f"   session    : #{summary['session_number']}  on {summary['session_date']}")
     print(f"   source     : {summary.get('data_source') or '--'}")

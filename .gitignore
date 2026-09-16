@@ -18,5 +18,12 @@ config_private.py
 # Each PC keeps its own local data/ folder. Do NOT rely on git to sync it.
 data/
 
+# Reference PDFs and papers - copyright-restricted, never in git.
+# The manifest tells you where to download them for local use.
+# Covers subfolders (duplicates/, misfiled/) and .doc/.docx copies too.
+references/**/*.pdf
+references/**/*.doc
+references/**/*.docx
+
 # OS files
 Thumbs.db

@@ -49,6 +49,20 @@ def _is_nan(x):
     return isinstance(x, float) and math.isnan(x)
 
 
+def _positive_finite(x):
+    """True for a real number above zero; False for None, NaN, inf, or <= 0.
+
+    Used wherever a resting value becomes a divisor. The previous guard,
+    `x or 1e-6`, never caught NaN (Python treats NaN as true) and turned a
+    zero into a divisor of one millionth.
+    """
+    try:
+        v = float(x)
+    except (TypeError, ValueError):
+        return False
+    return math.isfinite(v) and v > 0.0
+
+
 class FusionEngine:
     """Stress index, classification, and 0-100 display score."""
 
@@ -72,13 +86,20 @@ class FusionEngine:
         self.mean_baseline = 0.0
 
         # Per-signal baseline stats for z-scoring (PDF Cause 2). Filled in
-        # by calculate_baseline_sigma at end of BASELINE; zeros until then.
-        self.eda_phasic_mean = 0.0
-        self.eda_phasic_sigma = Config.SIGMA_FLOOR
-        self.hr_pct_mean = 0.0
-        self.hr_pct_sigma = Config.SIGMA_FLOOR
-        self.hrv_pct_mean = 0.0
-        self.hrv_pct_sigma = Config.SIGMA_FLOOR
+        # by calculate_baseline_sigma at the end of BASELINE.
+        #
+        # Until then they sit at the per-signal physiological floors, not at
+        # SIGMA_FLOOR (1e-6). If calibration ever exits early, a live
+        # deviation is divided by a plausible spread instead of by one
+        # millionth. A 1e-6 divisor once turned an ordinary -18% heart-rate
+        # dip into a composite of -18 million and drove Unity with it.
+        self._reset_signal_stats()
+
+        # Outcome of the most recent calibration. False until one completes
+        # normally; the pipeline refuses to go live while it is False.
+        self.calibration_ok = False
+        self.calibration_issues = []     # reasons live is blocked
+        self.calibration_warnings = []   # usable, but a channel is degraded
 
     def reset(self):
         """Discard thresholds and the rolling buffer. Used on operator reset."""
@@ -86,13 +107,20 @@ class FusionEngine:
         self.thresh_mild = 0.0
         self.thresh_high = 0.0
         self.mean_baseline = 0.0
-        self.eda_phasic_mean = 0.0
-        self.eda_phasic_sigma = Config.SIGMA_FLOOR
-        self.hr_pct_mean = 0.0
-        self.hr_pct_sigma = Config.SIGMA_FLOOR
-        self.hrv_pct_mean = 0.0
-        self.hrv_pct_sigma = Config.SIGMA_FLOOR
+        self._reset_signal_stats()
+        self.calibration_ok = False
+        self.calibration_issues = []
+        self.calibration_warnings = []
         print("[FUSION] Reset: thresholds + per-signal stats cleared, buffer emptied.")
+
+    def _reset_signal_stats(self):
+        """Per-signal means to zero and spreads to their physiological floors."""
+        self.eda_phasic_mean = 0.0
+        self.eda_phasic_sigma = Config.EDA_PHASIC_SIGMA_FLOOR
+        self.hr_pct_mean = 0.0
+        self.hr_pct_sigma = Config.HR_SIGMA_FLOOR_PCT
+        self.hrv_pct_mean = 0.0
+        self.hrv_pct_sigma = Config.HRV_SIGMA_FLOOR_PCT
 
     def set_thresholds(self, mean_baseline: float, sigma_baseline: float):
         """
@@ -145,17 +173,45 @@ class FusionEngine:
         hr_arr = cleaned_buffers.get('hr')
         hrv_arr = cleaned_buffers.get('hrv')
 
+        self.calibration_ok = False
+        self.calibration_issues = []
+        self.calibration_warnings = []
+        # Every early exit below leaves the per-signal spreads at their
+        # floors rather than at whatever a previous calibration left.
+        self._reset_signal_stats()
+
         if eda_arr is None or hr_arr is None or hrv_arr is None:
+            missing = [k for k, a in (('EDA', eda_arr), ('HR', hr_arr),
+                                      ('HRV', hrv_arr)) if a is None]
+            self.calibration_issues.append(
+                "No usable %s samples were collected during the baseline."
+                % ", ".join(missing))
             print("[FUSION] WARN: cleaned buffers missing; falling back to sigma=1.5")
             return 0.0, self.SIGMA_FALLBACK
 
         n = min(len(eda_arr), len(hr_arr), len(hrv_arr))
         if n < int(Config.PIPELINE_RATE):
+            self.calibration_issues.append(
+                "The baseline holds only %d samples; at least %d are needed."
+                % (n, int(Config.PIPELINE_RATE)))
             print("[FUSION] WARN: cleaned buffers too small; falling back to sigma=1.5")
             return 0.0, self.SIGMA_FALLBACK
 
-        avg_hr = float(personal_averages.get('hr') or 1e-6)
-        avg_hrv = float(personal_averages.get('hrv') or 1e-6)
+        # Each live delta divides by its resting average, so both must be
+        # real positive numbers before anything else is computed.
+        avg_hr = personal_averages.get('hr')
+        avg_hrv = personal_averages.get('hrv')
+        unmeasured = [name for name, v in (('heart rate', avg_hr), ('HRV', avg_hrv))
+                      if not _positive_finite(v)]
+        if unmeasured:
+            self.calibration_issues.append(
+                "Resting %s could not be measured during the baseline "
+                "(check the ECG electrodes)." % " and ".join(unmeasured))
+            print("[FUSION] WARN: resting %s not measurable; falling back "
+                  "to sigma=1.5" % unmeasured)
+            return 0.0, self.SIGMA_FALLBACK
+        avg_hr = float(avg_hr)
+        avg_hrv = float(avg_hrv)
 
         # Phasic baseline buffer: per-tick phasic EDA values captured during
         # BASELINE. If absent (e.g. NeuroKit unavailable), fall back to zeros
@@ -228,6 +284,22 @@ class FusionEngine:
                       f"(Implausibly flat baseline — check collection if "
                       f"this recurs.)")
 
+        # Usable but degraded: reported to the operator, not blocked. A flat
+        # or saturated EDA channel carries no phasic information, so the
+        # index then rests on heart rate and HRV alone.
+        eda_raw = np.asarray(eda_arr[:n], dtype=np.float64)
+        eda_raw = eda_raw[np.isfinite(eda_raw)]
+        if eda_raw.size:
+            if float(np.mean(eda_raw)) >= 24.9:
+                self.calibration_warnings.append(
+                    "EDA sat at the sensor's 25 uS ceiling during the "
+                    "baseline, so skin-conductance responses cannot be "
+                    "measured; the index will rely on heart rate and HRV.")
+            elif float(np.std(eda_raw)) < 1e-3:
+                self.calibration_warnings.append(
+                    "EDA was flat during the baseline (pad not in contact, "
+                    "or signal lost), so it will add nothing to the index.")
+
         n_hr_real = int(np.sum(np.isfinite(hr_pct)))
         n_hrv_real = int(np.sum(np.isfinite(hrv_pct)))
         print(f"[FUSION] Per-signal baselines (for z-scoring):")
@@ -250,6 +322,15 @@ class FusionEngine:
         valid_mask = np.isfinite(hr_pct) & np.isfinite(hrv_pct)
         n_valid = int(np.sum(valid_mask))
         if n_valid < int(Config.PIPELINE_RATE):
+            if n_hrv_real == 0:
+                self.calibration_issues.append(
+                    "HRV was never computed during the baseline, so there is "
+                    "no resting variability to compare against (check the "
+                    "ECG electrodes and signal quality).")
+            else:
+                self.calibration_issues.append(
+                    "Only %d samples had valid heart rate and HRV together; "
+                    "at least %d are needed." % (n_valid, int(Config.PIPELINE_RATE)))
             print(f"[FUSION] WARN: only {n_valid} fully-valid baseline "
                   f"samples after HR/HRV warmup. Baseline ran too short "
                   f"or the participant was unsettled. Thresholds will be "
@@ -285,6 +366,12 @@ class FusionEngine:
         print(f"[FUSION] Baseline S_t (over {n_valid} fully-valid samples): "
               f"mean={mean_baseline:+.4f}, sigma_raw={sigma_raw:.4f} (used), "
               f"sigma_smoothed={sigma_smoothed:.4f} (reference only)")
+        if sigma_raw <= 1e-6:
+            self.calibration_issues.append(
+                "The baseline composite had no variation at all, so no "
+                "thresholds can be set (sensors flat or disconnected).")
+        else:
+            self.calibration_ok = True
         return mean_baseline, sigma_raw
 
     def compute_deltas(self, live_vector: list, phasic_eda: float,
@@ -302,12 +389,17 @@ class FusionEngine:
         in µS, not a percent. Documented in OUTPUTS.md.
         """
         eda, hr, hrv = live_vector
-        base_hr = baseline_averages['hr'] or 1e-6
-        base_hrv = baseline_averages['hrv'] or 1e-6
-        d_hr = (float('nan') if _is_nan(hr)
-                else ((hr - base_hr) / base_hr) * 100.0)
-        d_hrv = (float('nan') if _is_nan(hrv)
-                 else ((base_hrv - hrv) / base_hrv) * 100.0)
+        base_hr = baseline_averages.get('hr')
+        base_hrv = baseline_averages.get('hrv')
+        # A missing or non-positive resting value leaves that delta undefined
+        # (NaN, so its term drops out of the composite) instead of dividing by
+        # a stand-in close to zero.
+        d_hr = (((hr - base_hr) / base_hr) * 100.0
+                if _positive_finite(base_hr) and not _is_nan(hr)
+                else float('nan'))
+        d_hrv = (((base_hrv - hrv) / base_hrv) * 100.0
+                 if _positive_finite(base_hrv) and not _is_nan(hrv)
+                 else float('nan'))
         return {
             'eda': float(phasic_eda),  # phasic µS, not percent
             'hr':  d_hr,

@@ -1,0 +1,27 @@
+%%{init: {'theme':'neutral'}}%%
+stateDiagram-v2
+    [*] --> IDLE
+
+    IDLE --> BASELINE: Operator clicks Start Baseline
+    BASELINE --> BASELINE_DONE: 120 seconds elapsed<br/>Averages, sigma, thresholds locked
+    BASELINE_DONE --> LIVE: Operator clicks Start Live Session
+    LIVE --> STOPPED: Operator clicks Stop
+    STOPPED --> LIVE: Operator clicks Start Live again<br/>(rotates CSV, same baseline)
+    STOPPED --> [*]: Operator closes dashboard
+
+    note right of BASELINE
+        No telemetry from Unity yet.
+        Physiology rows buffer in memory.
+    end note
+
+    note right of BASELINE_DONE
+        metadata.json written with
+        frozen baseline + thresholds.
+    end note
+
+    note right of LIVE
+        Fusion active.
+        UDP commands flow to Unity.
+        First telemetry packet
+        commits the CSV header.
+    end note

@@ -26,6 +26,7 @@ Closing the window asks the operator whether to keep or discard the
 baseline / live outputs separately, then shuts down the pipeline cleanly.
 """
 
+import math
 import os
 import sys
 import time
@@ -166,6 +167,41 @@ class ClinicalDashboard:
         # ---- Build the UI ----
         self._build_ui()
 
+        # ---- Baseline start lock ----
+        # Start Baseline stays disabled for BASELINE_LOCK_SEC after launch so
+        # the RMSSD window has filled and the EDA electrodes have settled
+        # before a resting reference is captured. See Config.BASELINE_LOCK_SEC.
+        # Monotonic clock: immune to wall-clock adjustment mid-session.
+        # ---- Recording visibility ----
+        # Where the pipeline is writing. Launcher exports SESSION_FOLDER;
+        # fall back to the working directory so the dashboard still runs
+        # if it is started standalone.
+        self._session_folder = os.environ.get('SESSION_FOLDER', '.')
+        self._session_name = os.path.basename(
+            os.path.normpath(self._session_folder)) or '.'
+        self._patient_id = os.environ.get('PATIENT_ID', '000')
+        self._recording_indicator_last = 0.0
+        # Latches once the artifact counts have been read from metadata.
+        self._artifacts_shown = False
+        # Baseline progress, for the wording of the stop confirmation.
+        self._baseline_elapsed_sec = 0.0
+        # Calibration verdict. _baseline_invalid mirrors channel 14 == 2 and
+        # gates Start Live; _verdict holds the reasons read from metadata.
+        self._baseline_invalid = False
+        self._verdict = None
+        # When a click last sent a command; cleared by the next state
+        # broadcast. Guards against a button left dead by a no-op command.
+        self._pending_command_at = None
+
+        self._launch_monotonic = time.monotonic()
+        self._baseline_lock_expired = (Config.BASELINE_LOCK_SEC <= 0)
+        # Last countdown value written to the widgets, so the 50 Hz tick
+        # only redraws when the displayed second changes.
+        self._baseline_lock_shown = -1
+        # Remembered so the lock can re-evaluate button enablement without
+        # waiting for the next state broadcast.
+        self._last_state = SessionState.IDLE
+
         # Start with all buttons reflecting IDLE
         self._apply_button_states(SessionState.IDLE)
 
@@ -195,12 +231,12 @@ class ClinicalDashboard:
 
     def _build_info_bar(self):
         layout = QVBoxLayout()
-        patient_name = os.environ.get('PATIENT_NAME', 'PATIENT')
         patient_id = os.environ.get('PATIENT_ID', '000')
 
-        # ---- Top row: patient / phase / status ----
+        # ---- Top row: participant / phase / status ----
         top = QHBoxLayout()
-        self.label_patient = QLabel(f"Patient: {patient_name} ({patient_id})")
+        # ID only. No name is collected by intake or displayed here.
+        self.label_patient = QLabel(f"Participant: {patient_id}")
         self.label_patient.setFont(QFont("Arial", 13, QFont.Bold))
         self.label_patient.setStyleSheet("color: #e0e0e0;")
 
@@ -219,6 +255,16 @@ class ClinicalDashboard:
         top.addWidget(self.label_phase, 1)
         top.addWidget(self.label_status, 3)
         layout.addLayout(top)
+
+        # ---- Recording indicator ----
+        # Rows land on disk continuously, but nothing on screen said so,
+        # and operators were closing the window unsure whether their
+        # session had been kept. This line names the destination and the
+        # row count so the question does not arise.
+        self.label_recording = QLabel("Recording target not yet known")
+        self.label_recording.setFont(QFont("Arial", 10))
+        self.label_recording.setStyleSheet("color: #888888;")
+        layout.addWidget(self.label_recording)
 
         # ---- Bottom row: live numeric readout. ALWAYS visible (including
         # during IDLE / BASELINE) so the operator can confirm signals are
@@ -268,10 +314,8 @@ class ClinicalDashboard:
         for b in (self.btn_baseline_start, self.btn_baseline_stop):
             b.setMinimumHeight(34)
             btn_row.addWidget(b)
-        self.btn_baseline_start.clicked.connect(
-            lambda: self.control.send(Command.BASELINE_START))
-        self.btn_baseline_stop.clicked.connect(
-            lambda: self.control.send(Command.BASELINE_STOP))
+        self.btn_baseline_start.clicked.connect(self._on_baseline_start_clicked)
+        self.btn_baseline_stop.clicked.connect(self._on_baseline_stop_clicked)
         v.addLayout(btn_row)
 
         # Per-panel duration: 0:00 / 2:00, counts only while in BASELINE
@@ -318,15 +362,24 @@ class ClinicalDashboard:
             card_row.addWidget(lab, 1)
         vv.addLayout(card_row)
 
-        self.label_baseline_sigma = QLabel("sigma_baseline: --")
-        self.label_baseline_thresh = QLabel("Thresholds: MILD = --, HIGH = --")
-        self.label_baseline_artifacts = QLabel("Artifacts: EDA=-- HR=-- HRV=--")
+        # Sigma, thresholds and artifact counts on a single row rather than
+        # three stacked ones. They are reference values the operator checks
+        # occasionally, not something watched continuously, so they do not
+        # justify three rows of height taken from the charts below.
+        self.label_baseline_sigma = QLabel("sigma --")
+        self.label_baseline_thresh = QLabel("MILD -- / HIGH --")
+        self.label_baseline_artifacts = QLabel("artifacts --/--/--")
+        stats_row = QHBoxLayout()
+        stats_row.setSpacing(18)
+        stats_row.setContentsMargins(0, 0, 0, 0)
         for lab in (self.label_baseline_sigma,
                     self.label_baseline_thresh,
                     self.label_baseline_artifacts):
-            lab.setFont(QFont("Arial", 10))
-            lab.setStyleSheet("color: #cccccc;")
-            vv.addWidget(lab)
+            lab.setFont(QFont("Arial", 9))
+            lab.setStyleSheet("color: #9a9a9a;")
+            stats_row.addWidget(lab)
+        stats_row.addStretch()
+        vv.addLayout(stats_row)
         v.addWidget(values)
 
         # Signal charts laid out in a 2-row x 2-col grid instead of
@@ -375,10 +428,8 @@ class ClinicalDashboard:
         for b in (self.btn_live_start, self.btn_live_stop):
             b.setMinimumHeight(34)
             btn_row.addWidget(b)
-        self.btn_live_start.clicked.connect(
-            lambda: self.control.send(Command.LIVE_START))
-        self.btn_live_stop.clicked.connect(
-            lambda: self.control.send(Command.LIVE_STOP))
+        self.btn_live_start.clicked.connect(self._on_live_start_clicked)
+        self.btn_live_stop.clicked.connect(self._on_live_stop_clicked)
         v.addLayout(btn_row)
 
         # Per-panel live duration. Compact inline label.
@@ -744,11 +795,318 @@ class ClinicalDashboard:
     # Button state machine
     # ------------------------------------------------------------------
 
+    # ------------------------------------------------------------------
+    # Recording visibility
+    # ------------------------------------------------------------------
+
+    def _samples_row_count(self) -> int:
+        """Rows currently in samples.csv, excluding the header. 0 if absent.
+
+        Read straight off disk rather than counted in the dashboard: the
+        point is to show what actually reached the file, not what the
+        dashboard believes was sent.
+        """
+        path = os.path.join(self._session_folder, 'samples.csv')
+        try:
+            with open(path, 'r', encoding='utf-8', errors='replace') as f:
+                n = sum(1 for _ in f)
+            return max(0, n - 1)
+        except OSError:
+            return 0
+
+    # ------------------------------------------------------------------
+    # Operator actions
+    # ------------------------------------------------------------------
+    #
+    # Every control that can discard recorded data asks first, and Cancel is
+    # the default button, so an absent-minded Enter or Escape never destroys
+    # anything. Each click also disables its own button immediately: the
+    # pipeline re-enables controls only when its next state broadcast
+    # arrives, and without this a double click could send a command twice.
+
+    def _confirm(self, title, text, detail, confirm_label,
+                 cancel_label="Cancel"):
+        msg = QMessageBox(self.win)
+        msg.setWindowTitle(title)
+        msg.setIcon(QMessageBox.Warning)
+        msg.setText(text)
+        msg.setInformativeText(detail)
+        ok_btn = msg.addButton(confirm_label, QMessageBox.DestructiveRole)
+        cancel_btn = msg.addButton(cancel_label, QMessageBox.RejectRole)
+        msg.setDefaultButton(cancel_btn)
+        msg.setEscapeButton(cancel_btn)
+        msg.exec_()
+        return msg.clickedButton() is ok_btn
+
+    def _send_once(self, button, command):
+        button.setEnabled(False)
+        self._pending_command_at = time.monotonic()
+        self.control.send(command)
+
+    def _check_command_timeout(self):
+        """Re-enable controls if a sent command produced no state change.
+
+        A click disables its button until the pipeline reports the new state.
+        If that report never arrives, because the command was a no-op in the
+        state the pipeline was actually in, the button would otherwise stay
+        dead for the rest of the session.
+        """
+        t = self._pending_command_at
+        if t is not None and time.monotonic() - t > 2.0:
+            self._pending_command_at = None
+            self._apply_button_states(self._last_state)
+
+    def _on_baseline_start_clicked(self):
+        state = self._last_state
+        if state == SessionState.BASELINE_DONE:
+            if not self._confirm(
+                    "Replace baseline?",
+                    "A baseline has already been recorded for this participant.",
+                    "Starting again discards it and records a new one from the "
+                    "beginning. This cannot be undone.",
+                    "Replace baseline"):
+                return
+        elif state == SessionState.STOPPED:
+            if not self._confirm(
+                    "Replace baseline and live run?",
+                    "A baseline and a live run have already been recorded for "
+                    "this participant.",
+                    "Starting a new baseline discards BOTH. The live run was "
+                    "scored against the current baseline, so it cannot be kept "
+                    "once that baseline is replaced. This cannot be undone.\n\n"
+                    "For a different participant, close the application and "
+                    "relaunch instead.",
+                    "Replace both"):
+                return
+        self._send_once(self.btn_baseline_start, Command.BASELINE_START)
+
+    def _on_baseline_stop_clicked(self):
+        elapsed = int(self._baseline_elapsed_sec)
+        total = int(Config.BASELINE_SEC)
+        if not self._confirm(
+                "Stop the baseline?",
+                f"The baseline is not complete ({elapsed} s of {total} s).",
+                "An incomplete baseline cannot be used to set thresholds, so "
+                "everything recorded so far will be discarded and the baseline "
+                "must be started again from the beginning.",
+                "Stop and discard",
+                cancel_label="Keep recording"):
+            return
+        # The baseline may have completed while the dialog was open. Stopping
+        # then would be a no-op in the pipeline, and the wording above would
+        # have been wrong, so do nothing.
+        if self._last_state != SessionState.BASELINE:
+            return
+        self._send_once(self.btn_baseline_stop, Command.BASELINE_STOP)
+
+    def _on_live_start_clicked(self):
+        if self._last_state == SessionState.STOPPED:
+            if not self._confirm(
+                    "Replace live run?",
+                    "A live run has already been recorded for this participant.",
+                    "Starting again discards that run and records a new one. "
+                    "The baseline is kept and reused. This cannot be undone.\n\n"
+                    "For a different participant, close the application and "
+                    "relaunch instead.",
+                    "Replace live run"):
+                return
+        self._send_once(self.btn_live_start, Command.LIVE_START)
+
+    def _on_live_stop_clicked(self):
+        # Stopping loses nothing: the run stays on disk until it is either
+        # replaced by a confirmed restart or kept at close.
+        self._send_once(self.btn_live_stop, Command.LIVE_STOP)
+
+    def _samples_phase_counts(self):
+        """(baseline_rows, live_rows) currently in samples.csv.
+
+        Shown separately so an operator can see a restart replace its rows
+        rather than add to them: the baseline count holds steady through
+        live restarts and returns to zero on a baseline restart.
+        """
+        path = os.path.join(self._session_folder, 'samples.csv')
+        b = l = 0
+        try:
+            with open(path, 'r', encoding='utf-8', errors='replace') as f:
+                next(f, None)
+                for line in f:
+                    cells = line.split(',', 6)
+                    if len(cells) > 5:
+                        if cells[5] == 'BASELINE':
+                            b += 1
+                        elif cells[5] == 'LIVE':
+                            l += 1
+        except OSError:
+            pass
+        return b, l
+
+    def _load_verdict(self):
+        """Baseline verdict written by the pipeline at lock time, or None if
+        it has not reached metadata.json yet."""
+        try:
+            import json
+            with open(os.path.join(self._session_folder, 'metadata.json'),
+                      'r', encoding='utf-8') as f:
+                meta = json.load(f)
+            v = (meta.get('baseline') or {}).get('validity')
+            return v if isinstance(v, dict) else None
+        except (OSError, ValueError):
+            return None
+
+    def _load_artifact_counts(self) -> bool:
+        """Fill the artifact label from metadata.json. True once it lands.
+
+        The counts are produced by the three-sigma filter during baseline
+        and written at lock time; they never appear on the LSL stream.
+        Returns False if the file is not readable yet so the caller can
+        retry on a later tick.
+        """
+        try:
+            import json
+            path = os.path.join(self._session_folder, 'metadata.json')
+            with open(path, 'r', encoding='utf-8') as f:
+                meta = json.load(f)
+            counts = (meta.get('baseline') or {}).get('artifacts_removed')
+            if not counts:
+                return False
+            self.label_baseline_artifacts.setText(
+                f"artifacts {counts.get('eda', 0)}/"
+                f"{counts.get('hr', 0)}/{counts.get('hrv', 0)}")
+            return True
+        except (OSError, ValueError):
+            return False
+
+    def _update_recording_indicator(self):
+        """Refresh the 'what is on disk right now' line, once per second.
+
+        Operators were closing the window unsure whether anything had been
+        saved. Rows are written continuously, so showing the count and the
+        destination removes the doubt that drove that behaviour.
+
+        The count is whatever samples.csv holds at this instant. A restart
+        truncates that file, so the number drops back to zero rather than
+        carrying the abandoned attempt forward.
+        """
+        now = time.monotonic()
+        if now - self._recording_indicator_last < 1.0:
+            return
+        self._recording_indicator_last = now
+
+        b, l = self._samples_phase_counts()
+
+        if b == 0 and l == 0:
+            text = f"Recording to {self._session_name}  ·  no rows yet"
+            color = "#888888"
+        else:
+            text = (f"On disk: baseline {b} rows  ·  live {l} rows  ·  "
+                    f"{self._session_name}")
+            color = "#7bc89a"
+
+        # Loss of signal, judged from the ECG side stream. The data source
+        # publishes it only while fresh samples arrive from the sensor, so
+        # its silence means the sensor has gone quiet, and the pipeline is
+        # withholding commands. Say so where the operator is already looking.
+        last = getattr(self, '_ecg_last_sample_at', None)
+        if self.ecg_inlet is not None and last is not None:
+            silent = time.monotonic() - last
+            limit = (Config.REAL_PLUX_WATCHDOG_WARN_SEC
+                     + Config.REAL_PLUX_GAP_BRIDGE_SEC)
+            if silent > limit:
+                text = (f"SIGNAL LOST: no data from the sensor for "
+                        f"{int(silent)} s. Commands to the scene are withheld "
+                        f"until it returns.  ·  {text}")
+                color = "#ff6b6b"
+
+        self.label_recording.setText(text)
+        self.label_recording.setStyleSheet(f"color: {color};")
+
+    def _on_live_run_finished(self):
+        """Shown when a live run ends. Says what was saved, and offers the
+        two things an operator actually does next.
+
+        Deliberately not a save prompt: the data is already on disk, and a
+        restart preserves the finished run rather than overwriting it, so
+        there is no decision here that can lose anything.
+        """
+        b, l = self._samples_phase_counts()
+
+        msg = QMessageBox(self.win)
+        msg.setWindowTitle("Run finished")
+        msg.setIcon(QMessageBox.Information)
+        msg.setText(f"Run finished - {l} live rows recorded "
+                    f"(baseline: {b} rows).")
+        msg.setInformativeText(
+            f"Held in samples.csv in:\n    {self._session_name}\n\n"
+            f"Starting another run asks before replacing this one. Close the window "
+            f"when you are finished to keep it.\n\n"
+            f"This folder belongs to participant {self._patient_id}. "
+            f"For a different participant, finish here and relaunch."
+        )
+
+        done_btn = msg.addButton("Finish and save", QMessageBox.DestructiveRole)
+        stay_btn = msg.addButton("Stay here", QMessageBox.RejectRole)
+        msg.setDefaultButton(stay_btn)
+        msg.exec_()
+
+        if msg.clickedButton() is done_btn:
+            # Route into the existing close flow, which handles the
+            # keep-or-discard decision and shuts main.py down cleanly.
+            self.win.close()
+
+    def _baseline_lock_remaining(self) -> int:
+        """Seconds left on the post-launch baseline lock, 0 once expired."""
+        if self._baseline_lock_expired:
+            return 0
+        elapsed = time.monotonic() - self._launch_monotonic
+        remaining = Config.BASELINE_LOCK_SEC - elapsed
+        if remaining <= 0:
+            self._baseline_lock_expired = True
+            return 0
+        # Ceiling, so 0.2 s left still reads "1s". int()+1 would show 61
+        # on the first frame, when elapsed is still exactly 0.
+        return math.ceil(remaining)
+
+    def _update_baseline_lock(self):
+        """Tick the lock countdown onto the button, and release it on expiry.
+
+        Called every frame. Cheap while counting (one label write), and a
+        no-op once expired.
+        """
+        if self._baseline_lock_expired:
+            return
+
+        remaining = self._baseline_lock_remaining()
+        if remaining > 0:
+            # Tick fires at 50 Hz; only touch the widgets when the displayed
+            # second actually changes.
+            if remaining != self._baseline_lock_shown:
+                self._baseline_lock_shown = remaining
+                self.btn_baseline_start.setText(f"Start Baseline ({remaining}s)")
+                if self._last_state == SessionState.IDLE:
+                    self.label_status.setText(
+                        f"Sensors settling — Start Baseline unlocks in "
+                        f"{remaining}s (RMSSD window + electrode stabilisation).")
+                    self.label_status.setStyleSheet(
+                        "color: #ffaa00; font-weight: bold;")
+            return
+
+        # Just expired: restore the label and re-run the state machine so
+        # the button enables if the current state allows it.
+        self.btn_baseline_start.setText("Start Baseline")
+        self._apply_button_states(self._last_state)
+
     def _apply_button_states(self, state: SessionState):
+        self._last_state = state
+        self._pending_command_at = None
         bl, lv = _BUTTON_STATES.get(state, ((False, False), (False, False)))
-        self.btn_baseline_start.setEnabled(bl[0])
+        # The lock only ever removes permission, never grants it: a state
+        # that disallows Start Baseline keeps it disabled regardless.
+        baseline_start_enabled = bl[0] and self._baseline_lock_expired
+        self.btn_baseline_start.setEnabled(baseline_start_enabled)
         self.btn_baseline_stop.setEnabled(bl[1])
-        self.btn_live_start.setEnabled(lv[0])
+        # A failed calibration removes permission to go live whatever the
+        # state table says; it never grants it.
+        self.btn_live_start.setEnabled(lv[0] and not self._baseline_invalid)
         self.btn_live_stop.setEnabled(lv[1])
 
         phase_text, phase_color = {
@@ -763,6 +1121,30 @@ class ClinicalDashboard:
 
         banner_text, banner_color = _STATE_BANNERS.get(
             state, ("Ready.", "#aaaaaa"))
+        # While the lock is counting, say why the button is greyed out.
+        # Otherwise it reads as a fault rather than as intended behaviour.
+        if state == SessionState.IDLE and not self._baseline_lock_expired:
+            remaining = self._baseline_lock_remaining()
+            if remaining > 0:
+                banner_text = (
+                    f"Sensors settling — Start Baseline unlocks in {remaining}s "
+                    f"(RMSSD window + electrode stabilisation).")
+                banner_color = "#ffaa00"
+        # Baseline verdict. A failed calibration is shown in red with its
+        # reasons; a usable baseline with a degraded channel in amber. Both
+        # stay up for as long as that baseline is the one in use.
+        if state in (SessionState.BASELINE_DONE, SessionState.STOPPED):
+            v = self._verdict or {}
+            issues = v.get('blocking_issues') or []
+            warns = v.get('warnings') or []
+            if self._baseline_invalid:
+                reasons = " ".join(issues) if issues else "The calibration could not be completed."
+                banner_text = ("Baseline invalid. Live session blocked. "
+                               + reasons + " Restart the baseline.")
+                banner_color = "#ff6b6b"
+            elif warns:
+                banner_text = banner_text + "  Note: " + " ".join(warns)
+                banner_color = "#ffaa00"
         self.label_status.setText(banner_text)
         self.label_status.setStyleSheet(f"color: {banner_color}; font-weight: bold;")
 
@@ -771,6 +1153,14 @@ class ClinicalDashboard:
     # ------------------------------------------------------------------
 
     def update_dashboard(self):
+        # Baseline lock countdown. Runs before any early-return below so the
+        # button keeps ticking even on frames where no LSL samples arrive.
+        self._update_baseline_lock()
+        # Same reasoning: the operator should see the row count advancing
+        # even on frames with no new samples. Self-throttled to 1 Hz.
+        self._update_recording_indicator()
+        self._check_command_timeout()
+
         # ECG side stream is pumped FIRST, independent of main-inlet
         # timing. The main inlet sometimes returns 0 samples on a given
         # 20 ms fire (50 Hz publish vs 50 Hz consume isn't exactly in
@@ -814,7 +1204,24 @@ class ClinicalDashboard:
         thresh_mild     = sample[12]
         thresh_high     = sample[13]
         baseline_status = sample[14]
+        # Channel 14: 0 not locked, 1 locked and usable, 2 locked but the
+        # calibration failed. The pipeline refuses to go live on 2; the
+        # dashboard mirrors that so the button is never offered.
+        _status = int(round(float(baseline_status)))
+        if _status == 0 and self._verdict is not None:
+            self._verdict = None                   # baseline being redone
+        _invalid = (_status == 2)
+        if _invalid != self._baseline_invalid:
+            self._baseline_invalid = _invalid
+            self._apply_button_states(self._last_state)
+        if (_status >= 1 and self._verdict is None
+                and self.tick_counter % int(Config.PIPELINE_RATE) == 0):
+            _v = self._load_verdict()
+            if _v is not None:
+                self._verdict = _v
+                self._apply_button_states(self._last_state)
         baseline_elapsed_sec = float(sample[15])
+        self._baseline_elapsed_sec = baseline_elapsed_sec
         qa_invalid       = int(sample[16])
         qa_out_of_range  = int(sample[17])
         qa_disconnects   = int(sample[18])
@@ -832,8 +1239,14 @@ class ClinicalDashboard:
 
         # If main's state changed, refresh the button enable/disable picture.
         if session_state != self._last_state_observed:
+            prev_state = self._last_state_observed
             self._apply_button_states(session_state)
             self._last_state_observed = session_state
+            # A live run just ended. Tell the operator what was recorded
+            # and where, so "did that save?" never has to be guessed at.
+            if (prev_state == SessionState.LIVE
+                    and session_state == SessionState.STOPPED):
+                self._on_live_run_finished()
 
         # ---- State chip + S_t / deltas readout ----
         # Desaturated stop-light palette matches the rest of the restyled UI.
@@ -980,11 +1393,21 @@ class ClinicalDashboard:
         if thresh_high > 0.0 and self.high_line.value() != thresh_high:
             self.high_line.setValue(thresh_high)
         if thresh_mild > 0.0 and thresh_high > 0.0:
-            t = f"Thresholds: MILD = {thresh_mild:.2f}, HIGH = {thresh_high:.2f}"
+            # Recover sigma from the gap between the two thresholds. Both are
+            # mean + K*sigma, so their difference cancels the resting mean
+            # exactly. The previous display used mild / K_MILD, which is only
+            # sigma when the resting mean is zero; on recorded sessions it was
+            # off by up to 3%.
             self.label_baseline_sigma.setText(
-                f"sigma_baseline: {thresh_mild / Config.THRESH_MILD_K:.3f}"
-            )
-            self.label_baseline_thresh.setText(t)
+                f"sigma {(thresh_high - thresh_mild) / (Config.THRESH_HIGH_K - Config.THRESH_MILD_K):.3f}")
+            self.label_baseline_thresh.setText(
+                f"MILD {thresh_mild:.2f} / HIGH {thresh_high:.2f}")
+            # Artifact counts are written to metadata.json at baseline lock
+            # and are not on the LSL stream, so read them from there once.
+            # Previously this label was created and never updated, so it
+            # showed placeholder dashes for the whole session.
+            if not self._artifacts_shown:
+                self._artifacts_shown = self._load_artifact_counts()
             thresh_str = f"MILD {thresh_mild:.2f} HIGH {thresh_high:.2f}"
 
             # ---- THRESHOLD-LOCKED Y-AXIS on the stress chart ----
@@ -1113,6 +1536,17 @@ class ClinicalDashboard:
             ecg_streams = resolve_byprop("name", Config.ECG_STREAM_NAME, timeout=0.2)
             if ecg_streams:
                 self.ecg_inlet = StreamInlet(ecg_streams[0])
+                # Size the ECG chart in seconds rather than samples. A fixed
+                # sample count showed several seconds at 200 Hz but barely
+                # one at 1000 Hz, about a single beat, which is too little
+                # to judge electrode contact by eye.
+                try:
+                    _fs = float(ecg_streams[0].nominal_srate()) or 0.0
+                except Exception:
+                    _fs = 0.0
+                if _fs > 0:
+                    self._ecg_view_n = int(_fs * 6)     # 6 s on screen
+                    self._ecg_keep_n = int(_fs * 10)    # 10 s kept
                 print(f"[DASHBOARD] Connected to ECG side stream "
                       f"'{Config.ECG_STREAM_NAME}'."
                       + ("" if initial else " (lazy retry succeeded)"))
@@ -1371,7 +1805,9 @@ class ClinicalDashboard:
             return
         if view_n is None:
             view_n = self.view_width
-        vals = ydata[-view_n:]
+        # NaN (warm-up) or inf would poison min/max and the axis with them.
+        vals = [v for v in ydata[-view_n:]
+                if v == v and v not in (float('inf'), float('-inf'))]
         if not vals:
             return
         vmin = min(vals)
@@ -1387,7 +1823,15 @@ class ClinicalDashboard:
         # never tighter than the configured default. Hysteresis is light
         # so the chart can both expand on a spike AND contract back when
         # the signal settles.
-        half = max(default_half, span * 0.6 + default_half * 0.3)
+        # The half-range must also reach the farthest visible point from the
+        # centre. Sizing it from the data's own spread alone let a steady
+        # signal lying outside the baseline window vanish: HR held at 93 BPM
+        # against a 79 BPM baseline has almost no spread, so the window
+        # stayed at 69-89 and the trace was drawn above it.
+        reach = max(vmax - mid, mid - vmin, 0.0)
+        half = max(default_half,
+                   span * 0.6 + default_half * 0.3,
+                   reach + max(default_half * 0.15, span * 0.1))
         lo = mid - half
         hi = mid + half
         if y_floor is not None:
@@ -1411,15 +1855,23 @@ class ClinicalDashboard:
         ecg_samples, _ = self.ecg_inlet.pull_chunk(timeout=0.0)
         if not ecg_samples:
             return
+        # The data source publishes ECG only for fresh sensor samples, so
+        # this timestamp doubles as the sensor's last sign of life.
+        self._ecg_last_sample_at = time.monotonic()
+        keep_n = getattr(self, '_ecg_keep_n', None) or self.max_history * 4
+        view_n = getattr(self, '_ecg_view_n', None) or self.view_width * 4
         for s in ecg_samples:
             self.ecg_data['x'].append(self.ecg_tick)
             self.ecg_data['y'].append(s[0])
             self.ecg_tick += 1
-            if len(self.ecg_data['x']) > self.max_history * 4:
-                self.ecg_data['x'].pop(0); self.ecg_data['y'].pop(0)
+        # Trim once per chunk: popping the head sample by sample is linear
+        # in the buffer length and runs a thousand times a second at 1000 Hz.
+        excess = len(self.ecg_data['x']) - keep_n
+        if excess > 0:
+            del self.ecg_data['x'][:excess]
+            del self.ecg_data['y'][:excess]
         self.plot_ecg.curve.setData(self.ecg_data['x'], self.ecg_data['y'])
-        self.plot_ecg.setXRange(max(0, self.ecg_tick - self.view_width * 4),
-                                 self.ecg_tick)
+        self.plot_ecg.setXRange(max(0, self.ecg_tick - view_n), self.ecg_tick)
         if self.plot_ecg.locked_y_range is not None:
             self.plot_ecg.setYRange(*self.plot_ecg.locked_y_range, padding=0)
 
@@ -1438,8 +1890,8 @@ class ClinicalDashboard:
         for lab in (self.label_baseline_eda, self.label_baseline_hr,
                     self.label_baseline_hrv):
             lab.setText(lab.text().split(":")[0] + ": -- " + lab.text().split()[-1])
-        self.label_baseline_sigma.setText("sigma_baseline: --")
-        self.label_baseline_thresh.setText("Thresholds: MILD = --, HIGH = --")
+        self.label_baseline_sigma.setText("sigma --")
+        self.label_baseline_thresh.setText("MILD -- / HIGH --")
         self.mild_line.setValue(0)
         self.high_line.setValue(0)
 

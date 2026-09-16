@@ -49,7 +49,7 @@ class UnityBridge:
         'avg_hrv',                  # 11 personal baseline RMSSD
         'thresh_mild',              # 12 mild/calm boundary, locked after baseline
         'thresh_high',              # 13 high/ultra boundary, locked after baseline
-        'baseline_status',          # 14 0 during baseline, 1 once locked
+        'baseline_status',          # 14 0 not locked, 1 locked and usable, 2 locked but calibration failed
         'elapsed_baseline_sec',     # 15 seconds in the BASELINE state (frozen at lock)
         'qa_invalid_count',         # 16 NaN/Inf samples rejected (running total)
         'qa_out_of_range_count',    # 17 out-of-physiological-range samples rejected
@@ -97,6 +97,7 @@ class UnityBridge:
                         avg_eda: float = 0.0, avg_hr: float = 0.0, avg_hrv: float = 0.0,
                         thresh_mild: float = 0.0, thresh_high: float = 0.0,
                         baseline_locked: bool = False,
+                        baseline_invalid: bool = False,
                         elapsed_baseline_sec: float = 0.0,
                         qa_invalid: int = 0, qa_out_of_range: int = 0,
                         qa_disconnects: int = 0,
@@ -122,7 +123,7 @@ class UnityBridge:
             float(delta_eda), float(delta_hr), float(delta_hrv),
             float(avg_eda), float(avg_hr), float(avg_hrv),
             float(thresh_mild), float(thresh_high),
-            1.0 if baseline_locked else 0.0,
+            2.0 if (baseline_locked and baseline_invalid) else (1.0 if baseline_locked else 0.0),
             float(elapsed_baseline_sec),
             float(qa_invalid), float(qa_out_of_range), float(qa_disconnects),
             1.0 if udp_gate_open else 0.0,

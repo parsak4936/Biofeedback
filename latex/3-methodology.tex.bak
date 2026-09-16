@@ -1,0 +1,1110 @@
+
+\section{Methodology and Architecture}
+\label{sec:methodology}
+
+\subsection{Scope}
+
+The subject of this section is a single component of the wider
+study: the biofeedback engine that runs on the lab workstation,
+listens to the participant's physiology, and drives the VR scene in
+response. Everything below explains what that engine does and why
+it does it that way.
+
+Three neighbouring topics are handled by other sections of the
+paper. The VR scenes themselves
+(balloon flight for acrophobia, spider dynamics for arachnophobia,
+audience behaviour for public speaking) are the responsibility of
+the Unity team, and a placeholder subsection later in this
+methodology (Section~\ref{sec:unity-placeholder}) marks where their
+content slots into the paper. Study-level ethics (approval numbers,
+consent language, retention policy) belong to the general study
+description. Where those neighbouring topics matter here they are
+mentioned briefly and then handed off.
+
+
+% ,,,,,,,,,,,,,,,,,,,,,,
+\subsection{Framing}
+% ,,,,,,,,,,,,,,,,,,,,,,
+
+Virtual reality exposure therapy for phobias has been established
+across three decades of clinical work
+\citep{rothbaum1995, emmelkamp2002, wiederhold2005}, and later
+meta-analyses have shown it non-inferior to in-vivo
+exposure~\citep{powers2008}. Recent reviews collect the state of
+the art \citep{botella2017}, and randomised controlled trials of
+fully automated VR exposure now report clinically significant
+reductions in fear-of-heights scores~\citep{freeman2018}. The
+approach works. What limits its reach at present is not efficacy
+but engineering.
+
+One design decision shaped everything else in our framework.
+Physiological measurement, per-participant baselining, stress
+computation, and VR presentation are four separate problems.
+Systems reported in the adaptive VR literature ,
+\citet{moldoveanu2023} for acrophobia, \citet{garciapalacios2002}
+for spider phobia, \citet{anderson2013} for social anxiety ,
+typically bundle all four inside one codebase that is tightly
+coupled to one scene. Every new phobia then means duplicating the
+physiology stack.
+
+We deliberately separated the layers. Our engine is a server. Each
+VR phobia scene is a client. Two network channels connect them:
+short text commands travel from server to Unity, structured JSON
+telemetry travels from Unity back to the server. Neither channel
+knows or cares which scene is loaded. Adding a fourth phobia is
+Unity-side work only.
+
+Physiologically we do not claim novelty. The extraction chain and
+the weighted composite come directly from \citet{moldoveanu2023}.
+What is new here is the scene-agnostic infrastructure that lets
+that same chain support a range of exposure paradigms in one lab
+on one set of sensors. Standardising the measurement side across
+studies reduces cost, makes cross-phobia comparisons meaningful,
+and shortens the path from ``we want a new exposure paradigm'' to
+``we have a working prototype''.
+
+An earlier study conducted at this lab, reported by
+\citet{daghooghi}, ran a similar VR exposure protocol without any
+biofeedback loop. The framework described here is the technical
+extension that closes that loop. Continuity between the two
+versions of the study matters for how the paper reads.
+
+% ,,,,,,,,,,,,,,,,,,,,,,
+\subsection{Modularity as a design principle}
+\label{sec:modularity}
+% ,,,,,,,,,,,,,,,,,,,,,,
+
+Every important component in the pipeline is swappable at a single
+edit point. Modularity is not decoration here; it is the property
+that lets one lab support multiple phobias, run offline replays
+alongside live sessions, and compare independent signal-processing
+libraries against each other on the same data. Four axes of
+modularity matter.
+
+\textbf{Data source.} A configuration flag switches between two
+data sources without touching any downstream code. In
+\texttt{real\_plux} mode the engine subscribes to the live PLUX
+device through OpenSignals. In \texttt{mock} mode it replays a
+recorded OpenSignals file at native rate. Both paths publish the
+same three-channel Lab Streaming Layer stream, so the acquisition
+and processing modules cannot tell them apart. Offline debugging,
+regression testing, and pipeline development happen in mock mode
+without a device attached.
+
+\textbf{Signal extraction backend.} Two implementations of HR,
+RMSSD, and phasic EDA extraction coexist behind an interface. The
+default calls NeuroKit2~\citep{makowski2021}; the alternative uses
+the official PLUX biosignalsnotebooks package~\citep{plux2020}.
+Switching backends requires editing one line of configuration.
+Both feed identical downstream math. Section~\ref{sec:backends}
+covers this at length.
+
+\textbf{VR scene.} The Unity-side contract is fixed and
+scene-agnostic. Any scene that implements four incoming commands
+(\texttt{start}, \texttt{stop}, \texttt{increase},
+\texttt{decrease}) and emits telemetry in the shared JSON envelope
+is a valid client. The biofeedback engine holds no scene-specific
+code and needs none: the scenario label and the telemetry fields
+are learned at runtime from the first packet Unity sends.
+
+\textbf{Recording schema.} The clinical CSV file grows its columns
+from the first Unity telemetry packet. If a new phobia adds two
+extra fields (say \texttt{spider\_size} and
+\texttt{spider\_count}), the recording captures them without any
+Python change. If Unity never connects, the header commits with
+physiology-only columns and the file still lands on disk.
+
+Each of these decisions is one editable location in the codebase.
+Together they mean an experiment that changes phobia, changes
+extraction library, or changes replay source can be reconfigured
+in minutes, not days.
+
+% ,,,,,,,,,,,,,,,,,,,,,,
+\subsection{Physiological signals: what they are}
+\label{sec:signals-what}
+% ,,,,,,,,,,,,,,,,,,,,,,
+
+The engine ingests two raw sensor channels and derives three
+per-tick numbers from them. A short refresher on what those
+signals are, and where they come from, keeps the rest of the
+section readable.
+
+\textbf{ECG (electrocardiogram)} is the electrical activity of
+the heart recorded at the skin surface. Three surface electrodes
+in the standard Lead~I arrangement (positive on the left
+mid-clavicular line, negative on the right, reference on the
+lower ribs) capture the potential difference generated by each
+cardiac cycle. Each cycle produces the characteristic P--QRS--T
+waveform; only the QRS complex matters for our pipeline, because
+its sharp R~peak is the reproducible landmark from which every
+downstream heart measure is derived.
+
+\textbf{EDA (electrodermal activity)}, also called skin
+conductance or galvanic skin response, measures how easily
+electricity flows across the palmar skin. Two silver--silver
+chloride electrodes on adjacent fingers of the non-dominant hand
+apply a small constant voltage, and the conductance between them
+varies with the activity of the eccrine sweat glands. EDA is one
+of the most direct real-time indicators of sympathetic arousal,
+because eccrine glands on the palmar surface are innervated
+solely by the sympathetic branch of the autonomic nervous system
+\citep{boucsein2012, dawson2016, fowles1980}.
+
+\textbf{HR (heart rate)} is the number of heartbeats per minute,
+computed from the intervals between consecutive R~peaks in the
+ECG. It reflects the moment-to-moment balance of sympathetic
+(accelerating) and parasympathetic (slowing) drive on the heart.
+
+\textbf{HRV (heart-rate variability)} is the beat-to-beat
+fluctuation in the RR intervals. We report RMSSD (root mean
+square of successive differences), a time-domain metric that is
+dominated by parasympathetic influence and that decreases during
+acute stress \citep{taskforce1996, shaffer2017, thayer2012,
+kim2018}.
+
+% ,,,,,,,,,,,,,,,,,,,,,,
+\subsection{Hardware and materials}
+% ,,,,,,,,,,,,,,,,,,,,,,
+
+Each participant wears a wireless biosignalsplux hub on a chest
+band, manufactured by PLUX Wireless Biosignals (Lisbon, Portugal).
+Two sensor cables plug into the hub: a three-lead ECG cable in
+the standard Lead~I configuration, and a two-pad electrodermal
+cable on the non-dominant hand. The hub samples both channels
+synchronously at 200~Hz with 16-bit ADC resolution over a
+three-volt reference. 200~Hz is well above the Nyquist rate for
+ECG (a QRS complex has energy up to about 40~Hz) and comfortably
+above the requirements for EDA (a phasic skin conductance
+response evolves over seconds).
+
+Bluetooth Low Energy carries the data from the hub to a Windows
+workstation. The vendor software (OpenSignals) publishes the
+samples over the Lab Streaming
+Layer~\citep{kothe2019}\footnote{Lab Streaming Layer is
+open-source and available at \url{https://github.com/sccn/labstreaminglayer}.},
+and any process running locally can subscribe. Our engine is one
+such subscriber. One subtlety is worth flagging up front: the
+OpenSignals bridge publishes already-converted physical units
+(microsiemens for skin conductance, millivolts for ECG), not raw
+ADC integers as commonly assumed. Vendor documentation is silent
+on the point, and we spent several days chasing a ``constant 25
+microsiemens'' reading that turned out to be the correctly
+converted value of a saturated ADC. A configuration flag now
+switches between the two conventions so the same code handles
+archived recordings that carry raw values.
+
+Immersion runs on a Meta Quest headset tethered to the workstation
+over Quest Link. Unity 2022 LTS~\citep{unity2024} renders the
+scene and speaks to the biofeedback engine through local UDP
+sockets, not through the Quest Link tether. Nothing clinically
+important depends on the specific headset model; the setup would
+work with any Unity-compatible head-mounted display.
+
+% ,,,,,,,,,,,,,,,,,,,,,,
+\subsection{Tools and alternatives}
+\label{sec:tools}
+% ,,,,,,,,,,,,,,,,,,,,,,
+
+Each component of the framework has established alternatives, and
+in most cases the choice was based on prior lab experience or on
+a specific technical property. Table~\ref{tab:tools} lists the
+tool actually used for each role, the best-known alternatives
+considered, and the reason for the choice. The intent is
+transparency rather than advocacy: any of the alternatives could
+be dropped in with local code changes.
+
+\begin{table}[H]
+    \centering
+    \small
+    \begin{tabular}{@{}p{2.8cm}p{2.6cm}p{4.2cm}p{4.4cm}@{}}
+        \toprule
+        \textbf{Role} & \textbf{Chosen} & \textbf{Notable alternatives}
+            & \textbf{Reason for the choice} \\
+        \midrule
+        Biosensor hub &
+            biosignalsplux (PLUX) &
+            Shimmer3, BITalino, Empatica E4 &
+            already owned by the lab; synchronous 200~Hz sampling on
+            ECG and EDA at 16-bit resolution \\[2pt]
+        Signal transport &
+            Lab Streaming Layer \citep{kothe2019} &
+            MQTT, ZeroMQ, ROS topics &
+            sample-accurate timestamps across independent producers;
+            de facto standard in neurophysiology labs \\[2pt]
+        HR / HRV / EDA extraction (default) &
+            NeuroKit2 \citep{makowski2021} &
+            biosignalsnotebooks, BioSPPy, HeartPy, MNE-Python &
+            broadest signal coverage; cvxEDA bundled; Kubios artifact
+            correction built in \\[2pt]
+        HR / HRV / EDA extraction (alternative) &
+            biosignalsnotebooks \citep{plux2020} &
+            (see row above) &
+            official PLUX package; requested by the supervisor for
+            reproducibility against PLUX documentation \\[2pt]
+        R-peak detection &
+            NeuroKit2 hybrid + Kubios correction
+                \citep{lipponen2019} &
+            Pan--Tompkins \citep{pantompkins1985}, Hamilton, Engzee &
+            interpolates missed beats before they contaminate RMSSD \\[2pt]
+        EDA decomposition &
+            cvxEDA \citep{greco2016} &
+            Ledalab, low-pass subtraction, DEAP &
+            convex optimisation with sparsity prior; reproducible;
+            active maintenance \\[2pt]
+        VR runtime &
+            Unity 2022 LTS \citep{unity2024} &
+            Unreal Engine 5, Godot, WebXR &
+            Unity team's existing toolkit; largest phobia asset
+            ecosystem \\[2pt]
+        Head-mounted display &
+            Meta Quest (via Quest Link) &
+            HTC Vive Pro, Valve Index, Pico Neo &
+            already owned; no clinical dependence on the specific
+            device \\[2pt]
+        Server language &
+            Python 3.10 &
+            C++, MATLAB, Julia &
+            fastest ecosystem for biosignal libraries; short
+            iteration loop for research code \\[2pt]
+        Biofeedback $\leftrightarrow$ Unity transport &
+            UDP sockets &
+            WebSocket, gRPC, LSL, TCP &
+            lowest overhead for one-shot commands; loss tolerance
+            already provided by throttling \\
+        \bottomrule
+    \end{tabular}
+    \caption{Every role in the framework, the tool actually used
+    for it, alternatives that were considered or that other groups
+    use, and the reason behind our specific choice. Rows for the
+    extraction backend appear twice because both are active in the
+    codebase.}
+    \label{tab:tools}
+\end{table}
+
+Two additional wearable stress-recognition benchmarks are worth
+naming in this context, because they anchor the design space even
+though we do not use them directly. WESAD~\citep{schmidt2018}
+provides a public multimodal dataset of chest and wrist
+physiology under laboratory stress conditions, and it is the
+common comparator when validating classifier variants.
+\citet{alberdi2016} survey office-environment stress recognition
+across the multimodal literature, giving a picture of which
+signal combinations have historically worked well and under what
+conditions.
+
+% ,,,,,,,,,,,,,,,,,,,,,,
+\subsection{System architecture}
+% ,,,,,,,,,,,,,,,,,,,,,,
+
+\subsubsection{Component overview}
+
+The server is a Python 3.10 process. It is split into modules with
+one job each, and communication between them happens through
+explicit function calls; there is no shared mutable state to
+reason about.
+
+On the input side, a data-source module subscribes to the Lab
+Streaming Layer feed, reads the channel labels to learn which
+channel carries which sensor, and applies conversion formulas
+when needed. Sanity bounds reject samples outside plausible
+physiological ranges, holding the last valid value in their place
+so downstream code always sees a plausible number.
+
+The middle of the pipeline is the signal-processing module. It
+maintains the rolling window that feeds the phasic decomposition,
+accumulates the baseline buffer during the calibration phase, and
+publishes cleaned per-tick values. A fusion module then computes
+per-signal deltas against the frozen baseline, standardises them,
+combines them with the Moldoveanu weights, and classifies the
+result into three states.
+
+Output splits three ways. One module broadcasts every tick on the
+Lab Streaming Layer so the dashboard can subscribe. A second sends
+short UDP commands to Unity. A third listens for JSON telemetry
+packets coming back from Unity and hands them to the recorder.
+
+Persistence lives in a session-manager module. Each session ends
+with three files on disk: a clinical record, a forensic per-tick
+trace, and a JSON metadata file that carries intake, baseline, and
+the locked classification thresholds.
+
+Not one of these modules knows which scenario is running. The
+scenario label is learned at runtime from the first telemetry
+packet Unity sends, and it determines which extra columns get
+added to the clinical record.
+
+
+\begin{figure}[H]
+    \centering
+    \IfFileExists{diagrams/01_system_topology.png}{%
+        \includegraphics[width=\linewidth]{diagrams/01_system_topology.png}%
+    }{%
+        \fbox{\parbox{0.9\linewidth}{\centering
+            \vspace{1.5cm}
+            \textbf{[Diagram 1 placeholder , System topology]}\\[6pt]
+            \small Render the corresponding mermaid file at
+            mermaid.live, export as PNG, and drop it into
+            \texttt{diagrams/}.
+            \vspace{1.5cm}
+        }}%
+    }
+    \caption{System topology. Participant physiology enters through
+    the PLUX hub, reaches the biofeedback engine over Lab Streaming
+    Layer, and drives the Unity VR scene through UDP. Telemetry from
+    the scene returns to the engine on a second UDP channel.
+    Everything is recorded to disk in parallel.}
+    \label{fig:topology}
+\end{figure}
+
+
+\begin{figure}[H]
+    \centering
+    \IfFileExists{diagrams/02_multi_scenario_contract.png}{%
+        \includegraphics[width=\linewidth]{diagrams/02_multi_scenario_contract.png}%
+    }{%
+        \fbox{\parbox{0.9\linewidth}{\centering
+            \vspace{1.5cm}
+            \textbf{[Diagram 2 placeholder , Multi-scenario contract]}\\[6pt]
+            \small Render the corresponding mermaid file at
+            mermaid.live, export as PNG, and drop it into
+            \texttt{diagrams/}.
+            \vspace{1.5cm}
+        }}%
+    }
+    \caption{Multi-scenario Unity contract. The engine broadcasts
+    four command strings that every phobia scene understands.
+    Telemetry back from each scene uses a single JSON envelope with
+    scene-specific fields, and the recorder captures those fields
+    verbatim without pre-declaring them.}
+    \label{fig:contract}
+\end{figure}
+
+The design intent behind Figure~\ref{fig:contract} is that the
+recording captures whatever any scene chooses to emit, without
+knowing in advance what those fields are. The first telemetry
+packet of a session fixes the column set, and every subsequent
+packet is a value fill for those columns.
+Section~\ref{sec:session-record} covers the recording detail.
+
+\subsubsection{The contract between server and Unity}
+
+Two directions, asymmetric on purpose.
+
+Commands from the server go out as short UTF-8 strings, one per
+UDP datagram. Four values are legal: \texttt{start} marks the
+beginning of the live phase, \texttt{stop} marks the end,
+\texttt{increase} means the participant is calm and the scene may
+escalate, \texttt{decrease} means the participant is stressed and
+the scene should back off. Unity is free to interpret each command
+however the loaded scene requires. In the balloon-flight scene,
+\texttt{increase} raises altitude; in a public-speaking scene,
+\texttt{increase} might bring a new person into the room. The
+engine does not care.
+
+Telemetry from Unity uses one shape for every scene:
+
+\begin{quote}\texttt{\{"scenario": "<name>", "data": \{<field>: <value>, \dots\}\}}\end{quote}
+
+Server treats the packet as opaque. The scenario label labels the
+scene; the fields inside \texttt{data} are recorded verbatim.
+Nothing on the server declares which fields are legal or expected.
+As a consequence, adding a fourth phobia requires no biofeedback
+change at all.
+
+% ,,,,,,,,,,,,,,,,,,,,,,
+\subsection{Signal acquisition and conditioning}
+% ,,,,,,,,,,,,,,,,,,,,,,
+
+Sensor packets arrive on the LSL feed and pass through three
+checks before any pipeline math touches them.
+
+Range first. Values outside plausible physiological limits are
+rejected as sensor artifacts. Skin conductance is clipped to the
+zero to eighty microsiemens interval; ECG to a few millivolts
+either side of zero; heart rate to the thirty to two hundred and
+twenty beats-per-minute band; RMSSD to the five to five-hundred
+millisecond band. Rejected samples never enter the baseline
+buffer, and the previous valid value is held so downstream code
+always sees something plausible.
+
+Then a disconnect check. If the variance of a signal collapses
+below a small threshold for more than fifteen seconds, the code
+assumes an electrode has come loose or a cable has been unplugged
+and issues a warning to the operator console. It does not abort.
+The warning is a hint, not a hard failure.
+
+Underneath all of this sits a three-tier sampling-rate cascade.
+The device runs at 200~Hz. The internal processing tick runs at
+10~Hz, because the physiology does not change faster than that
+and both HR and HRV have their own trailing-window estimators
+underneath. The Unity command channel is throttled to at most one
+command per second, because a rapid succession of balloon or
+audience changes looks unnatural inside VR. Three rates,
+decoupled, each configurable in one place.
+
+Two extraction backends live in the code in parallel.
+NeuroKit2~\citep{makowski2021}\footnote{NeuroKit2 source and
+documentation at \url{https://github.com/neuropsychology/NeuroKit}.}
+is the default and matches the reference implementation from the
+lab's prior work. biosignalsnotebooks~\citep{plux2020} (the
+official PLUX package) is the alternative and is available at
+\url{https://github.com/pluxbiosignals/biosignalsnotebooks}. Both
+feed identical downstream math. This redundancy has a purpose:
+any recorded session can be rerun through both chains offline
+and their agreement quantified as a Pearson correlation on HR,
+RMSSD, and the composite stress index. That check appears in the
+results section as evidence that the choice of extraction library
+does not drive the finding.
+
+\subsubsection{Heart rate and heart-rate variability}
+\label{sec:hr-hrv}
+
+Cleaning happens first, always. Raw ECG passes through a high-pass
+filter at 0.5~Hz to remove baseline drift and a notch filter at
+50~Hz to remove mains hum (60~Hz in the United States). Cleaning
+is not optional: the Pan and Tompkins
+detector~\citep{pantompkins1985} returns zero peaks on raw
+mains-contaminated ECG, and even the hybrid NeuroKit2 detector
+fares only marginally better.
+
+Peak detection follows. Both backends produce a series of R-peak
+indices. NeuroKit2 combines a hybrid detection method with Kubios
+artifact correction on top~\citep{lipponen2019}, and the correction
+interpolates missed beats before they can distort the RMSSD
+calculation. biosignalsnotebooks uses the classic Pan-Tompkins
+detector directly, with no interpolation step.
+
+From the R-peaks, per-window heart rate is the reciprocal of the
+mean inter-peak interval, expressed in beats per minute:
+
+\begin{equation}
+\mathrm{HR} \;=\; \frac{60 \cdot f_{s}}{\overline{\Delta R}}
+\qquad \text{[beats per minute]}
+\end{equation}
+
+Here $\Delta R = R_{i+1} - R_{i}$ is the sample-index difference
+between successive R-peaks and $f_{s}$ is the ECG sampling rate.
+Heart rate is recomputed every 0.5~seconds over a trailing window
+of thirty seconds, and it is held with zero-order hold between
+recomputes.
+
+Heart-rate variability, as reported in this paper, is the root
+mean square of successive differences between consecutive RR
+intervals. RMSSD is the most widely used time-domain HRV metric
+in short recordings and has a large validation literature as an
+acute-stress marker~\citep{thayer2012, kim2018}:
+
+\begin{equation}
+\mathrm{RMSSD} \;=\; \sqrt{\frac{1}{N-1}
+\sum_{i=1}^{N-1} \bigl( \mathrm{RR}_{i+1} - \mathrm{RR}_{i} \bigr)^{2}}
+\qquad \text{[milliseconds]}
+\end{equation}
+
+Individual intervals themselves are
+$\mathrm{RR}_{i} = 1000 \cdot \Delta R_{i} / f_{s}$
+in milliseconds. RMSSD is recomputed on the same 0.5-second cadence
+as HR, but over a longer trailing window of sixty seconds.
+
+Sixty seconds is deliberate, and it cites two bodies of
+literature. The Task Force 1996 guidelines~\citep{taskforce1996}
+recommend 300~seconds for stable short-term HRV. Ultra-short-term
+literature since then , \citet{munoz2015}, \citet{shaffer2017}
+, has established 60~seconds as the practical minimum where the
+standard deviation of the RMSSD estimator drops into a usable
+range (about 12~ms at 60~s, versus about 56~ms at 10~s). Anything
+shorter and estimator noise begins to overwhelm real
+physiological signal.
+
+Malik and colleagues~\citep{taskforce1996} contribute the RMSSD
+artifact gate. After Kubios interpolation, each RR interval is
+compared to its predecessor. Any pair whose relative change
+exceeds 20~percent is removed:
+
+\begin{equation}
+\text{keep } \Delta \mathrm{RR}_{i}
+\;\text{ if }\; \frac{\lvert \mathrm{RR}_{i+1} -
+\mathrm{RR}_{i} \rvert}{\mathrm{RR}_{i}} \le 0.20
+\end{equation}
+
+The rationale is straightforward. Ectopic beats that survive
+Kubios correction are, by construction, outliers in the
+successive-difference series and would inflate RMSSD dramatically.
+The alternative backend uses the Lippman--Stein--Lerman ectopy
+rule~\citep{lippman1994} instead, which is a slightly different
+formulation of the same idea (removing pairs rather than single
+beats).
+
+\subsubsection{Electrodermal activity}
+\label{sec:eda}
+
+Skin conductance is the sum of two components with very different
+timescales. A tonic level drifts over minutes and reflects
+electrode hydration, ambient temperature, and general arousal
+baseline. Faster, seconds-scale bumps called skin conductance
+responses sit on top of the tonic, one per sympathetic event. Only
+the phasic component is useful for real-time stress feedback;
+tonic varies too slowly and too often for the wrong reasons
+\citep{boucsein2012, dawson2016, fowles1980}.
+
+\citet{greco2016} formulated the cvxEDA algorithm to recover the
+two components jointly. It solves an inverse problem under a
+sparsity prior on the phasic driver:
+
+\begin{equation}
+\min_{\mathbf{t}, \mathbf{p}, \mathbf{q}} \;
+\frac{1}{2} \lVert \mathbf{y} - \mathbf{t} - \mathbf{p} -
+\mathbf{L}\mathbf{q} \rVert_{2}^{2}
++ \alpha \lVert \mathbf{A}\mathbf{p} \rVert_{1}
++ \frac{\gamma}{2} \lVert \mathbf{B}\mathbf{t} \rVert_{2}^{2}
+\end{equation}
+
+Observed skin conductance is $\mathbf{y}$, tonic is $\mathbf{t}$,
+phasic driver is $\mathbf{p}$, and $\mathbf{q}$ absorbs unmodelled
+dynamics. Full derivation appears in \citet{greco2016}; we call
+the implementation wrapped by NeuroKit2.
+
+Every half second, cvxEDA runs on the most recent 60~seconds of
+raw EDA, resampled to 10~Hz. The last sample of the recovered
+phasic component becomes the current phasic value. One safeguard
+matters: any phasic reading whose absolute magnitude exceeds
+1~microsiemens is discarded as edge-of-window ringing from the
+resampler. Real phasic responses rarely exceed that magnitude and
+never appear as isolated one-sample spikes.
+
+The alternative backend has no cvxEDA. It offers a simpler recipe
+from the biosignalsnotebooks EDA tutorial: subtract from the raw
+signal its low-pass filtered version, with the cutoff at the
+canonical 0.05~Hz boundary. That mode is available for comparison;
+the default remains cvxEDA.
+
+% ,,,,,,,,,,,,,,,,,,,,,,
+\subsection{Personal calibration}
+\label{sec:baseline}
+% ,,,,,,,,,,,,,,,,,,,,,,
+
+Every session opens with 120~seconds of baseline. Participant sits
+quietly with sensors already on and the VR scene not yet started.
+Three things happen during and after this window.
+
+Averages come first. Cleaned EDA, HR, and RMSSD across the
+baseline are averaged after a three-sigma outlier filter removes
+movement artifacts:
+
+\begin{equation}
+\mu_{x} \;=\; \frac{1}{N} \sum_{i=1}^{N} x_{i}
+\qquad \text{for } x \in \{\mathrm{EDA},\ \mathrm{HR},\ \mathrm{RMSSD}\}
+\end{equation}
+
+Summation restricts to samples within three standard deviations of
+the crude sample mean. Rejected-sample counts are logged for later
+review.
+
+Standard deviations come next, one per delta signal. Each will
+divide the corresponding live delta during standardisation in the
+live phase, so a low-quality baseline directly compresses the
+dynamic range of the classifier.
+
+Sigma floors sit on top. If a measured sigma falls below a
+physiological minimum, it is clamped upward to that floor and the
+console prints a warning. There are three floors: two percentage
+points on heart-rate deviation, five percentage points on RMSSD
+deviation, and 0.02~microsiemens on phasic EDA. Purpose is to
+stop a flat baseline , from an unusually still participant, or
+from a technical acquisition issue , from producing enormous
+standardised scores on trivial live deviations. Values were chosen
+from the physiological ranges reported in \citet{taskforce1996},
+\citet{shaffer2017}, and \citet{boucsein2012}. They are
+conservative rather than tight.
+
+Baseline collection is the most fragile part of the whole
+procedure. Nervous participants have already-elevated baselines,
+and every subsequent live tick then looks calm by comparison.
+Operator protocol includes a short briefing before baseline begins
+and continuous monitoring of the trace to catch fidgeting. In
+practice, any baseline where a sigma floor had to engage more than
+once is discarded and the session is restarted.
+
+% ,,,,,,,,,,,,,,,,,,,,,,
+\subsection{Stress index calculation}
+% ,,,,,,,,,,,,,,,,,,,,,,
+
+Three physiological channels reduce to one scalar via the
+weighted-composite formulation of \citet{moldoveanu2023}. The
+choice to combine EDA, HR, and HRV into a single scalar is
+standard practice in the stress-recognition literature
+\citep{alberdi2016, schmidt2018, kreibig2010}.
+
+\subsubsection{Per-signal deltas}
+
+Each channel first becomes a delta against the frozen personal
+baseline:
+
+\begin{align}
+\Delta_{\mathrm{EDA}} &= \mathrm{EDA}_{\mathrm{phasic}}
+&& \text{[microsiemens]} \\[2pt]
+\Delta_{\mathrm{HR}} &= \frac{\mathrm{HR}_{\mathrm{live}} - \mu_{\mathrm{HR}}}
+{\mu_{\mathrm{HR}}} \cdot 100 && \text{[percent]} \\[2pt]
+\Delta_{\mathrm{HRV}} &= \frac{\mu_{\mathrm{HRV}} - \mathrm{HRV}_{\mathrm{live}}}
+{\mu_{\mathrm{HRV}}} \cdot 100 && \text{[percent, inverted]}
+\end{align}
+
+Sign convention: every delta increases during stress. EDA rises
+with sympathetic arousal, so its phasic value enters as-is. Heart
+rate rises for the same reason, and the percentage change is
+signed positive for stress. HRV works the other way.
+Parasympathetic withdrawal during stress shortens vagally
+mediated beat-to-beat variability, so a decrease in RMSSD
+contributes positively to the composite. The inversion is
+standard in the psychophysiology literature
+\citep{kim2018, kreibig2010, boucsein2012, thayer2012}.
+
+\subsubsection{Standardisation}
+
+Each delta is divided by its own baseline standard deviation:
+
+\begin{equation}
+z_{x} \;=\; \frac{\Delta_{x} - \mu_{\Delta_{x}}}{\sigma_{\Delta_{x}}}
+\qquad \text{for } x \in \{\mathrm{EDA},\ \mathrm{HR},\ \mathrm{HRV}\}
+\end{equation}
+
+Why standardise? The three raw deltas have wildly different
+natural magnitudes. Skin conductance moves in tenths of
+microsiemens; heart rate in single-digit percentages; RMSSD in
+tens of percent. Without standardisation the signal with the
+largest raw span would dominate the composite by scale alone,
+regardless of how informative it was. Standardisation also makes
+cross-participant comparisons meaningful, because each score
+lands in units of the participant's own baseline variability.
+
+\subsubsection{Weighted composite}
+
+The three standardised deltas combine with fixed weights drawn
+from \citet{moldoveanu2023}:
+
+\begin{equation}
+S_{\mathrm{instant}} \;=\; 0.5 \cdot z_{\mathrm{EDA}}
++ 0.3 \cdot z_{\mathrm{HRV}}
++ 0.2 \cdot z_{\mathrm{HR}}
+\end{equation}
+
+Weights reflect established knowledge about the specificity of
+each signal to sympathetic arousal on short timescales. Skin
+conductance is the most direct real-time sympathetic indicator
+and gets the largest share. HRV integrates parasympathetic
+withdrawal over longer windows and gets the next. Raw heart rate
+is non-specific , it moves for physical activity as much as for
+emotional arousal , so it must be weighted down or it swamps
+the composite during normal movement
+\citep{healey2005, sano2013}.
+
+Using published weights instead of tuning our own keeps the
+paper's contribution on the framework rather than on rediscovering
+a fusion rule.
+
+\subsubsection{Smoothing}
+
+The instantaneous composite is smoothed with a trailing rolling
+mean before it is used for classification:
+
+\begin{equation}
+S_{t} \;=\; \frac{1}{W} \sum_{k=0}^{W-1} S_{\mathrm{instant},\, t-k}
+\qquad W = f_{p} \cdot \tau_{\mathrm{smooth}}
+\end{equation}
+
+With $\tau_{\mathrm{smooth}} = 3$~seconds and $f_{p} = 10$~Hz,
+the window is $W = 30$~samples. Three seconds is a compromise.
+Shorter windows let per-tick recompute artifacts from the HR and
+RMSSD estimators leak into the classification. Longer windows
+attenuate real, fast physiological transients that we want to
+catch. The choice was empirical: inspecting live traces from four
+early participants, plotting the smoothed trajectory at one,
+three, and five seconds, and confirming with the supervisor that
+three seconds preserved every clinically meaningful event while
+suppressing tick-level noise.
+
+
+\begin{figure}[H]
+    \centering
+    \IfFileExists{diagrams/03_signal_processing_chain.pdf}{%
+        % , THIS IS THE CRUCIAL LINE ,
+        \includegraphics[width=\linewidth, height=0.9\textheight, keepaspectratio]{diagrams/03_signal_processing_chain.pdf}%
+    }{%
+        \fbox{\parbox{0.9\linewidth}{\centering
+            \vspace{1.5cm}
+            \textbf{[Diagram 3 placeholder , Signal processing chain]}\\[6pt]
+            \small Render the corresponding mermaid file at
+            mermaid.live, export as PDF, and drop it into
+            \texttt{diagrams/}.
+            \vspace{1.5cm}
+        }}%
+    }
+    \caption{Signal processing chain. Raw ECG becomes HR and RMSSD;
+    raw skin conductance becomes phasic EDA; the three signals are
+    standardised against personal baseline, combined with fixed
+    weights, and smoothed into the composite stress index that
+    drives the classifier.}
+    \label{fig:chain}
+\end{figure}
+% ,,,,,,,,,,,,,,,,,,,,,,
+\subsection{Classification and the feedback loop}
+% ,,,,,,,,,,,,,,,,,,,,,,
+
+Two thresholds partition the smoothed stress index into three
+states. They freeze at the end of the baseline window using the
+standard deviation of the raw instantaneous composite over that
+same baseline:
+
+\begin{align}
+\theta_{\mathrm{MILD}} &= \mu_{S_{t}}^{\mathrm{baseline}}
++ 1.28 \cdot \sigma_{S_{\mathrm{instant}}}^{\mathrm{baseline}} \\[2pt]
+\theta_{\mathrm{HIGH}} &= \mu_{S_{t}}^{\mathrm{baseline}}
++ 2.33 \cdot \sigma_{S_{\mathrm{instant}}}^{\mathrm{baseline}}
+\end{align}
+
+The multipliers 1.28 and 2.33 are the standard-normal z-scores at
+the 90th and 99th percentiles. During a calm baseline the
+participant therefore spends 90~percent of the time in the calm
+band, 9~percent in the stressed band, and 1~percent in the
+ultra-stressed band, by construction. Live excursions above those
+bands mark real stress episodes rather than baseline noise.
+
+A subtle point sits under the two formulas above: which standard
+deviation goes into the threshold. Sigma comes from the raw
+per-tick composite series, not from the smoothed series.
+Rolling-mean smoothing shrinks variance by roughly the square
+root of the window length, so using the smoothed sigma would
+compress the bands and every real arousal would jump straight
+from calm to ultra-stressed. The mean, on the other hand, uses
+the smoothed series because live classification operates on the
+smoothed value; means are invariant under rolling averages, so
+the asymmetry is safe.
+
+State transitions drive Unity in a very simple way. Calm allows
+escalation: balloon rises, a new audience member walks in.
+Stressed holds the scene at its current level. Ultra-stressed
+signals a back-off: balloon lowers, an audience member looks away.
+The UDP bridge throttles so that at most one command per second
+reaches Unity; extra commands during a throttle window drop, they
+do not queue. This keeps the VR experience smooth even when the
+physiology briefly oscillates near a threshold.
+
+\begin{figure}[H]
+    \centering
+    \IfFileExists{diagrams/04_session_state_machine.png}{%
+        \includegraphics[width=\linewidth, height=0.9\textheight, keepaspectratio]{diagrams/04_session_state_machine.png}%
+    }{%
+        \fbox{\parbox{0.9\linewidth}{\centering
+            \vspace{1.5cm}
+            \textbf{[Diagram 4 placeholder , Session state machine]}\\[6pt]
+            \small Render the corresponding mermaid file at
+            mermaid.live, export as PNG, and drop it into
+            \texttt{diagrams/}.
+            \vspace{1.5cm}
+        }}%
+    }
+    \caption{Session state machine. The operator drives the
+    pipeline through five phases via dashboard buttons; nothing
+    auto-transitions. Baseline lock triggers the frozen threshold
+    computation; entering LIVE opens the UDP command channel to
+    Unity.}
+    \label{fig:state}
+\end{figure}
+\begin{figure}[H]
+    \centering
+    \IfFileExists{diagrams/05_feedback_loop_detail.png}{%
+        \includegraphics[width=\linewidth, height=0.9\textheight, keepaspectratio]{diagrams/05_feedback_loop_detail.png}%
+    }{%
+        \fbox{\parbox{0.9\linewidth}{\centering
+            \vspace{1.5cm}
+            \textbf{[Diagram 5 placeholder , Feedback loop detail]}\\[6pt]
+            \small Render the corresponding mermaid file at
+            mermaid.live, export as PNG, and drop it into
+            \texttt{diagrams/}.
+            \vspace{1.5cm}
+        }}%
+    }
+    \caption{Feedback loop at tick granularity. The classified
+    state becomes a candidate UDP command, which the wait-for-calm
+    gate and the one-per-second throttle filter before it reaches
+    Unity. Every packet actually sent is audited to disk.}
+    \label{fig:loop}
+\end{figure}
+
+The wait-for-calm gate serves a specific purpose. When the live
+phase first starts, the participant may still be adjusting ,
+putting on the headset, settling in , and the first stress
+readings are often noisy. In parallel, the fusion engine returns
+a synthetic calm during its first buffer-warmup second that
+should not count as a real reading. The gate ignores both. It
+watches for the first genuine calm state, and once it sees one,
+the gate opens permanently for the session.
+
+% ,,,,,,,,,,,,,,,,,,,,,,
+\subsection{Session record}
+\label{sec:session-record}
+% ,,,,,,,,,,,,,,,,,,,,,,
+
+Every session produces one folder on disk. Four files inside it.
+
+The clinical record captures, per second, the smoothed
+physiological values, the deltas, the standardised composite, the
+current state, and any telemetry Unity is emitting. Telemetry
+columns are dynamic: fields inside the first non-empty telemetry
+packet Unity sends become the header for the whole session. Rows
+that arrive before Unity Play (during baseline) buffer in memory
+and flush to disk once the schema is known. If Unity never
+connects, the header commits with no dynamic columns and the
+physiology data still lands on disk.
+
+The forensic trace records the raw signal at every internal
+pipeline tick along with an acquisition status code
+(\texttt{NEW-DATA}, \texttt{HOLD-LAST}, \texttt{INVALID},
+\texttt{OUT-OF-RANGE}). It lets a reviewer reconstruct exactly
+what the pipeline saw at any moment. The file is verbose but
+cheap; the whole thing is only a few megabytes for a typical
+session.
+
+Session metadata sits in a JSON file. It contains the intake
+information, the frozen baseline means and sigmas, the two
+thresholds, and the scenario label learned from the first
+telemetry packet. Written once at session start (intake only),
+amended once at baseline lock.
+
+Finally, an audit log records every UDP packet sent to Unity with
+its timestamp, target state, actual state, and gate status. Audit
+lets us reconstruct the full exposure trajectory independently of
+the physiology traces. Useful when investigating whether a
+physiological change followed a scene event or preceded it.
+
+% ,,,,,,,,,,,,,,,,,,,,,,
+\subsection{Backend approach}
+\label{sec:backends}
+% ,,,,,,,,,,,,,,,,,,,,,,
+
+Two extraction backends coexist in the codebase. NeuroKit2 is the
+default; biosignalsnotebooks is the alternative. Both can be
+swapped with a single configuration flag.
+
+Default choice reflects three considerations. First, broader
+signal coverage: NeuroKit2 includes cvxEDA for electrodermal
+decomposition, which the PLUX package lacks. Second, Kubios
+artifact correction is bundled in~\citep{lipponen2019}, which
+handles missed beats more robustly than Pan and Tompkins on its
+own. Third, NeuroKit2 was the toolbox used in an earlier
+reference implementation from the same lab, so keeping it as the
+default preserves comparability with prior work.
+
+Keeping the alternative alongside serves two purposes.
+Independent implementation of the same algorithms means any
+finding survives the ``did the library manufacture this?''
+question. And it respects a specific supervisor request early in
+the project, that extraction be implementable using functions
+from the official PLUX package. Both backends share the entire
+downstream fusion and classification chain; the switch changes
+only how the three input numbers (EDA in microsiemens, HR in
+beats per minute, RMSSD in milliseconds) are derived from the
+raw signals.
+
+Two other Python packages in this space are BioSPPy and HeartPy;
+each is well maintained and could be substituted with modest
+adapter code. We did not include them because they overlap
+functionally with the two backends we already carry, and the
+comparability argument for NeuroKit2 (default) plus
+biosignalsnotebooks (supervisor-requested) leaves no clear role
+for a third.
+
+Quantitative agreement can be measured on demand. On one clean
+archive session replayed through both chains, Pearson
+correlations sit at $r = 0.76$ for HR, $r = 0.87$ for RMSSD on
+clean segments, and $r = 0.90$ for the composite stress index.
+RMSSD medians differ in absolute terms because
+biosignalsnotebooks does not apply the Malik gate. The comparison
+is easy to expand: a companion analysis script runs both chains
+on any recording and reports the numbers alongside a side-by-side
+plot. Later papers would present the comparison across several
+sessions rather than one, but the machinery is already in place.
+
+% ,,,,,,,,,,,,,,,,,,,,,,
+\subsection{Reproducibility}
+% ,,,,,,,,,,,,,,,,,,,,,,
+
+Five design decisions in the codebase support reproducibility for
+publishable research.
+
+Deterministic streaming. When the pipeline replays a recorded
+session for offline analysis, the mock data source waits for the
+acquisition consumer to subscribe before publishing the first
+sample. This eliminates a startup race that used to produce
+different baselines on different runs of the same input file.
+
+Fixed calibration constants. Analog-to-digital conversion (used
+only on raw-ADC recordings, since live sessions receive
+pre-converted values from OpenSignals) uses the constants from
+the biosignalsnotebooks reference conversion routine. All of them
+are hard-coded in one place and documented per sensor.
+
+Two independent extractions. Every claim can be checked against
+an alternative chain, as described above.
+
+Full forensic trail. The diagnostic file records the raw signal
+at every internal tick along with the status code, so any
+peculiar behaviour in the clinical record can be traced back to
+what the pipeline actually saw.
+
+Complete UDP audit. Every command sent to Unity is recorded to
+disk, so the sequence of exposure changes during the session can
+be reconstructed independently of physiology.
+
+% ,,,,,,,,,,,,,,,,,,,,,,
+\subsection{VR scene design (Unity team , placeholder)}
+\label{sec:unity-placeholder}
+% ,,,,,,,,,,,,,,,,,,,,,,
+
+\noindent
+\fbox{\parbox{0.97\linewidth}{%
+    \textbf{Placeholder for content authored by the Unity team.}\\[4pt]
+    \small
+    This subsection is intentionally left as a scaffold. The
+    biofeedback engine described above is scene-agnostic: it sees
+    commands going out to Unity and JSON telemetry coming back,
+    but it holds no knowledge of how the balloon rises, how the
+    spider approaches, how the audience members enter and look,
+    what the environment art looks like, or how comfort and
+    safety are handled inside each scene. Those decisions belong
+    to the Unity team and are documented by them.
+    Bullets below sketch the topics that subsection is expected
+    to cover.
+}}
+
+\vspace{6pt}
+\noindent
+Suggested content for the Unity team to fill in:
+
+\begin{itemize}
+    \item \textbf{Scene inventory.} Acrophobia (balloon flight),
+    arachnophobia (spider dynamics), fear of public speaking
+    (audience behaviour), and any additional scenes planned. For
+    each scene: what escalation looks like, what de-escalation
+    looks like, and what a full session run-through covers.
+    \item \textbf{Environment and avatar design.} Art direction,
+    lighting, audio design, level-of-detail choices, and
+    animation. Any perceptual grounding for the choices, drawing
+    on the presence and immersion
+    literature~\citep{slater2009, diemer2015, bailenson2003}.
+    \item \textbf{Interaction and controls.} How the participant
+    navigates or interacts inside each scene, use of hand
+    controllers, gaze mechanics if any.
+    \item \textbf{Stimulus escalation.} How each scene translates
+    the four biofeedback commands (\texttt{start}, \texttt{stop},
+    \texttt{increase}, \texttt{decrease}) into concrete on-screen
+    change , for example how a public-speaking scene chooses
+    which new audience member appears, or how the acrophobia
+    scene picks the next altitude
+    increment~\citep{slater2006, freeman2018}.
+    \item \textbf{Comfort and safety.} Cybersickness mitigation,
+    maximum session length, participant escape mechanism, comfort
+    breaks.
+    \item \textbf{Cross-scene infrastructure.} The
+    \texttt{BioFeedbackMiddleware} C\# script that receives UDP
+    commands and dispatches to the loaded scene, the shared
+    telemetry JSON producer that emits packets in the envelope
+    documented above, and any shared prefabs.
+    \item \textbf{Version and asset management.} Unity version,
+    URP or HDRP pipeline choice, third-party asset licences,
+    build targets.
+\end{itemize}
+
+The Unity team owns everything in the list above. The biofeedback
+engine's only contract with any of it is the two UDP channels and
+the JSON envelope shape, both fixed in
+Section~\ref{sec:modularity} and Figure~\ref{fig:contract}.
+
+% ,,,,,,,,,,,,,,,,,,,,,,
+\subsection{Ethics and data protection}
+\label{sec:ethics}
+% ,,,,,,,,,,,,,,,,,,,,,,
+
+This section reflects the decisions taken by the supervisor and
+the lab administration and applies from the current version of
+the system onwards. Prior recordings collected before the
+name-removal refactor remain on file under the original schema
+and will be pseudonymised in place before any external sharing.
+
+Written informed consent is collected before every session.
+Consent covers the collection of physiological signals (ECG and
+electrodermal activity), the storage of derived measures, and the
+right to withdraw from the study at any time. Withdrawal triggers
+deletion of the participant's session records within a reasonable
+window; because no cross-references to the participant exist
+outside the session folder, deletion is a single-folder operation.
+
+Personal identifiers stored on disk are limited to a lab-assigned
+patient identifier, gender, session number, and session date.
+Neither first name nor last name is written to any file the
+engine produces; they are held only in operator memory during the
+intake step, for the purpose of confirming the correct participant
+on the day. Session folders are named by patient identifier rather
+than by name.
+
+The lab administrator at the NISC lab, University of Messina,
+Elaheh Bakhtiari, acts as data controller. All requests for data
+access, correction, or erasure go through her.
+
+Retention. Technical recordings (per-session CSV and JSON files)
+are kept for five years after the session. Research-facing
+artifacts (analysis outputs, published figures, derived tables)
+are kept for ten years. Both sets are destroyed after the
+respective horizon.
+
+Storage sits on the lab workstation. Encryption at rest is not
+currently in place; access is controlled physically through the
+lab door. Data is shared only on explicit request and only
+through direct transfer. No cloud service, backup provider, or
+code repository holds a copy.
+
+Positioning against prior lab work. The current experiment
+continues an earlier study conducted at the same lab and reported
+by \citet{daghooghi}. The earlier study did not include the
+biofeedback loop; the framework described in this section is the
+technical extension that enables adaptive VR exposure driven by
+physiological state. The two versions of the study should be read
+as continuous rather than parallel.
+
+The specific ethics-committee approval reference will be added to
+the camera-ready version once confirmed.
+
+% ,,,,,,,,,,,,,,,,,,,,,,
+\subsection{What is not in this section}
+% ,,,,,,,,,,,,,,,,,,,,,,
+
+For coordination clarity with the co-authors of other sections.
+
+Clinical protocol , number of sessions per participant, order of
+exposures, familiarisation runs where the participant inhabits
+the scene without stimuli, use of standardised questionnaires
+(Acrophobia Questionnaire, Fear of Spiders Questionnaire,
+Personal Report of Confidence as a Speaker, and so on), pre and
+post session interviews , is decided by the psychology team and
+appears in their section. Not here.
+
+VR scenes themselves , how the balloon is animated in
+acrophobia, how the spider approaches in arachnophobia, how the
+audience members enter and look in public speaking, avatar
+choices, audio design, visual fidelity, safety protocols for
+VR-induced nausea , are the Unity team's contribution. A
+placeholder in Section~\ref{sec:unity-placeholder} marks where
+that content lands in the paper; it is left blank because the
+biofeedback team does not own it.
+
+General study ethics arrangements , approval number, consent
+form language, right-to-erasure procedure , belong to the
+overall study-description section governed by the university
+Data Protection Officer. Section~\ref{sec:ethics} above draws on
+the decisions the supervisor and lab administration have already
+made and reproduces only the parts that constrain what the
+engine does.
+
+Results, participant numbers, and statistical analysis of exposure
+outcomes belong to the results and discussion sections, which are
+written after data collection and do not overlap with the
+methodology. Not here.

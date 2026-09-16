@@ -1,0 +1,349 @@
+\documentclass[11pt,a4paper]{article}
+
+\usepackage[utf8]{inputenc}
+\usepackage[T1]{fontenc}
+\usepackage[english]{babel}
+\usepackage[margin=2.2cm]{geometry}
+\usepackage{array}
+\usepackage{booktabs}
+\usepackage{longtable}
+\usepackage{enumitem}
+\usepackage{xcolor}
+\usepackage{microtype}
+\usepackage[hidelinks]{hyperref}
+
+% Items that need a decision or information, printed in red.
+\newcommand{\ph}[1]{\textcolor{red!65!black}{[#1]}}
+\newcolumntype{L}[1]{>{\raggedright\arraybackslash}p{#1}}
+
+\setlength{\parindent}{0pt}
+\setlength{\parskip}{5pt}
+\setlist{itemsep=3pt, topsep=3pt}
+\renewcommand{\arraystretch}{1.25}
+
+\title{Framework paper: proposed outline for approval}
+\author{NISC Lab, Cognitive Science Department, University of Messina}
+\date{14 September 2026}
+
+\begin{document}
+\maketitle
+
+\section*{What is asked}
+
+Approval of the scope, framing and structure below, before the paper
+is rewritten into them. The structure follows the earlier laboratory
+manuscript (Daghooghi et al.), and every point its reviewers raised has
+a place in it (Section~\ref{sec:reviewers}). Items in \ph{red brackets}
+need a decision or information from the person named. Technical team:
+P.~Kazemi, E.~Zandi, B.~Baharizadeh. Cognitive team: P.~Daghooghi,
+Y.~Asghari Dizaj, H.~Khorshidi, E.~Bakhtiari.
+
+% ,,,,,,,,,,,,,,,,,,,,,,
+\section{Decisions and information needed}
+\label{sec:decisions}
+% ,,,,,,,,,,,,,,,,,,,,,,
+
+\begin{enumerate}
+    \item \textbf{Ethics approval.} Name of the committee, protocol
+    number and date of approval, and confirmation that it covers the
+    sessions recorded since July 2026 (33 runs from 24 participants).
+    \ph{Prof.~Grasso, E.~Bakhtiari}
+
+    \item \textbf{Title.} Provisional: \emph{Design of an Integrated
+    VR-Biofeedback Framework for Controlled Phobia Exposure}.
+    \ph{administration}
+
+    \item \textbf{Authors.} Spelling of Haleh (or Halleh) Khorshidi and
+    of Febronia Riggio; affiliations of F.~Riggio and C.~M.~Porto.
+    \ph{Prof.~Grasso}
+
+    \item \textbf{Venue and template} of the full paper, which set its
+    length. \ph{Prof.~Grasso}
+
+    \item \textbf{Origin of the index coefficients.} The weights 0.5,
+    0.3 and 0.2 and the three-band rule come from the laboratory's own
+    earlier design and appear in no cited source. Proposed: describe
+    them as coefficients fixed in advance by the laboratory, with their
+    rationale, or cite an internal report if one can be made citable.
+    \ph{Prof.~Grasso}
+
+    \item \textbf{Control group.} Proposed: stated as a limitation of a
+    methodological study. A later comparison could use a yoked
+    condition, in which a participant receives without adaptation the
+    stimulus sequence logged for another participant; the command log
+    already holds such sequences. \ph{Prof.~Grasso}
+
+    \item \textbf{Agreement between the two extraction
+    implementations.} Proposed for a longer version only. On the two
+    current captures they agree on RMSSD ($r = 0.72$ and $0.88$) but
+    not on heart rate ($r = -0.12$ and $-0.05$), because the
+    manufacturer's detector marks 14 to 24\% extra beats; this needs
+    checking before it is published. \ph{Prof.~Grasso}
+
+    \item \textbf{Environment parameters:} starting height, height
+    change per command, lower and upper limits, and run duration in
+    each session. \ph{environment developers}
+
+    \item \textbf{Participants and questionnaires:} recruitment,
+    inclusion cut-off and the scale it refers to, exclusion criteria,
+    instruments before and after exposure, target sample.
+    \ph{cognitive team}
+\end{enumerate}
+
+% ,,,,,,,,,,,,,,,,,,,,,,
+\section{Scope and framing}
+\label{sec:scope}
+% ,,,,,,,,,,,,,,,,,,,,,,
+
+\begin{itemize}
+    \item \textbf{A framework paper.} The contribution is the apparatus:
+    sensing, calibration, index, control law, safeguards and session
+    record, specified closely enough to be reproduced. Data collection
+    is in progress and the paper claims no outcomes, which answers the
+    objection that the earlier manuscript was submitted before its study
+    was complete.
+
+    \item \textbf{Results limited to operation:} a summary of the
+    recorded sessions and one illustrative session. Questionnaire
+    outcomes are reported later, in separate papers.
+
+    \item \textbf{Experimental wording} throughout (exposure,
+    participant, operator, target band), as the laboratory decided.
+
+    \item \textbf{A scenario-independent description,} with the height
+    environment as the worked example because it is the environment
+    with recorded sessions. Further environments are described once
+    they have recorded sessions of their own.
+
+    \item \textbf{The current system only.} The earlier manuscript
+    described the previous version; Section~\ref{sec:changes} lists
+    what has changed since.
+
+    \item \textbf{Length.} The present methodology, about 9,700 words,
+    is kept as the long version. The conference text is condensed from
+    it, with each fact stated once.
+\end{itemize}
+
+% ,,,,,,,,,,,,,,,,,,,,,,
+\section{Proposed structure}
+\label{sec:structure}
+% ,,,,,,,,,,,,,,,,,,,,,,
+
+Section numbers under \emph{Source} refer to the current methodology
+draft.
+
+\begin{longtable}{@{}L{3.4cm}L{8.6cm}L{3.6cm}@{}}
+\toprule
+\textbf{Section} & \textbf{Content} & \textbf{Source and owner} \\
+\midrule
+\endhead
+\bottomrule
+\endfoot
+Abstract &
+    Aim, the framework, how the loop works, state of data collection;
+    the phobia term defined at first use. &
+    co-authors \\
+1 Introduction &
+    Specific phobias and exposure. Fear of heights distinguished from
+    diagnosed phobia, with prevalence given for each. Limits of in vivo
+    exposure, with examples. Why exposure should follow physiology. &
+    cognitive team \\
+1.1 Related work &
+    Virtual exposure with scripted or operator-graded stimuli, with
+    examples; systems that adapt to physiology; what a separable, fully
+    specified framework adds. &
+    cognitive team; shared bibliography (67 entries) \\
+\addlinespace[3pt]
+\multicolumn{3}{@{}l}{\textbf{2 Methodology}} \\
+2.1 Study design &
+    Methodological single-group design; session plan; what is evaluated
+    and what is not; absence of a control condition stated. &
+    cognitive team, with 3.1 \\
+2.2 Participants &
+    Recruitment; inclusion by a cut-off score on a named scale;
+    exclusion criteria; target sample. &
+    cognitive team \\
+2.3 Materials and apparatus &
+    Headset and rendering; sensor unit, chest band, electrode sites and
+    skin preparation; software and versions. &
+    3.3, condensed \\
+\addlinespace[3pt]
+\multicolumn{3}{@{}l}{\textbf{3 Adaptive exposure system}} \\
+3.1 System overview &
+    Closed loop; measurement server and environment client;
+    scenario-neutral interface; topology figure. &
+    3.1, 3.2, 3.9 \\
+3.2 Physiological measures and arousal index &
+    Heart rate, RMSSD and phasic conductance with their windows and
+    artifact handling; 120~s calibration and its validity check;
+    standardised deviations, fixed weights, 3~s smoothing. &
+    3.4 to 3.7 \\
+3.3 Real-time adaptation &
+    Thresholds from each participant's resting distribution; control
+    law (increase, hold, decrease); settling gate and rate limit;
+    environment parameters in numbers. &
+    3.8, 3.10; environment developers \\
+3.4 Monitoring, safety and session data &
+    Who is present; termination by participant and by operator;
+    automatic safeguards and loss of signal; operator console; recorded
+    files; data protection. &
+    3.11 to 3.13, 3.15 \\
+\addlinespace[3pt]
+\multicolumn{3}{@{}l}{\textbf{4 Experimental procedure}} \\
+4.1 Before exposure &
+    Consent, screening and baseline questionnaires. &
+    cognitive team \\
+4.2 Exposure session &
+    Preparation, settling, calibration, run and termination, with
+    durations. &
+    3.11 \\
+4.3 After exposure &
+    Questionnaires after the final session. &
+    cognitive team \\
+\addlinespace[3pt]
+5 Results &
+    Summary of the recorded sessions, 33 runs from 24 participants so
+    far (completed calibrations, run durations, commands sent, episodes
+    of signal loss), and one illustrative session as a figure. No
+    outcome measures. &
+    technical team \\
+6 Discussion &
+    What the framework makes possible; limitations: single group, index
+    not validated against self-report, coefficients fixed in advance. &
+    co-authors \\
+7 Conclusion &
+    The contribution in one paragraph; next steps. &
+    co-authors \\
+Ethics statement &
+    Committee, protocol number, informed consent. &
+    \ph{administration} \\
+\end{longtable}
+
+Section 3.14 of the draft (validation and reproducibility) and the
+comparison of the two extraction implementations stay in the long
+version.
+
+% ,,,,,,,,,,,,,,,,,,,,,,
+\section{Reviewer points and where they are answered}
+\label{sec:reviewers}
+% ,,,,,,,,,,,,,,,,,,,,,,
+
+R1 and R2 denote the two reviewers. \emph{Written} means the current
+methodology draft already answers the point.
+
+\begin{longtable}{@{}L{5.6cm}L{7.4cm}L{2.6cm}@{}}
+\toprule
+\textbf{Point raised} & \textbf{Where and how} & \textbf{Status} \\
+\midrule
+\endhead
+\bottomrule
+\endfoot
+Study still running; outcomes missing; submission premature (R1, R2). &
+    Framed as a framework paper with no outcome claims; results limited
+    to operation (Sections~\ref{sec:scope} and~\ref{sec:structure}). &
+    proposed \\
+Prevalence: fear of heights versus diagnosed phobia (R1). &
+    Introduction, with a separate figure for each. &
+    cognitive team \\
+Cognitive aspects and causes of the fear (R1). &
+    Introduction, briefly. &
+    cognitive team \\
+Examples of the limits of in vivo exposure (R1). &
+    Introduction. &
+    cognitive team \\
+Examples of static, non-adaptive virtual exposure systems (R1). &
+    Related work, from the shared bibliography. &
+    cognitive team \\
+Preference for virtual over in vivo exposure (Garc\'{\i}a-Palacios
+et al., 2001) and comparative effectiveness (Kuleli et al., 2025) (R1). &
+    Introduction; both are already in the shared bibliography. &
+    cognitive team \\
+Subjective units of distress to be explained (R1). &
+    Procedure, if the scale is used. &
+    cognitive team \\
+Heights used in each session (R1). &
+    3.3, in metres: starting height, change per command, limits. &
+    \ph{environment developers} \\
+Whether the balloon keeps rising while arousal stays low (R1). &
+    3.3: control law stated explicitly. While the index stays in the
+    lowest band an increase is sent at most once per second, within the
+    environment's limits. &
+    written \\
+Inclusion criteria: cut-off on a validated scale (R1). &
+    2.2. &
+    cognitive team \\
+Ethical approval (R1). &
+    Ethics statement with committee and protocol number. &
+    \ph{reference needed} \\
+How the sensors are attached (R1). &
+    2.3: chest band, Lead I electrode sites, finger electrodes on the
+    non-dominant hand, skin preparation. &
+    written \\
+Information repeated (R1). &
+    Each fact stated once; condensed text. &
+    proposed \\
+Who is present during exposure (R1). &
+    3.4: an operator at the console and a second researcher for the
+    environment and the headset, both in the room throughout. &
+    written; roles and training \ph{to confirm} \\
+Safety precautions for distress or extreme heart rate (R1). &
+    3.4: the participant may stop at any time; the operator stops at any
+    sign of distress; implausible heart rate and loss of signal are
+    handled automatically; stimulus is withdrawn when arousal is high. &
+    written \\
+How the target zone is set, and whether it rests on earlier studies
+(R1). &
+    3.2 and 3.3: set for each participant at the calibration mean plus
+    1.28 and 2.33 standard deviations (90th and 99th percentiles). &
+    written; coefficients \ph{decision 5} \\
+Theoretical framework and literature (R2). &
+    Introduction and related work, from the shared bibliography. &
+    cognitive team \\
+No control group (R2). &
+    Stated as a limitation; yoked comparison as an option. &
+    \ph{decision 6} \\
+Phobia term to be defined in the abstract (R2). &
+    Abstract. &
+    co-authors \\
+Paragraph too long (R2). &
+    Shorter paragraphs throughout. &
+    all \\
+\end{longtable}
+
+% ,,,,,,,,,,,,,,,,,,,,,,
+\section{Changes from the system in the earlier manuscript}
+\label{sec:changes}
+% ,,,,,,,,,,,,,,,,,,,,,,
+
+\begin{itemize}
+    \item Conductance enters as its phasic component in microsiemens,
+    no longer as a percentage change of the raw level, which drifts
+    over minutes.
+    \item Each measure is standardised by the participant's resting
+    dispersion before weighting, so no measure dominates by scale.
+    \item Thresholds sit at the calibration mean plus 1.28 and 2.33
+    standard deviations of the index, in place of 1.33 and 2.28 times
+    the baseline standard deviation.
+    \item The index is smoothed by a 3~s trailing mean.
+    \item A calibration that fails a validity check blocks the run.
+    \item Commands are held at the start of a run, limited to one per
+    second, and withheld while the sensor signal is lost.
+    \item Two independent extraction implementations can be selected,
+    and archived recordings can be replayed through the live pipeline.
+    \item Records carry a participant code; names are no longer stored.
+\end{itemize}
+
+% ,,,,,,,,,,,,,,,,,,,,,,
+\section{Timeline}
+% ,,,,,,,,,,,,,,,,,,,,,,
+
+\begin{itemize}
+    \item \textbf{HCI International 2027}, Berlin, 25 to 30 July 2027:
+    800-word proposal due 9 October 2026 (draft attached separately),
+    notification 20 November 2026, camera-ready paper of 10 to 20 pages
+    in the Springer template due 29 January 2027.
+    \item \textbf{Full paper:} rewritten into the approved structure one
+    section at a time; venue \ph{decision 4}.
+\end{itemize}
+
+\end{document}

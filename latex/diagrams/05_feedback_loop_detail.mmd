@@ -1,0 +1,28 @@
+%%{init: {'theme':'neutral'}}%%
+flowchart TB
+    ST[S_t at this tick] --> CL{Classify<br/>against thresholds}
+    CL -->|S_t < MILD<br/>calm| CMD_INC[Candidate command: INCREASE]
+    CL -->|MILD <= S_t < HIGH<br/>stressed| HOLD[No command sent<br/>scene holds]
+    CL -->|S_t >= HIGH<br/>ultra_stressed| CMD_DEC[Candidate command: DECREASE]
+
+    CMD_INC --> GATE{Wait-for-calm<br/>gate open?}
+    CMD_DEC --> GATE
+
+    GATE -->|no| DROP1[Drop and count as gated]
+    GATE -->|yes| THROT{Throttle window<br/>elapsed?<br/>at least 1 s since last}
+
+    THROT -->|no| DROP2[Drop and count as throttled]
+    THROT -->|yes| SEND[Send UDP packet<br/>to Unity on port 5005]
+
+    SEND --> AUDIT[Append row to<br/>unity_udp.csv]
+    SEND --> RESET[Reset throttle window]
+
+    classDef decision fill:#fff4e6,stroke:#333,stroke-width:1px
+    classDef action   fill:#e8f8ea,stroke:#333,stroke-width:1px
+    classDef drop     fill:#f8e8e8,stroke:#333,stroke-width:1px
+    classDef send     fill:#e8f4f8,stroke:#333,stroke-width:2px
+
+    class CL,GATE,THROT decision
+    class CMD_INC,CMD_DEC,HOLD,AUDIT,RESET action
+    class DROP1,DROP2 drop
+    class SEND send

@@ -15,10 +15,11 @@ Responsibilities of SessionManager:
 
   * Read the launcher-written metadata.json (intake portion) so every CSV
     row carries the full patient demographics.
-  * Maintain samples.csv (the canonical 50 Hz record). Rotated to
-    samples_002.csv / samples_003.csv on each LIVE_RESTART so multiple live
-    runs against the same baseline land in distinct files inside the same
-    session folder.
+  * Maintain samples.csv, the per-session record: the baseline rows
+    followed by the current live run. A confirmed live restart replaces the
+    live rows and keeps the baseline rows; a confirmed baseline restart
+    empties the file. One launch serves one participant, so a new
+    participant means closing the application and relaunching.
   * At baseline lock, APPEND the frozen baseline to metadata.json
     (replacing the placeholder `"baseline": null` written by the launcher).
   * Maintain diagnostic.csv: one row per tick, written from main.py via
@@ -76,8 +77,6 @@ def _load_metadata_from_env() -> dict:
     # Minimal fallback so a stray test import doesn't crash.
     return {
         'patient': {
-            'first_name':     os.environ.get('PATIENT_NAME', 'PATIENT'),
-            'last_name':      '',
             'patient_id':     os.environ.get('PATIENT_ID', '000'),
             'gender':         '',
             'session_date':   datetime.now().strftime('%Y-%m-%d'),
@@ -117,7 +116,7 @@ class SessionManager:
     # visual clutter of timestamps.
     # Column groups, in the order they appear in the file:
     #   1. row index               sample_n
-    #   2. person info             patient_first_name ... session_number
+    #   2. person info             patient_id ... session_number
     #   3. status                  phase, state, dashboard_score
     #   4. signals                 eda, hr, hrv, delta_eda, delta_hr, delta_hrv,
     #                              s_instant, s_t
@@ -131,19 +130,19 @@ class SessionManager:
     # tick with an arbitrary `data` object, and its keys turn into
     # samples.csv columns in the order Unity sends them.
     #
-    # Because Baseline rows are written BEFORE Unity Play (no telemetry
-    # yet), those rows are buffered in memory. As soon as the first
-    # non-empty telemetry packet arrives, its keys become the column
-    # list, the header is written, and the buffered rows are flushed
-    # with empty telemetry cells. If a session ends without any
-    # telemetry (e.g. physiology-only test), the header is committed
-    # with no dynamic columns and the buffer is flushed anyway.
+    # Baseline rows are usually recorded before Unity starts sending, so
+    # the telemetry columns are not yet known when the first row is
+    # written. Rows go straight to disk regardless, under a header with no
+    # telemetry columns; when the first non-empty packet arrives, the
+    # header gains its fields and the rows already on disk gain matching
+    # empty cells. Nothing is held back in memory, so a crash cannot lose
+    # rows that were already recorded.
     #
     # Once committed, the column set stays fixed for the whole session.
     # Fields Unity subsequently adds are dropped (with a one-time
     # console warning); missing fields land as empty cells.
     _SAMPLES_HEADER_PREFIX = ("sample_n,"
-                              "patient_first_name,patient_last_name,patient_id,"
+                              "patient_id,"
                               "gender,session_date,session_number,"
                               "phase,state,dashboard_score,"
                               "eda,hr,hrv,"
@@ -159,20 +158,20 @@ class SessionManager:
     _DIAGNOSTIC_HEADER = ("tick_n,phase,status,"
                           "raw_eda,raw_hr,raw_hrv\n")
 
-    def __init__(self, patient_name: str = "PATIENT", patient_id: str = "000"):
+    def __init__(self, patient_id: str = "000"):
         # Load metadata from the session folder (launcher wrote it).
         self.metadata = _load_metadata_from_env()
         self.patient = self.metadata['patient']
 
-        # Allow positional args to override (compat with main.py's old calls).
-        if patient_name != "PATIENT":
-            self.patient['first_name'] = patient_name
+        # Allow the positional arg to override (compat with main.py's calls).
         if patient_id != "000":
             self.patient['patient_id'] = patient_id
 
-        self.patient_name = self.patient['first_name']
+        # The participant ID is the only identifier carried anywhere. Name
+        # fields were removed from intake, from this record, and from the
+        # samples header.
         self.patient_id = self.patient['patient_id']
-        self.patient_info = f"{self.patient_name}_{self.patient_id}"
+        self.patient_info = self.patient_id
 
         # Dynamic-column bookkeeping. Determined at runtime from the
         # first non-empty telemetry packet Unity sends; None until then.
@@ -224,6 +223,10 @@ class SessionManager:
         self._samples_row_n = 0
         self._diagnostic_row_n = 0
 
+        # Which live attempt the operator is on. Display only: a restart
+        # discards the previous attempt, so exactly one run is ever on disk.
+        self.run_number = 1
+
         # Phase tracking, signal history, stress history — unchanged shape so
         # everything that reads these (dashboard summary, session_review)
         # keeps working.
@@ -241,14 +244,13 @@ class SessionManager:
         self.thresh_mild = None
         self.thresh_high = None
 
-        # Open file handles for the lifetime of the session.
-        # samples.csv opens WITHOUT the header — the header is deferred
-        # until we have seen the first telemetry packet from Unity and
-        # can list its `data` fields as dynamic columns. All log_sample
-        # calls before that first packet buffer their rows in memory.
+        # Open file handles for the lifetime of the session. The samples
+        # header is written at once so every row reaches disk as it is
+        # recorded; it is widened in place when telemetry first arrives.
         self._samples_handle = None
         self._diagnostic_handle = None
-        self._open_samples(write_header=False)
+        self._open_samples(write_header=True)
+        self._header_committed = True
         self._open_diagnostic(write_header=True)
 
         # Expose canonical paths for callers (main.py uses this for the
@@ -258,7 +260,7 @@ class SessionManager:
         bar = '=' * 58
         print(f"\n[SESSION] {bar}")
         print(f"[SESSION] New session started")
-        print(f"[SESSION]   Patient            : {self.patient_info}")
+        print(f"[SESSION]   Participant        : {self.patient_info}")
         print(f"[SESSION]   Start time         : "
               f"{self.session_start_datetime.strftime('%Y-%m-%d %H:%M:%S')}")
         print(f"[SESSION]   Session folder     : {os.path.basename(self.session_folder)}")
@@ -333,34 +335,184 @@ class SessionManager:
 
     # ---------- LIVE_RESTART rotation ---------------------------------------
 
-    def rotate_session_csv(self):
-        """
-        Called when the operator clicks Start Live a second time after a
-        Stop. Per user policy: DELETE the previous live run's samples
-        and start fresh. We truncate samples.csv (rewrite the header),
-        clear in-memory stress history, and reset the decimation counter
-        + sample_n counter so the new run starts at sample_n=1.
+    # ---------- restart handling -------------------------------------------
+    #
+    # One launch serves one participant. Within a launch the operator may
+    # redo the baseline or redo the live run; each redo REPLACES what it
+    # supersedes instead of accumulating beside it. Two scopes:
+    #
+    #   reset_for_new_baseline()  everything recorded so far is discarded.
+    #                             A live run was scored against the baseline
+    #                             that preceded it, so it cannot outlive it.
+    #   rotate_session_csv()      only the live run is discarded; the
+    #                             baseline rows and stored calibration stay.
 
-        Diagnostic.csv (the forensic raw-signal trace) is NOT truncated
-        — it accumulates across the whole launch for post-hoc debugging.
-        The baseline (in metadata.json) is untouched: it's still valid.
+    # Column holding the phase label in each file. The fields before it are
+    # counters, the participant ID, gender, date and session number, none of
+    # which can contain a comma (intake validation forbids it).
+    _SAMPLES_PHASE_COL = 5      # sample_n,patient_id,gender,session_date,session_number,phase
+    _DIAGNOSTIC_PHASE_COL = 1   # tick_n,phase,...
+
+    @staticmethod
+    def _phase_of(line, col):
+        cells = line.split(',', col + 1)
+        return cells[col] if len(cells) > col else ''
+
+    def _drop_phase_rows(self, path, col, drop_phases):
+        """Rewrite a CSV in place, keeping the header and every row whose
+        phase is not in drop_phases. Returns (kept, dropped).
+
+        Rewritten in place rather than via a temporary file and rename: on
+        Windows a rename fails while any other process has the file open,
+        and the dashboard reads samples.csv once a second to count rows.
+        The caller must have closed its own handle first.
         """
+        if not os.path.exists(path):
+            return 0, 0
+        with open(path, 'r', encoding='utf-8', errors='surrogateescape',
+                  newline='') as f:
+            lines = f.readlines()
+        if not lines:
+            return 0, 0
+        header, body = lines[0], lines[1:]
+        kept = [ln for ln in body if self._phase_of(ln, col) not in drop_phases]
+        dropped = len(body) - len(kept)
+        for attempt in range(10):
+            try:
+                with open(path, 'w', encoding='utf-8',
+                          errors='surrogateescape', newline='') as f:
+                    f.write(header)
+                    f.writelines(kept)
+                break
+            except PermissionError:
+                time.sleep(0.05)
+        else:
+            print(f"[SESSION] WARN: could not rewrite {os.path.basename(path)}; "
+                  f"it was locked by another process.")
+        return len(kept), dropped
+
+    def _remove_sidecar(self):
+        """The .xlsx mirror is regenerated at Stop. A stale one left behind
+        after a restart would describe rows that are no longer on disk."""
+        xlsx = os.path.join(self.session_folder, 'samples.xlsx')
+        try:
+            if os.path.exists(xlsx):
+                os.remove(xlsx)
+        except OSError as e:
+            print(f"[SESSION] WARN: could not remove stale samples.xlsx: {e}")
+
+    def reset_for_new_baseline(self):
+        """
+        Discard every record of this participant made so far in this launch
+        and return the files to their just-launched state. Called when the
+        operator redoes the baseline, or abandons one before it completes.
+
+        samples.csv and diagnostic.csv are emptied, the stored calibration
+        in metadata.json is cleared, and the spreadsheet mirror is removed.
+        The intake portion of metadata.json is kept. unity_udp.csv is owned
+        by the Unity bridge and is emptied there.
+        """
+        self._close_samples()
+        self._dynamic_fields = None
+        self._pending_rows = []
+        self._unknown_field_warnings.clear()
+        self._open_samples(write_header=True)
+        self._header_committed = True
+        self._samples_call_count = 0
+        self._samples_row_n = 0
+
+        self.discard_diagnostic_log()
+        self._diagnostic_call_count = 0
+        self._diagnostic_row_n = 0
+
+        self.delete_baseline_json()
+        self.personal_baselines = None
+        self.artifacts_removed = {'eda': 0, 'hr': 0, 'hrv': 0}
+        self.thresh_mild = None
+        self.thresh_high = None
+
         self.stress_history = {
             's_instant': [], 's_t': [], 'state': [], 'dashboard_score': [],
         }
-        # Fresh file, defer header until the first LIVE-restart telemetry
-        # packet arrives (matches the session-start behaviour).
-        self._dynamic_fields = None
-        self._header_committed = False
-        self._pending_rows = []
-        self._unknown_field_warnings.clear()
-        self._open_samples(write_header=False)
-        # Reset both counters so the new run starts at sample_n=1 and the
-        # decimation gate fires on its first call.
+        self._remove_sidecar()
+        self.run_number = 1
+        print("[SESSION] Baseline reset: previous recordings discarded; "
+              "files returned to their launch state.")
+
+    def rotate_session_csv(self):
+        """
+        Called when the operator starts a live run again after a Stop.
+
+        The previous live run is DISCARDED and the baseline is KEPT. Rows
+        recorded during the baseline stay in samples.csv, so the resting
+        trace that produced the calibration survives any number of live
+        restarts. diagnostic.csv loses the discarded run and the idle
+        period after it for the same reason.
+
+        Earlier behaviour truncated samples.csv outright on every live
+        restart, which silently took the baseline rows with it.
+        """
+        live = ('LIVE', 'STOPPED')
+
+        # Rows still buffered in memory, waiting for the first telemetry
+        # packet to commit the header, are filtered the same way as rows
+        # already on disk. At most one of the two holds anything.
+        self._pending_rows = [
+            r for r in self._pending_rows
+            if self._phase_of(r, self._SAMPLES_PHASE_COL) not in live
+        ]
+
+        # Rows on disk. The committed header and its dynamic columns carry
+        # on unchanged, since the baseline rows beneath it are kept.
+        self._close_samples()
+        kept, dropped = self._drop_phase_rows(
+            self.samples_path, self._SAMPLES_PHASE_COL, live)
+        self._samples_handle = open(self.samples_path, 'a',
+                                    newline='', buffering=1)
+
+        self._close_diagnostic()
+        self._drop_phase_rows(self.diagnostic_path,
+                              self._DIAGNOSTIC_PHASE_COL, live)
+        self._diagnostic_handle = open(self.diagnostic_path, 'a',
+                                       newline='', buffering=1)
+
+        self.stress_history = {
+            's_instant': [], 's_t': [], 'state': [], 'dashboard_score': [],
+        }
+        # sample_n continues from the last kept baseline row, so the file
+        # stays one unbroken sequence with no gap and no duplicate.
+        self._samples_row_n = kept + len(self._pending_rows)
         self._samples_call_count = 0
-        self._samples_row_n = 0
-        print("[SESSION] Live restart: previous samples.csv discarded, "
-              "fresh recording starting.")
+        self._remove_sidecar()
+        self.run_number += 1
+        print(f"[SESSION] Live restart: {dropped} live row(s) discarded, "
+              f"{self._samples_row_n} baseline row(s) kept. "
+              f"Recording attempt {self.run_number}.")
+
+    def discard_live_for_shutdown(self):
+        """
+        Close-window choice "Keep baseline only". Drops the live run and keeps
+        the baseline, the same scope a confirmed live restart discards.
+
+        This path previously deleted samples.csv outright, which removed the
+        baseline rows the option is named for keeping.
+        """
+        live = ('LIVE', 'STOPPED')
+        self._pending_rows = [
+            r for r in self._pending_rows
+            if self._phase_of(r, self._SAMPLES_PHASE_COL) not in live
+        ]
+        # Baseline rows still waiting for a header reach disk now, so the
+        # kept baseline is not lost to an uncommitted buffer.
+        if not self._header_committed and self._samples_handle is not None:
+            self._commit_header_and_flush()
+        self._close_samples()
+        self._close_diagnostic()
+        self._drop_phase_rows(self.samples_path, self._SAMPLES_PHASE_COL, live)
+        self._drop_phase_rows(self.diagnostic_path,
+                              self._DIAGNOSTIC_PHASE_COL, live)
+        self._remove_sidecar()
+        print("[SESSION] Live run discarded at close; baseline rows kept.")
 
     # Alias retained for any caller that still uses the old name.
     flush_live_data = rotate_session_csv
@@ -398,11 +550,14 @@ class SessionManager:
         # The dynamic columns are the keys of Unity's `data` object, in
         # the order Unity sends them. `scenario` is remembered for
         # metadata.json but does NOT become a CSV column.
-        if telemetry_data and not self._header_committed:
+        if telemetry_data and self._dynamic_fields is None:
             self._dynamic_fields = list(telemetry_data.keys())
             if scenario:
                 self._observed_scenario = scenario.strip().lower()
-            self._commit_header_and_flush()
+            if self._header_committed:
+                self._widen_header_for_telemetry()
+            else:
+                self._commit_header_and_flush()
 
         # ---- Warn once per unknown late-arriving field ----
         # If Unity starts adding new fields after the header has been
@@ -473,7 +628,7 @@ class SessionManager:
 
         return (
             f"{self._samples_row_n},"
-            f"{p['first_name']},{p['last_name']},{p['patient_id']},"
+            f"{p['patient_id']},"
             f"{p['gender']},{p['session_date']},{p['session_number']},"
             f"{self.phase},"
             f"{state if state else 'unknown'},"
@@ -487,6 +642,50 @@ class SessionManager:
             f"{self.artifacts_removed.get('hr', 0)},"
             f"{self.artifacts_removed.get('hrv', 0)}\n"
         )
+
+    def _widen_header_for_telemetry(self):
+        """
+        Add the telemetry columns to a samples.csv that already holds rows.
+
+        Rows are written from the first baseline tick, so the header exists
+        before Unity has named its fields. When the first packet arrives the
+        header gains those columns, and every row already on disk gains the
+        same number of empty cells in the same position, so each row still
+        lines up with its header. This happens once per recording.
+
+        Rows written before this point hold no telemetry cells and none of
+        their fields can contain a comma, so a plain split is exact.
+        """
+        n_dyn = len(self._dynamic_fields or [])
+        if n_dyn == 0:
+            return
+        insert_at = len(self._SAMPLES_HEADER_PREFIX.split(','))
+        self._close_samples()
+        try:
+            with open(self.samples_path, 'r', encoding='utf-8',
+                      errors='surrogateescape', newline='') as f:
+                lines = f.readlines()
+        except OSError:
+            lines = []
+        body = []
+        for ln in lines[1:]:
+            cells = ln.rstrip('\r\n').split(',')
+            cells[insert_at:insert_at] = [''] * n_dyn
+            body.append(','.join(cells) + '\n')
+        for attempt in range(10):
+            try:
+                with open(self.samples_path, 'w', encoding='utf-8',
+                          errors='surrogateescape', newline='') as f:
+                    f.write(self._build_samples_header())
+                    f.writelines(body)
+                break
+            except PermissionError:
+                time.sleep(0.05)
+        self._samples_handle = open(self.samples_path, 'a',
+                                    newline='', buffering=1)
+        print(f"[SESSION] samples.csv header widened with {n_dyn} telemetry "
+              f"column(s): {self._dynamic_fields}. {len(body)} earlier "
+              f"row(s) padded.")
 
     def _commit_header_and_flush(self):
         """
@@ -664,6 +863,27 @@ class SessionManager:
     # The old per-file delete helpers stay around as no-ops / partial deletes
     # for back-compat with main.py's existing shutdown branches.
 
+    def set_baseline_validity(self, ok: bool, issues: list, warnings: list):
+        """
+        Record whether the captured baseline can be used for a live run,
+        and why not if it cannot. Stored inside the baseline record, so
+        anyone opening metadata.json sees the verdict next to the numbers
+        it concerns, and the dashboard can explain a blocked Start Live.
+        """
+        base = self.metadata.get('baseline')
+        if not isinstance(base, dict):
+            return
+        base['validity'] = {
+            'usable_for_live': bool(ok),
+            'blocking_issues': list(issues),
+            'warnings': list(warnings),
+        }
+        try:
+            with open(self.metadata_path, 'w', encoding='utf-8') as f:
+                json.dump(self.metadata, f, indent=2)
+        except OSError as e:
+            print(f"[SESSION] WARN: could not record baseline validity: {e}")
+
     def write_samples_xlsx(self):
         """Write samples.csv next to samples.xlsx, with the first row
         frozen and column widths auto-fitted. Convenience for operators
@@ -832,7 +1052,7 @@ class SessionManager:
         print("=" * 56)
         print("  SESSION REVIEW")
         print("=" * 56)
-        print(f"  Patient        : {self.patient_info}")
+        print(f"  Participant    : {self.patient_info}")
         print(f"  Session folder : {os.path.basename(self.session_folder)}")
         print(f"  Live duration  : {live_sec:6.1f} s  ({n} samples)")
         print(f"  Time in CALM   : {n_calm/rate:6.1f} s  ({_pct(n_calm):5.1f}%)")
@@ -868,7 +1088,6 @@ class SessionManager:
     def get_current_state_summary(self) -> dict:
         """Return current session state as a dict (used by some dashboard code)."""
         return {
-            'patient_name': self.patient_name,
             'patient_id': self.patient_id,
             'patient_info': self.patient_info,
             'phase': self.phase,

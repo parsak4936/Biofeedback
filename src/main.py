@@ -54,8 +54,10 @@ from unity_bridge import UnityUDPBridge
 # File sentinel for cross-platform shutdown on launcher Ctrl+C. Windows
 # Popen.terminate() uses TerminateProcess (uncatchable), so we can't rely
 # on SIGTERM. Instead the launcher writes this file on Ctrl+C and the main
-# loop polls for it once per second. Treated as SHUTDOWN_DISCARD_LIVE,
-# matching the dashboard's "Keep baseline only" close prompt.
+# loop polls for it once per second. Treated as SHUTDOWN_SAVE_BOTH: an
+# interrupted launch keeps everything it recorded. Recorded data can always
+# be deleted afterwards; once an accidental close has discarded it, it
+# cannot be recovered.
 _SHUTDOWN_MARKER_FILENAME = ".shutdown_marker"
 
 
@@ -66,8 +68,7 @@ def run_pipeline():
 
     # Shutdown sentinel path (see _SHUTDOWN_MARKER_FILENAME). The launcher
     # writes here on Ctrl+C; we poll it once per second below and treat it
-    # as SHUTDOWN_DISCARD_LIVE so the cleanup path matches the dashboard's
-    # close-window "Keep baseline only" prompt.
+    # as SHUTDOWN_SAVE_BOTH, so an interrupted launch keeps what it recorded.
     _project_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
     _shutdown_marker_path = os.path.join(_project_root, 'data', _SHUTDOWN_MARKER_FILENAME)
     # Clear any stale marker from a previous launch.
@@ -77,9 +78,8 @@ def run_pipeline():
     except OSError:
         pass
 
-    patient_name = os.environ.get('PATIENT_NAME', 'PATIENT')
     patient_id = os.environ.get('PATIENT_ID', '000')
-    session = SessionManager(patient_name=patient_name, patient_id=patient_id)
+    session = SessionManager(patient_id=patient_id)
 
     # Startup order matters here. The dashboard subscribes to Biofeedback_State
     # (our output) and publishes Biofeedback_Control (our input). To avoid a
@@ -135,6 +135,11 @@ def run_pipeline():
     # 'increase' commands are emitted per "second" of log. Wall-clock here
     # keeps both cadences in sync.
     last_live_log_at = 0.0
+    # Freshness of the physiological signal. Commands reach the scene only
+    # while a fresh sample has arrived within REAL_PLUX_WATCHDOG_WARN_SEC;
+    # otherwise the scene holds where it stands. Updated every tick below.
+    last_fresh_at = time.time()
+    signal_lost = False
 
     def _baseline_elapsed_now():
         if state == SessionState.BASELINE and baseline_started_at is not None:
@@ -172,13 +177,14 @@ def run_pipeline():
             live_started_at = None
             live_elapsed_frozen = 0.0
 
-        # Stop DURING baseline (before the 120 s lock): the diagnostic log
-        # contains partial garbage. Truncate-and-reopen so the next attempt
-        # starts clean. (Previously acquisition.py and processing.py each
-        # owned a CSV; both have been merged into diagnostic.csv inside the
-        # session folder, managed by SessionManager.)
+        # Stop DURING baseline (before the 120 s lock). An incomplete
+        # baseline cannot produce thresholds, so nothing it recorded is kept:
+        # samples, diagnostic and Unity audit all return to their launch
+        # state. Previously only diagnostic.csv was reset, so the partial
+        # rows stayed in samples.csv and the next attempt appended to them.
         if new_state == SessionState.IDLE and old_state == SessionState.BASELINE:
-            session.discard_diagnostic_log()
+            session.reset_for_new_baseline()
+            unity.truncate_audit()
 
         # ---- BASELINE on entry: zero everything that's baseline-scoped. ----
         if new_state == SessionState.BASELINE:
@@ -190,6 +196,12 @@ def run_pipeline():
                 fusion.reset()
                 unity.reset()
                 baseline_locked = False
+                # The operator confirmed the replacement on the dashboard.
+                # Discard everything recorded against the old baseline,
+                # including any live run scored against it. Previously the
+                # in-memory state was reset but every file kept appending.
+                session.reset_for_new_baseline()
+                unity.truncate_audit()
             baseline_started_at = time.time()
             baseline_elapsed_frozen = 0.0
             live_started_at = None
@@ -220,6 +232,7 @@ def run_pipeline():
                 unity.reset()
                 if old_state == SessionState.LIVE:
                     unity.send_raw("stop")  # tell Unity the previous live ended
+                unity.truncate_audit()
             live_started_at = None
             live_elapsed_frozen = 0.0
             session.phase = "BASELINE_DONE"
@@ -233,6 +246,7 @@ def run_pipeline():
             # "start". The baseline / thresholds are preserved.
             if old_state == SessionState.STOPPED:
                 session.rotate_session_csv()
+                unity.truncate_audit()
                 fusion.reset()
                 # Re-lock thresholds against the still-valid baseline so
                 # the new live session uses the same calibration.
@@ -294,11 +308,12 @@ def run_pipeline():
             session.discard_diagnostic_log(final=True)
             session.delete_session_folder()
         elif cmd == Command.SHUTDOWN_DISCARD_LIVE:
-            # Keep metadata.json (intake + baseline). Drop the per-tick
-            # outputs that are mostly live-phase data.
-            session.delete_session_csv()
+            # Keep metadata.json (intake + baseline) and the baseline rows.
+            # Drop the live run: its rows, and the Unity audit, which holds
+            # only live-phase commands. This used to delete samples.csv
+            # outright, throwing away the baseline the option keeps.
+            session.discard_live_for_shutdown()
             session.delete_unity_audit_csv()
-            session.discard_diagnostic_log(final=True)
         elif cmd == Command.SHUTDOWN_SAVE_BOTH:
             # Just close handles cleanly; nothing is deleted. The whole
             # session folder stays with all its files. Also write the
@@ -317,11 +332,11 @@ def run_pipeline():
             # File-sentinel poll for launcher Ctrl+C (cross-platform; Windows
             # Popen.terminate is uncatchable so this is the cheapest reliable
             # mechanism). Polled once per second to keep the stat() cost
-            # negligible. Treated as SHUTDOWN_DISCARD_LIVE.
+            # negligible. Treated as SHUTDOWN_SAVE_BOTH: keep everything.
             if (acq.tick_counter % int(Config.PIPELINE_RATE) == 0
                     and os.path.exists(_shutdown_marker_path)):
-                print("[MAIN] Shutdown marker detected; treating as SHUTDOWN_DISCARD_LIVE.")
-                _handle_shutdown(Command.SHUTDOWN_DISCARD_LIVE)
+                print("[MAIN] Shutdown marker detected; keeping everything recorded.")
+                _handle_shutdown(Command.SHUTDOWN_SAVE_BOTH)
                 try:
                     os.remove(_shutdown_marker_path)
                 except OSError:
@@ -332,6 +347,16 @@ def run_pipeline():
                     _handle_shutdown(cmd)
                     shutdown_requested = True
                     break
+                # Never go live on a failed calibration. The dashboard already
+                # withholds the button; this is the backstop for a stale
+                # dashboard or a command that raced the lock.
+                if (cmd == Command.LIVE_START
+                        and state in (SessionState.BASELINE_DONE,
+                                      SessionState.STOPPED)
+                        and not fusion.calibration_ok):
+                    print("[MAIN] Live start refused: the baseline calibration "
+                          "is invalid. Restart the baseline.")
+                    continue
                 new_state = apply_command(state, cmd)
                 _handle_transition(state, new_state)
                 state = new_state
@@ -348,6 +373,23 @@ def run_pipeline():
             if raw_vector is None:
                 time.sleep(tick_duration)
                 continue
+
+            # Signal freshness. Acquisition labels a tick NEW_DATA only when a
+            # valid sample actually arrived; held and rejected ticks do not
+            # count. After REAL_PLUX_WATCHDOG_WARN_SEC without one, the values
+            # in hand are stale and no command may be derived from them.
+            if acq.last_status == "NEW_DATA":
+                last_fresh_at = time.time()
+            _stale_for = time.time() - last_fresh_at
+            if _stale_for > Config.REAL_PLUX_WATCHDOG_WARN_SEC and not signal_lost:
+                signal_lost = True
+                print(f"[MAIN] Signal lost: no fresh sample for "
+                      f"{_stale_for:.1f}s. Commands to the scene are "
+                      f"withheld until samples resume.")
+            elif _stale_for <= Config.REAL_PLUX_WATCHDOG_WARN_SEC and signal_lost:
+                signal_lost = False
+                print("[MAIN] Signal restored; commands to the scene resume.")
+
             session.record_raw_sample(raw_vector[0], raw_vector[1], raw_vector[2])
 
             # ---- Phase C: smooth (EMA needs continuity) ----
@@ -461,8 +503,31 @@ def run_pipeline():
                         source_label=source_label,
                     )
 
+                    # Judge the calibration before announcing the lock, so the
+                    # verdict is on disk by the time the dashboard sees the new
+                    # state and looks for it.
+                    session.set_baseline_validity(
+                        fusion.calibration_ok,
+                        fusion.calibration_issues,
+                        fusion.calibration_warnings,
+                    )
+                    if not fusion.calibration_ok:
+                        print("\n" + "!" * 60)
+                        print("!! [MAIN] BASELINE INVALID - live session blocked:")
+                        for _msg in fusion.calibration_issues:
+                            print(f"!!   {_msg}")
+                        print("!! Restart the baseline.")
+                        print("!" * 60 + "\n")
+                    for _msg in fusion.calibration_warnings:
+                        print(f"[MAIN] NOTE: {_msg}")
+
+                    # Route the automatic lock through the same handler as an
+                    # operator-driven transition. It used to assign the state
+                    # directly, which skipped freezing the baseline clock (the
+                    # dashboard then read 00:00 / 02:00 after a finished
+                    # baseline) and left the phase label on later rows stale.
+                    _handle_transition(state, SessionState.BASELINE_DONE)
                     state = SessionState.BASELINE_DONE
-                    print("[STATE] BASELINE -> BASELINE_DONE (operator: click Start on the Live panel)")
 
             elif state == SessionState.LIVE:
                 # Full pipeline only when LIVE. Phasic EDA is sourced from
@@ -476,8 +541,12 @@ def run_pipeline():
                 s_t, state_label, dashboard = fusion.evaluate_state(s_inst)
                 session.record_stress_metric(s_inst, s_t, state_label, dashboard)
                 # Pass s_t through so the audit log can show why each
-                # increase/decrease was emitted.
-                unity.send_state(state_label, s_t=s_t)
+                # increase/decrease was emitted. Nothing is sent while the
+                # signal is stale: a composite computed from held values is
+                # not a measurement, and acting on it could escalate the
+                # scene on physiology that has stopped updating.
+                if not signal_lost:
+                    unity.send_state(state_label, s_t=s_t)
 
                 # Human-readable LIVE line, gated on WALL CLOCK (not tick
                 # modulo) so the cadence matches UNITY_COMMAND_INTERVAL_SEC
@@ -540,6 +609,7 @@ def run_pipeline():
                 avg_eda, avg_hr, avg_hrv,
                 fusion.thresh_mild, fusion.thresh_high,
                 baseline_locked=baseline_locked,
+                baseline_invalid=(baseline_locked and not fusion.calibration_ok),
                 elapsed_baseline_sec=_baseline_elapsed_now(),
                 qa_invalid=acq.invalid_sample_count,
                 qa_out_of_range=acq.out_of_range_count,

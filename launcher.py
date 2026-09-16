@@ -41,6 +41,100 @@ import os
 from pathlib import Path
 
 
+def preflight_checks(src_dir):
+    """Verify a signal source is available BEFORE anything is created.
+
+    Runs ahead of the intake dialogue on purpose. Collecting participant
+    details and creating a session directory only to discover there is no
+    signal source wastes the operator's time and leaves an empty folder
+    behind that someone later has to work out the meaning of.
+
+    Returns 0 to proceed, or a non-zero exit code.
+    """
+    # ============================================
+    # PRE-FLIGHT CHECKS
+    # ============================================
+    # Fail loudly here, BEFORE spawning subprocesses, so a misconfiguration
+    # surfaces in the operator's terminal instead of crashing silently in
+    # the streamer subprocess (its error output gets drowned out by LSL
+    # initialisation chatter, and main.py then hangs forever in
+    # `resolve_stream("Biofeedback_Raw")` waiting for an outlet that will
+    # never appear).
+    sys.path.insert(0, src_dir)  # also lets us import config below
+    from config import Config
+
+    project_root = os.path.dirname(os.path.abspath(__file__))
+    data_dir = os.path.join(project_root, 'data')
+
+    if Config.DATA_SOURCE in ('mock', 'mock2'):
+        mock_path = os.path.join(project_root, Config.MOCK_DATA_FILE)
+        if not os.path.isfile(mock_path):
+            print("=" * 70)
+            print("[LAUNCHER] CONFIGURATION ERROR - cannot start.")
+            print("=" * 70)
+            print(f"  Config.MOCK_DATA_FILE = {Config.MOCK_DATA_FILE!r}")
+            print(f"  Resolves to:           {mock_path}")
+            print(f"  This file does not exist.")
+            print()
+            print(f"  Available files in data/:")
+            data_files = []
+            for root, _dirs, files in os.walk(data_dir):
+                for fn in files:
+                    if fn.endswith('.txt'):
+                        rel = os.path.relpath(os.path.join(root, fn),
+                                              project_root)
+                        data_files.append(rel.replace(os.sep, '/'))
+            if data_files:
+                for fn in sorted(data_files):
+                    print(f"    {fn}")
+            else:
+                print(f"    (no .txt recordings found under data/)")
+            print()
+            print(f"  Fix: edit src/config.py and set MOCK_DATA_FILE to one of")
+            print(f"  the paths above (with a leading 'data/' and the .txt extension).")
+            print("=" * 70)
+            return 1
+
+    if Config.DATA_SOURCE in ('real_plux', 'real_plux2'):
+        # The data source resolves the upstream OpenSignals stream with a
+        # blocking call that has no timeout. If OpenSignals is not
+        # streaming, the subprocess waits forever and the operator sees a
+        # window that simply never does anything. Check here with a short
+        # timeout so the reason is stated instead of guessed at.
+        print(f"[LAUNCHER] Looking for the OpenSignals LSL stream "
+              f"('{Config.PLUX_LSL_NAME}')...")
+        try:
+            from pylsl import resolve_byprop
+            found = resolve_byprop('name', Config.PLUX_LSL_NAME, timeout=5.0)
+        except Exception as e:
+            print(f"[LAUNCHER] WARN: could not probe for LSL streams: {e}")
+            found = None
+
+        if not found:
+            print("=" * 70)
+            print("[LAUNCHER] NO SIGNAL SOURCE - cannot start.")
+            print("=" * 70)
+            print(f"  DATA_SOURCE is '{Config.DATA_SOURCE}', which needs a live")
+            print(f"  PLUX device streaming through OpenSignals. No stream named")
+            print(f"  '{Config.PLUX_LSL_NAME}' was found after 5 seconds.")
+            print()
+            print("  For a real session, check in order:")
+            print("    1. The PLUX hub is powered on and paired over Bluetooth.")
+            print("    2. OpenSignals is open and actively acquiring (not idle).")
+            print("    3. Lab Streaming Layer is ENABLED in OpenSignals:")
+            print("       Settings -> Integrations -> Lab Streaming Layer.")
+            print()
+            print("  To test WITHOUT the device, replay a recording instead:")
+            print("       run_mock.bat")
+            print("  which runs the same pipeline against a saved capture.")
+            print("  It sets an environment variable and does not modify")
+            print("  src/config.py, so real-device mode stays untouched.")
+            print("=" * 70)
+            return 1
+        print(f"[LAUNCHER] Found it. Proceeding.")
+    return 0
+
+
 def launch_system():
     """Launch the complete biofeedback system."""
 
@@ -56,6 +150,14 @@ def launch_system():
     # only get here with a complete, valid dict.
     src_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'src')
     sys.path.insert(0, src_dir)
+
+    # Verify a signal source exists before asking for anything. Failing
+    # after intake would leave an empty session directory behind and waste
+    # the operator's time with a participant already seated.
+    rc = preflight_checks(src_dir)
+    if rc != 0:
+        return rc
+
     from patient_intake import collect_patient_info
 
     patient = collect_patient_info()
@@ -87,17 +189,15 @@ def launch_system():
             out = out.replace('__', '_')
         return out.strip('_')
 
-    _fn = _safe(patient.get('first_name', 'X')) or 'X'
-    _ln = _safe(patient.get('last_name', ''))
+    # Folder name is built from the participant ID only. Names were used
+    # here previously; they were removed so a directory listing cannot
+    # identify anyone.
+    _pid = _safe(patient.get('patient_id', 'X')) or 'X'
     _sn = patient.get('session_number', 1)
     _date = _safe(patient.get('session_date', _dt.now().strftime('%Y-%m-%d')))
     _gd = _safe(patient.get('gender', '')) or 'X'
 
-    # Build name. If last_name is empty, skip it cleanly (no double underscore).
-    _parts = [_fn]
-    if _ln:
-        _parts.append(_ln)
-    _parts.extend([f"Session{_sn}", _date, _gd])
+    _parts = [_pid, f"Session{_sn}", _date, _gd]
     session_folder_name = "_".join(_parts)
 
     # Collision safety: same patient + same session number + same day = same
@@ -124,51 +224,11 @@ def launch_system():
     # it now points at the in-folder metadata.json instead of a flat file.
     patient_json_path = metadata_path
 
-    patient_name = patient['first_name']
     patient_id = patient['patient_id']
-    patient_info = f"{patient['first_name']}_{patient['last_name']}_{patient_id}"
-    print(f"[LAUNCHER] Patient: {patient_info}")
+    print(f"[LAUNCHER] Participant: {patient_id}")
     print(f"[LAUNCHER] Session {patient['session_number']} on {patient['session_date']}")
     print(f"[LAUNCHER] Intake record: {os.path.basename(patient_json_path)}\n")
 
-    # ============================================
-    # PRE-FLIGHT CHECKS
-    # ============================================
-    # Fail loudly here, BEFORE spawning subprocesses, so a misconfiguration
-    # surfaces in the operator's terminal instead of crashing silently in
-    # the streamer subprocess (its error output gets drowned out by LSL
-    # initialisation chatter, and main.py then hangs forever in
-    # `resolve_stream("Biofeedback_Raw")` waiting for an outlet that will
-    # never appear).
-    sys.path.insert(0, src_dir)  # also lets us import config below
-    from config import Config
-
-    if Config.DATA_SOURCE in ('mock', 'mock2'):
-        mock_path = os.path.join(project_root, Config.MOCK_DATA_FILE)
-        if not os.path.isfile(mock_path):
-            print("=" * 70)
-            print("[LAUNCHER] CONFIGURATION ERROR — cannot start.")
-            print("=" * 70)
-            print(f"  Config.MOCK_DATA_FILE = {Config.MOCK_DATA_FILE!r}")
-            print(f"  Resolves to:           {mock_path}")
-            print(f"  This file does not exist.")
-            print()
-            print(f"  Available files in data/:")
-            data_files = sorted(
-                f for f in os.listdir(data_dir)
-                if os.path.isfile(os.path.join(data_dir, f))
-                and f.endswith('.txt')
-            )
-            if data_files:
-                for fn in data_files:
-                    print(f"    data/{fn}")
-            else:
-                print(f"    (no .txt recordings found in data/)")
-            print()
-            print(f"  Fix: edit src/config.py and set MOCK_DATA_FILE to one of")
-            print(f"  the paths above (with a leading 'data/' and the .txt extension).")
-            print("=" * 70)
-            return 1
 
     # src_dir is already on sys.path (set above for the intake import).
     config_file = os.path.join(src_dir, 'config.py')
@@ -183,10 +243,11 @@ def launch_system():
     }
     current_source = "UNKNOWN"
     try:
-        import re
-        with open(config_file, 'r') as f:
-            content = f.read()
-        m = re.search(r"^\s*DATA_SOURCE\s*=\s*'([^']+)'", content, re.MULTILINE)
+        # Ask the loaded Config rather than re-parsing config.py: the value
+        # can come from an environment override, in which case the source
+        # text no longer carries a literal to match.
+        from config import Config as _Cfg
+        m = type('M', (), {'group': staticmethod(lambda _i: _Cfg.DATA_SOURCE)})
         if m:
             current_source = _LABELS.get(m.group(1), f"UNKNOWN ({m.group(1)})")
     except Exception:
@@ -200,7 +261,7 @@ def launch_system():
     
     try:
         # 1. Data Acquisition (Mock or Real Hardware)
-        print("[LAUNCHER] ① Starting Data Acquisition Layer...")
+        print("[LAUNCHER] (1) Starting Data Acquisition Layer...")
         print("[LAUNCHER]    (Initializing data source...)\n")
         p_streamer = subprocess.Popen(
             [sys.executable, "streamer.py"], 
@@ -212,18 +273,18 @@ def launch_system():
         
         # 2. Processing Pipeline
         print("[LAUNCHER] (2) Starting signal processing pipeline...")
-        print(f"[LAUNCHER]     Patient: {patient_info}")
+        print(f"[LAUNCHER]     Participant: {patient_id}")
         print("[LAUNCHER]     The pipeline will wait for you to click")
         print("[LAUNCHER]     'Start Baseline' on the dashboard.\n")
         
         # Pass patient info to subprocesses. SESSION_FOLDER is the canonical
         # path every subprocess writes inside. The PATIENT_INTAKE_JSON path
         # is kept for backwards compat (now points at metadata.json inside
-        # the session folder); the legacy NAME/ID env vars are also kept.
+        # the session folder); PATIENT_ID is kept. PATIENT_NAME was removed
+        # along with name collection.
         env = os.environ.copy()
         env['SESSION_FOLDER'] = session_folder
         env['PATIENT_INTAKE_JSON'] = patient_json_path
-        env['PATIENT_NAME'] = patient_name
         env['PATIENT_ID'] = patient_id
         
         p_main = subprocess.Popen(
@@ -247,7 +308,7 @@ def launch_system():
         processes.append(p_dash)
 
         print("=" * 60)
-        print(f"  SYSTEM ONLINE - Patient: {patient_info}")
+        print(f"  SYSTEM ONLINE - Participant: {patient_id}")
         print("=" * 60)
         print("\nDashboard is open. Click 'Start Baseline' to begin the 120-second")
         print("calibration; once baseline finishes, click 'Start Live Session'.")
@@ -328,3 +389,19 @@ def launch_system():
 
 if __name__ == "__main__":
     exit_code = launch_system()
+
+    # Hold the window open on failure. Without this the console closes the
+    # instant the process ends and the operator never reads the reason,
+    # which is exactly what happened when the launcher started exiting
+    # cleanly on a missing signal source instead of hanging. Relying on the
+    # .bat wrapper to pause is not enough: it only pauses on a non-zero
+    # exit code, and the exit code was never propagated (see below).
+    if exit_code != 0:
+        try:
+            input("\nPress Enter to close this window...")
+        except (EOFError, KeyboardInterrupt):
+            pass
+
+    # Propagate the code. This was previously assigned and discarded, so
+    # every run reported success and the wrapper's error branch was dead.
+    sys.exit(exit_code)

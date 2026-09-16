@@ -1,131 +1,145 @@
-# Biofeedback Acrophobia Therapy Pipeline
+# Biofeedback VR Exposure Framework
 
-Real-time biofeedback system for VR height-exposure therapy.
+Real-time biofeedback engine for VR exposure therapy across multiple
+phobia scenarios. Reads ECG and EDA from a PLUX biosignalsplux hub,
+computes a personalised stress index, and drives whichever Unity VR
+scene is connected — acrophobia (heights), arachnophobia (spiders),
+fear of public speaking, or a future scene the same infrastructure
+supports without changes.
 
-Three physiological signals from a PLUX biosignalsplux hub —
-electrodermal activity (EDA), heart rate (HR), and heart-rate
-variability (RMSSD) — are fused into a single stress index. The Unity
-VR scene reads that index and adjusts the balloon altitude in real
-time: calm → exposure advances, stressed → hold, ultra-stressed →
-back off. The participant cannot move the balloon directly. Only
-their own autonomic state can.
-
-This repository is the Python side: signal acquisition, the stress-
-fusion math, the operator dashboard, session logging, and the UDP
-bridge to Unity. The VR scene itself (Unity, Oculus Quest) is a
-separate project.
+This repository is the Python server side: signal acquisition, the
+stress-fusion math, the operator dashboard, session logging, the UDP
+bridge to Unity, and the JSON telemetry receiver that lets any Unity
+scene report scene-specific data back into the recording. Each phobia
+scene is a separate Unity project maintained elsewhere.
 
 ---
 
 ## Documentation
 
-| If you want to know... | Read |
+| If you want to... | Read |
 |---|---|
-| Exact formulas, both backends, comparison tables | [METHODS.md](METHODS.md) |
-| Day-to-day operating procedure | [HOW_TO_RUN.md](HOW_TO_RUN.md) |
-| Lab hookup checklist (printable) | [LAB_CHECKLIST.md](LAB_CHECKLIST.md) |
-| Glossary of terms (R-peak, RMSSD, EDA, S_t, ...) | [CONCEPTS.md](CONCEPTS.md) |
-| End-to-end data flow, layer by layer | [DATA_FLOW.md](DATA_FLOW.md) |
-| Output files and their columns | [OUTPUTS.md](OUTPUTS.md) |
-| Failure modes and how the code handles them | [CODE_AUDIT.md](CODE_AUDIT.md) |
-| Mock-mode replay of saved OpenSignals files | [MOCK_MODE.md](MOCK_MODE.md) |
+| Understand how everything works, section by section | [DOCUMENTATION.md](DOCUMENTATION.md) |
+| Read the paper-draft methodology | [METHODOLOGY.md](METHODOLOGY.md) (or [METHODOLOGY.docx](METHODOLOGY.docx) if you don't use LaTeX) |
+| Set up the lab and attach electrodes | [LAB_CHECKLIST.md](LAB_CHECKLIST.md) |
+| Run a session day-to-day | [HOW_TO_RUN.md](HOW_TO_RUN.md) |
+| Send telemetry from a Unity scene | [UNITY_TELEMETRY_CONTRACT.md](UNITY_TELEMETRY_CONTRACT.md) |
+| Know which VR scenes and fields are registered | [SCENARIOS.md](SCENARIOS.md) |
+| See what's on the to-do list | [FUTURE_CHANGES.md](FUTURE_CHANGES.md) |
+| Grab the reference PDFs cited in the paper | [references/DOWNLOAD_MANIFEST.md](references/DOWNLOAD_MANIFEST.md) |
+
+Start with `DOCUMENTATION.md` — it has the full concepts glossary,
+data flow, output-file schemas, per-participant tuning guide, error
+handling reference, and a file-by-file guide to the codebase.
 
 ---
 
 ## Quick start
 
-```cmd
+On the lab workstation with the PLUX hub already paired and
+OpenSignals running:
+
+```
 run.bat
 ```
 
-That launches the patient intake dialog. Fill in name, ID, gender, session
-number. The launcher then spawns three subprocesses (streamer, main,
-dashboard) and the dashboard opens.
+The launcher shows the patient intake dialog. Fill it in, click Start.
+Three subprocesses spawn (streamer, main pipeline, dashboard) and the
+operator dashboard opens.
 
 If `run.bat` errors out, see [HOW_TO_RUN.md](HOW_TO_RUN.md) for the
-manual `python launcher.py` path and dependency setup.
+manual `python launcher.py` path and dependency troubleshooting.
 
 ---
 
-## Configuration in one screen
+## What runs where
 
-Everything tunable lives in `src/config.py`. The most important flags:
-
-```python
-DATA_SOURCE             = 'real_plux'      # 'mock' | 'real_plux'
-HR_HRV_BACKEND          = 'neurokit'       # 'neurokit' | 'bsnb'
-EDA_BACKEND             = 'neurokit'       # 'neurokit' | 'bsnb'
-LSL_VALUES_PRECONVERTED = True             # OpenSignals LSL sends µS / mV directly
-
-PIPELINE_RATE           = 10.0             # Hz, internal tick rate
-BASELINE_SEC            = 120              # baseline window length
-
-WEIGHT_EDA              = 0.5              # Moldoveanu 2023 weights
-WEIGHT_HRV              = 0.3
-WEIGHT_HR               = 0.2
-THRESH_MILD_K           = 1.28             # 90th percentile z-score
-THRESH_HIGH_K           = 2.33             # 99th percentile z-score
-```
-
-Every formula behind those flags is in [METHODS.md](METHODS.md).
-
----
-
-## How the pieces fit together
-
-Four programs talk over LSL and UDP:
+Four programs cooperate on the workstation over LSL and UDP:
 
 ```
-streamer.py    publishes raw signals on LSL stream "OpenSignals"
-     |
-     v
-main.py        subscribes; runs the math; publishes "Biofeedback_State"
-     |          for the dashboard; sends start/stop/increase/decrease
-     |          to Unity over UDP on port 5005
-     |
-     v
-dashboard.py   draws live charts; publishes "Biofeedback_Control"
-               with operator button clicks
+OpenSignals (vendor)  --LSL-->  streamer.py  --LSL-->  main.py
+                                                          |
+                                              +-----------+-----------+
+                                              |                       |
+                                              v                       v
+                                         dashboard.py           Unity VR scene
+                                              ^                       |
+                                              |                       |
+                                              +---- JSON on UDP <-----+
 ```
+
+`streamer.py` reads the raw PLUX stream via OpenSignals. `main.py`
+runs the 10 Hz pipeline that turns raw signals into the stress index
+and sends `start` / `stop` / `increase` / `decrease` commands to Unity.
+`dashboard.py` is the operator's live view. Unity ships back JSON
+telemetry per scene so the recording captures whatever fields that
+scene reports (balloon height, spider count, audience members
+looking, etc).
 
 A fifth script, `session_review.py`, is offline. It replays any saved
-session for post-hoc analysis and can dump a PDF/PNG for the patient
-file.
+session and produces a review figure for the patient file.
 
 ---
 
-## Output
+## Session output
 
 Each session creates one folder under `data/`:
 
 ```
-data/<first>_<last>_Session<n>_<YYYY-MM-DD>_<gender>/
-    ├── metadata.json     intake + frozen baseline + thresholds
-    ├── samples.csv       per-second clinical record
-    ├── diagnostic.csv    forensic raw + acquisition status per tick
-    └── unity_udp.csv     one row per UDP packet sent to Unity
+data/<session folder>/
+    metadata.json    intake, frozen baseline, thresholds, scenario
+    samples.csv      per-second clinical record (dynamic columns per scenario)
+    diagnostic.csv   forensic per-tick raw signal trace
+    unity_udp.csv    audit log of every UDP packet sent to Unity
 ```
 
-`Config.SAMPLES_CSV_RATE_HZ` controls disk-write density.
+Nothing in `data/` is committed to git. Each machine keeps its own
+recordings. Full schema in `DOCUMENTATION.md` §6.
+
+---
+
+## Configuration highlights
+
+Everything tunable lives in `src/config.py`. The flags you touch
+most often:
+
+```python
+DATA_SOURCE             = 'real_plux'     # 'mock' | 'real_plux'
+HR_HRV_BACKEND          = 'neurokit'      # 'neurokit' | 'bsnb'
+EDA_BACKEND             = 'neurokit'      # 'neurokit' | 'bsnb'
+
+PIPELINE_RATE           = 10.0            # Hz, internal tick rate
+BASELINE_SEC            = 120             # baseline window length
+
+WEIGHT_EDA              = 0.5             # Moldoveanu 2023 weights
+WEIGHT_HRV              = 0.3
+WEIGHT_HR               = 0.2
+THRESH_MILD_K           = 1.28            # 90th-percentile z
+THRESH_HIGH_K           = 2.33            # 99th-percentile z
+S_T_SMOOTH_SEC          = 3.0             # rolling mean on stress index
+```
+
+Per-participant tuning guide and every other knob is in
+`DOCUMENTATION.md` §7.
 
 ---
 
 ## Installation
 
-Python 3.10–3.13, plus the packages in `requirements.txt`
+Python 3.10 or newer, plus the packages listed in `requirements.txt`
 (pylsl, numpy, scipy, PyQt5, pyqtgraph, matplotlib, pandas, neurokit2,
-python-docx, biosignalsnotebooks, openpyxl, pillow).
+biosignalsnotebooks, python-docx, openpyxl, pillow).
 
-```cmd
+```
 python -m venv env
 env\Scripts\activate
 pip install -r requirements.txt
 ```
 
-If `biosignalsnotebooks` fails to install transitive deps, install with
-`--no-deps` and add `bokeh h5py` manually:
+If `biosignalsnotebooks` fails to install its transitive dependencies,
+install without them and add `bokeh` and `h5py` manually:
 
-```cmd
+```
 pip install --no-deps biosignalsnotebooks bokeh h5py
 ```
 
@@ -133,9 +147,14 @@ pip install --no-deps biosignalsnotebooks bokeh h5py
 
 ## Status
 
-The math pipeline runs end-to-end against live PLUX hardware with both
-backends switchable. Sessions are recording correctly to disk, the
-operator dashboard shows real signals, the Unity balloon responds to
-state changes, and the post-hoc analysis tools verify the math on saved
-recordings. See [METHODS.md](METHODS.md) §7 for the verified
-agreement metrics between the two backends.
+The pipeline runs end-to-end against live PLUX hardware. Both
+extraction backends work and can be swapped with one config flag for
+A/B validation. The multi-scenario telemetry contract is in place,
+tested with the Python `scripts/telemetry_simulator.py` harness.
+Real participant recordings are landing correctly to disk. Backend
+agreement on the clean archive session sits at r ≈ 0.90 for the
+composite stress index; details in `METHODOLOGY.md` §10.
+
+Known open items are tracked in `FUTURE_CHANGES.md`. The main ones
+today: GDPR name/lastname removal from the recording, a few small
+dashboard visual cleanups, and a stream-loss exit handler.
