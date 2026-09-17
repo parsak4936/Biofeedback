@@ -264,7 +264,11 @@ def run_pipeline():
             session.phase = "LIVE"
             # Tell Unity we're live regardless of which prior state we came
             # from (BASELINE_DONE on first run, STOPPED on subsequent ones).
+            # The session number chosen at intake goes first, so the spider
+            # scene runs that session without anyone choosing it in Unity.
+            # Scenes that only know start/stop/increase/decrease ignore it.
             if old_state in (SessionState.BASELINE_DONE, SessionState.STOPPED):
+                unity.send_raw(f"session {session.patient.get('session_number', 1)}")
                 unity.send_raw("start")
 
         # ---- STOPPED on entry: freeze the live clock, save summary. ----
